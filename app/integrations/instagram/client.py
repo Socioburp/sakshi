@@ -128,8 +128,12 @@ async def get_profile(access_token: str) -> IgProfile:
         log.info("ig_mock", fn="get_profile")
         p = fixtures.MOCK_PROFILE
         return IgProfile(
-            p["user_id"], p["username"], p["name"], p["account_type"],
-            p["followers_count"], p["media_count"],
+            p["user_id"],
+            p["username"],
+            p["name"],
+            p["account_type"],
+            p["followers_count"],
+            p["media_count"],
         )
 
     async with _client() as c:
@@ -172,8 +176,12 @@ async def create_media_container(
     ignored, which is worse than an error because the post ships captionless.
     """
     if settings.instagram_mock:
-        log.info("ig_mock", fn="create_media_container", image_url=image_url,
-                 is_carousel_item=is_carousel_item)
+        log.info(
+            "ig_mock",
+            fn="create_media_container",
+            image_url=image_url,
+            is_carousel_item=is_carousel_item,
+        )
         if is_carousel_item:
             return fixtures.mock_child_container_id()
         return fixtures.MOCK_CONTAINER_ID
@@ -220,9 +228,7 @@ async def create_carousel_container(
         return r.json()["id"]
 
 
-async def wait_for_container(
-    *, container_id: str, access_token: str, timeout_s: int = 60
-) -> str:
+async def wait_for_container(*, container_id: str, access_token: str, timeout_s: int = 60) -> str:
     """Poll status_code until FINISHED. Meta rejects publish on IN_PROGRESS."""
     if settings.instagram_mock:
         return "FINISHED"
