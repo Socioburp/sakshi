@@ -26,8 +26,9 @@ class ToolContext:
     # which is useless precisely when you are debugging a bad creative.
     grounding: Grounded = field(default_factory=Grounded)
 
-    async def say(self, text: str, buttons: list[Button] | None = None) -> None:
-        await send.send_text(
+    async def say(self, text: str, buttons: list[Button] | None = None) -> bool:
+        """True if the provider accepted the message. Callers must not assume."""
+        return await send.send_text(
             account_id=self.account_id,
             session_id=self.session_id,
             wa_id=self.wa_id,
@@ -35,12 +36,14 @@ class ToolContext:
             buttons=buttons,
         )
 
-    async def show(self, image_url: str, caption: str = "") -> None:
-        await send.send_image(
+    async def show(self, image_url: str, caption: str = "") -> bool:
+        ok = await send.send_image(
             account_id=self.account_id,
             session_id=self.session_id,
             wa_id=self.wa_id,
             image_url=image_url,
             caption=caption,
         )
-        self.sent_media.append(image_url)
+        if ok:
+            self.sent_media.append(image_url)
+        return ok

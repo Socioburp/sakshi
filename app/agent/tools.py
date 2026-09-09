@@ -132,8 +132,7 @@ TOOLS: list[dict[str, Any]] = [
                 "slide_position": {
                     "type": "integer",
                     "description": (
-                        "Carousel only: which slide's picture to redo. "
-                        "Omit for a single post."
+                        "Carousel only: which slide's picture to redo. Omit for a single post."
                     ),
                 },
             },
@@ -186,8 +185,14 @@ TOOLS: list[dict[str, Any]] = [
                 "kind": {
                     "type": "string",
                     "enum": [
-                        "product", "style_anchor", "rejection", "past_creative",
-                        "feedback", "campaign", "fact", "note",
+                        "product",
+                        "style_anchor",
+                        "rejection",
+                        "past_creative",
+                        "feedback",
+                        "campaign",
+                        "fact",
+                        "note",
                     ],
                 },
                 "content": {"type": "string"},
@@ -317,8 +322,16 @@ async def _regenerate_image(ctx: ToolContext, args: dict) -> dict:
 
 async def _update_brand(ctx: ToolContext, args: dict) -> dict:
     settable = {
-        "name", "category", "tagline", "description", "target_audience", "tone",
-        "languages", "never_say", "always_say", "palette",
+        "name",
+        "category",
+        "tagline",
+        "description",
+        "target_audience",
+        "tone",
+        "languages",
+        "never_say",
+        "always_say",
+        "palette",
     }
     with session_scope() as db:
         brand = db.get(Brand, ctx.brand_id)
@@ -339,9 +352,7 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
 
 async def _remember(ctx: ToolContext, args: dict) -> dict:
     with session_scope() as db:
-        memory_embed.remember(
-            db, brand_id=ctx.brand_id, kind=args["kind"], content=args["content"]
-        )
+        memory_embed.remember(db, brand_id=ctx.brand_id, kind=args["kind"], content=args["content"])
     return {"ok": True, "stored": args["content"][:120]}
 
 
@@ -353,8 +364,7 @@ async def _recall(ctx: ToolContext, args: dict) -> dict:
         return {
             "ok": True,
             "results": [
-                {"kind": m.kind, "content": m.content, "similarity": round(s, 3)}
-                for m, s in hits
+                {"kind": m.kind, "content": m.content, "similarity": round(s, 3)} for m, s in hits
             ],
         }
 
@@ -387,7 +397,8 @@ async def _request_approval(ctx: ToolContext, args: dict) -> dict:
         text,
         buttons=[
             Button(id=f"approve:{brief_id}", title="Post to Instagram"),
-            Button(id=f"revise:{brief_id}", title="Change something"),
+            Button(id=f"revise:{brief_id}", title="Change the words"),
+            Button(id=f"redo:{brief_id}", title="Change the picture"),
         ],
     )
     return {
@@ -395,7 +406,9 @@ async def _request_approval(ctx: ToolContext, args: dict) -> dict:
         "awaiting": "client_tap",
         "note": (
             "Buttons sent. Stop here and wait -- do not call publish_to_instagram until "
-            "they have actually tapped. Say nothing further this turn."
+            "they have actually tapped. Say nothing further this turn. When they tap "
+            "'Change the words' use revise_creative (free); 'Change the picture' means "
+            "regenerate_image (1 credit) -- confirm the cost in one line first."
         ),
     }
 
@@ -544,8 +557,19 @@ async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
         return {
             "ok": True,
             "assets": [
-                {"id": str(a.id), "kind": a.kind, "label": a.label} for a in rows
+                {
+                    "id": str(a.id),
+                    "kind": a.kind,
+                    "label": a.label,
+                    "size": f"{a.width}x{a.height}" if a.width and a.height else None,
+                }
+                for a in rows
             ],
+            "note": (
+                "A photo with no label was sent without a caption. When a post is about "
+                "a product they have a photo of, put that id in "
+                "visual_direction.reference_asset_id -- the real photograph is used, free."
+            ),
         }
 
 

@@ -190,9 +190,7 @@ def _brand_block(brand: Any) -> str:
 
     palette = val("palette", {})
     if palette:
-        lines.append(
-            f"Colours (measured from their actual logo, use these): {palette}"
-        )
+        lines.append(f"Colours (measured from their actual logo, use these): {palette}")
     if val("logo_notes"):
         lines.append(f"Their logo: {val('logo_notes')}")
     if val("logo_url"):
