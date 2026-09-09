@@ -22,11 +22,11 @@ log = get_logger(__name__)
 
 # What each action costs the customer, in credits.
 COST = {
-    "generate_creative": 1,   # per image call -- a 5-slide carousel costs 5
-    "revise_copy": 0,         # re-composite only: no image call, so free
+    "generate_creative": 1,  # per image call -- a 5-slide carousel costs 5
+    "revise_copy": 0,  # re-composite only: no image call, so free
     "regenerate_image": 1,
     "publish_instagram": 0,
-    "reference_asset": 0,     # the owner's own photo: no generation to pay for
+    "reference_asset": 0,  # the owner's own photo: no generation to pay for
 }
 
 
@@ -129,5 +129,6 @@ def refund(
 def topup(
     db: Session, *, account_id: uuid.UUID, credits: int, reason: str, idempotency_key: str
 ) -> int:
-    return refund(db, account_id=account_id, amount=credits, reason=reason,
-                  idempotency_key=idempotency_key)
+    return refund(
+        db, account_id=account_id, amount=credits, reason=reason, idempotency_key=idempotency_key
+    )
