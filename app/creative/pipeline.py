@@ -128,6 +128,7 @@ async def generate(
                 slide_position=slide.position,
                 background_key=reuse.get(slide.position, (None, None))[0],
                 background_url=reuse.get(slide.position, (None, None))[1],
+                billed=slide.position in billable_positions,
                 status="generating",
                 expires_at=datetime.now(UTC) + timedelta(days=DRAFT_TTL_DAYS),
             )
@@ -387,6 +388,46 @@ async def regenerate_image(
                     if c.slide_position != slide_position and c.background_key:
                         reuse[c.slide_position] = (c.background_key, c.background_url or "")
     return await generate(ctx, brief, reuse=reuse)
+
+
+# A creative still "generating" this long after it was created has lost its
+# worker. Generation is measured in seconds; this is minutes.
+STUCK_AFTER = timedelta(minutes=10)
+
+
+def reap_stuck_creatives(now: datetime | None = None) -> int:
+    """Fail creatives a crash left mid-flight, refunding exactly the billed ones.
+
+    Charging happens before generation, so a SIGKILL during compose used to
+    leave the owner with a debit, a row that says "generating" forever, and no
+    way to learn either. Idempotent: the refund key is the creative id.
+    """
+    now = now or datetime.now(UTC)
+    failed = 0
+    with session_scope() as db:
+        rows = db.scalars(
+            select(Creative)
+            .where(
+                Creative.status.in_(("generating", "composing")),
+                Creative.created_at < now - STUCK_AFTER,
+            )
+            .limit(200)
+        ).all()
+        for c in rows:
+            c.status, c.error = "failed", "worker lost mid-generation"
+            failed += 1
+            if c.billed:
+                brief = db.get(Brief, c.brief_id)
+                credits.refund(
+                    db,
+                    account_id=brief.account_id,
+                    amount=credits.cost_of("generate_creative"),
+                    reason="stuck_creative",
+                    idempotency_key=f"refund:stuck:{c.id}",
+                )
+    if failed:
+        log.warning("creatives_reaped", failed=failed)
+    return failed
 
 
 # --------------------------------------------------------------------------- #
