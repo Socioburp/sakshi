@@ -72,7 +72,8 @@ templates/creative/        centered_overlay | lower_third | split_card
 docs/brief_schema.json     the canonical brief contract
 scripts/
   stt_bakeoff.py           scores product-name recall, not WER
-  milestone1_smoke.py      the whole path, every vendor stubbed
+  journey_smoke.py         the whole path, every vendor stubbed
+  creative_preview.py      every template over a busy background, for design QA
 ```
 
 ## Run it
@@ -86,7 +87,9 @@ make worker                  # in another shell
 ```
 
 With `WA_PROVIDER=mock`, `STT_PROVIDER=mock` and `IMAGEGEN_PROVIDER=mock` the
-whole product runs with no vendor accounts at all:
+whole product runs with no vendor accounts at all. It still needs a Postgres
+with the `vector` extension -- `DATABASE_URL` defaults to a local one -- and
+`alembic upgrade head` run against it first. Redis is optional for the smoke:
 
 ```bash
 make smoke     # the full client journey; writes out/journey_*.png
