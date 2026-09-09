@@ -1,0 +1,45 @@
+# Keep the build context small and keep secrets out of the image.
+
+# ---- secrets (the important line) ----------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- vcs / ci ------------------------------------------------------------
+.git
+.gitignore
+.github
+
+# ---- python build + caches ----------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- dev-only, not needed at runtime -------------------------------------
+tests/
+samples/
+out/
+playwright-report/
+test-results/
+PROVISIONING.md
+
+# NOTE: docs/, migrations/, templates/ and scripts/ are deliberately NOT
+# ignored — brief_schema.json, alembic upgrade head, the Jinja creative
+# templates and the smoke/bakeoff scripts are all used from the image.
+
+# ---- editors / os --------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
