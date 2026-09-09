@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # No secrets. Every Settings field has a default and the mock providers
+    # are the defaults, so the suite runs with no vendor accounts.
+    env:
+      ENV: dev
+      WA_PROVIDER: mock
+      STT_PROVIDER: mock
+      IMAGEGEN_PROVIDER: mock
+      INSTAGRAM_MOCK: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # tests/test_templates.py renders through app/creative/compose.py,
+      # which drives a headless Chromium.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install Chromium
+        run: playwright install --with-deps chromium
+
+      - name: Lint
+        run: ruff check app scripts tests
+
+      - name: Format check
+        run: ruff format --check app scripts tests
+        continue-on-error: true   # drop this line once the tree is ruff-format clean
+
+      - name: Tests
+        run: pytest -q
