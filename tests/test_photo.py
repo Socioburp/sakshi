@@ -62,6 +62,32 @@ def test_logos_and_thumbnails_are_never_backgrounds():
     assert photoref.choose("coconut oil", [tiny]) is None
 
 
+def test_one_scene_word_is_not_enough():
+    """Regression: a shopfront photo was winning a post about mangoes.
+
+    The only shared word was "light" -- from the lighting notes in
+    visual_direction.prompt, not from anything the owner is selling.
+    """
+    shopfront = Asset("shop", kind="shop", label="diwali shop front lights")
+    assert photoref.choose(
+        "Fresh alphonso mangoes are here",
+        [shopfront],
+        direction="soft morning window light, shallow depth of field",
+    ) is None
+
+
+def test_the_headline_outweighs_the_scene_description():
+    photo = Asset("a", label="coconut oil bottle")
+    assert photoref.choose("Coconut oil, fresh press", [photo]) == "a"
+
+
+def test_stemming_does_not_mangle_words():
+    """rstrip('s') turned "glass" into "gla" and changed what matched."""
+    assert photoref._singular("glass") == "glass"
+    assert photoref._singular("lights") == "light"
+    assert photoref._singular("bus") == "bus"
+
+
 def test_ties_go_to_the_larger_photograph():
     small = Asset("small", label="coconut oil", width=1000, height=1000)
     big = Asset("big", label="coconut oil", width=2400, height=2400)
