@@ -67,6 +67,9 @@ class Account(Base, TimestampMixin):
     wa_phone: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(120))
     locale: Mapped[str] = mapped_column(String(16), default="en-IN", nullable=False)
+    # The script they TYPE in (latin / devanagari / ...). Locked only from typed
+    # messages: a transcript's script is the vendor's, not the owner's.
+    script: Mapped[str | None] = mapped_column(String(16))
     plan: Mapped[str] = mapped_column(String(32), default="trial", nullable=False)
     credits_balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     onboarded_at: Mapped[datetime | None] = mapped_column(TS)

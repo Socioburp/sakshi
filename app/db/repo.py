@@ -83,6 +83,16 @@ def touch_session(db: Session, account: Account, wa_id: str, inbound: bool) -> W
     return sess
 
 
+def latest_session(
+    db: Session, wa_id: str, account_id: uuid.UUID | None = None
+) -> WaSession | None:
+    """The most recent live session for a number, scoped to the account when known."""
+    stmt = select(WaSession).where(WaSession.wa_id == wa_id, WaSession.closed_at.is_(None))
+    if account_id is not None:
+        stmt = stmt.where(WaSession.account_id == account_id)
+    return db.scalar(stmt.order_by(WaSession.created_at.desc()).limit(1))
+
+
 def window_is_open(sess: WaSession) -> bool:
     return bool(sess.window_expires_at and sess.window_expires_at > now())
 
