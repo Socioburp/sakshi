@@ -45,9 +45,7 @@ class MockImageProvider:
             )
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=88)
-        return ImageResult(
-            data=buf.getvalue(), mime="image/jpeg", provider=self.name, latency_ms=1
-        )
+        return ImageResult(data=buf.getvalue(), mime="image/jpeg", provider=self.name, latency_ms=1)
 
 
 class HttpImageProvider:
