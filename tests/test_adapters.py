@@ -45,7 +45,10 @@ META_AUDIO["entry"][0]["changes"][0]["value"]["messages"][0] = {
 def test_meta_parses_text():
     (m,) = MetaAdapter().parse(META_TEXT, {})
     assert (m.kind, m.text, m.wa_id, m.profile_name) == (
-        "text", "kal sale hai", "919876543210", "Anil",
+        "text",
+        "kal sale hai",
+        "919876543210",
+        "Anil",
     )
 
 
@@ -58,10 +61,16 @@ def test_meta_parses_audio_separately_from_text():
 
 def test_meta_verify_handshake():
     a = MetaAdapter()
-    assert a.verify_webhook(
-        {"hub.mode": "subscribe", "hub.verify_token": settings.wa_verify_token,
-         "hub.challenge": "12345"}
-    ) == "12345"
+    assert (
+        a.verify_webhook(
+            {
+                "hub.mode": "subscribe",
+                "hub.verify_token": settings.wa_verify_token,
+                "hub.challenge": "12345",
+            }
+        )
+        == "12345"
+    )
     assert a.verify_webhook({"hub.mode": "subscribe", "hub.verify_token": "wrong"}) is None
 
 

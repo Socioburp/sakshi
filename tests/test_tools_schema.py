@@ -20,8 +20,17 @@ def test_brief_schema_has_no_refs():
 def test_brief_schema_covers_the_contract():
     props = BRIEF_SCHEMA["properties"]
     for field in (
-        "intent", "format", "headline", "subhead", "cta", "visual_direction",
-        "template_id", "caption", "alt_text", "grounding", "slides",
+        "intent",
+        "format",
+        "headline",
+        "subhead",
+        "cta",
+        "visual_direction",
+        "template_id",
+        "caption",
+        "alt_text",
+        "grounding",
+        "slides",
     ):
         assert field in props, f"missing {field}"
     assert "prompt" in props["visual_direction"]["properties"]

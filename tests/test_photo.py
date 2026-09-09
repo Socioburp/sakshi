@@ -69,11 +69,14 @@ def test_one_scene_word_is_not_enough():
     visual_direction.prompt, not from anything the owner is selling.
     """
     shopfront = Asset("shop", kind="shop", label="diwali shop front lights")
-    assert photoref.choose(
-        "Fresh alphonso mangoes are here",
-        [shopfront],
-        direction="soft morning window light, shallow depth of field",
-    ) is None
+    assert (
+        photoref.choose(
+            "Fresh alphonso mangoes are here",
+            [shopfront],
+            direction="soft morning window light, shallow depth of field",
+        )
+        is None
+    )
 
 
 def test_the_headline_outweighs_the_scene_description():
