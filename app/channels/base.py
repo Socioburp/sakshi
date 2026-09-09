@@ -12,8 +12,16 @@ from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 MessageKind = Literal[
-    "text", "audio", "image", "video", "document", "interactive",
-    "location", "sticker", "system", "unsupported",
+    "text",
+    "audio",
+    "image",
+    "video",
+    "document",
+    "interactive",
+    "location",
+    "sticker",
+    "system",
+    "unsupported",
 ]
 
 
