@@ -33,6 +33,21 @@ def test_matches_canonical_schema_limits():
     model_intents = set(CreativeBrief.model_fields["intent"].annotation.__args__)
     assert set(props["intent"]["enum"]) == model_intents
 
+    # visual_direction: the limits the code enforces are the ones the doc states.
+    from app.creative.brief import MOOD_MAX, VisualDirection
+
+    vd_doc = props["visual_direction"]["properties"]
+    vd_fields = VisualDirection.model_fields
+
+    def limit(field, attr):
+        return next((getattr(m, attr) for m in field.metadata if hasattr(m, attr)), None)
+
+    assert limit(vd_fields["prompt"], "max_length") == vd_doc["prompt"]["maxLength"]
+    assert limit(vd_fields["prompt"], "min_length") == vd_doc["prompt"]["minLength"]
+    assert limit(vd_fields["mood"], "max_length") == vd_doc["mood"]["maxLength"] == MOOD_MAX
+    assert "seed" in vd_doc and "seed" in vd_fields
+    assert props["format"]["properties"]["slide_count"]["maximum"] == 6
+
 
 @pytest.mark.parametrize(
     "prompt",
