@@ -120,6 +120,51 @@ async def exchange_code_for_token(code: str) -> IgToken:
         )
 
 
+async def refresh_long_lived_token(access_token: str) -> IgToken:
+    """Long-lived tokens last 60 days and can be refreshed once past 24h old.
+
+    Nothing refreshed them before, so every connection silently died on day
+    60 and the publish tool kept retrying a dead token.
+    """
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="refresh_long_lived_token")
+        t = fixtures.MOCK_TOKEN
+        return IgToken(t["access_token"], t["user_id"], fixtures.mock_token_expiry())
+
+    async with _client() as c:
+        r = await c.get(
+            f"{GRAPH}/refresh_access_token",
+            params={"grant_type": "ig_refresh_token", "access_token": access_token},
+        )
+        r.raise_for_status()
+        j = r.json()
+        return IgToken(
+            access_token=j["access_token"],
+            user_id="",
+            expires_at=datetime.now(UTC) + timedelta(seconds=j.get("expires_in", 5184000)),
+        )
+
+
+# Meta labels most Graph errors "OAuthException" -- invalid parameter, rate
+# limit, bad aspect ratio -- so the type alone would disconnect an account
+# over a rejected image. Only these codes mean the token itself is dead.
+_DEAD_TOKEN_CODES = {190, 102}
+
+
+def is_auth_error(exc: BaseException) -> bool:
+    """True when Meta says the token is invalid or expired (error code 190/102)."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    if exc.response.status_code not in (400, 401):
+        return False
+    try:
+        body = exc.response.json()
+    except ValueError:
+        return False
+    err = body.get("error") if isinstance(body, dict) else None
+    return isinstance(err, dict) and err.get("code") in _DEAD_TOKEN_CODES
+
+
 # --------------------------------------------------------------------------- #
 # 2/4
 # --------------------------------------------------------------------------- #
@@ -280,6 +325,8 @@ __all__ = [
     "create_carousel_container",
     "publish_container",
     "wait_for_container",
+    "refresh_long_lived_token",
+    "is_auth_error",
     "authorize_url",
     "IgToken",
     "IgProfile",
