@@ -68,9 +68,7 @@ class MetaAdapter:
         sent = headers.get("x-hub-signature-256", "")
         if not sent.startswith("sha256="):
             return False
-        digest = hmac.new(
-            settings.wa_app_secret.encode(), raw_body, hashlib.sha256
-        ).hexdigest()
+        digest = hmac.new(settings.wa_app_secret.encode(), raw_body, hashlib.sha256).hexdigest()
         return hmac.compare_digest(digest, sent.removeprefix("sha256="))
 
     def parse(self, body: dict[str, Any], headers: dict[str, str]) -> list[InboundMessage]:

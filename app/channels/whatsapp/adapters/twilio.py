@@ -60,9 +60,12 @@ class TwilioAdapter:
             mime = body.get("MediaContentType0", "")
             media = MediaRef(url=body.get("MediaUrl0"), mime=mime)
             kind = (
-                "audio" if mime.startswith("audio")
-                else "image" if mime.startswith("image")
-                else "video" if mime.startswith("video")
+                "audio"
+                if mime.startswith("audio")
+                else "image"
+                if mime.startswith("image")
+                else "video"
+                if mime.startswith("video")
                 else "document"
             )
         return [
@@ -96,9 +99,7 @@ class TwilioAdapter:
             # a numbered list so the agent's affordances still work.
             body = msg.text or ""
             if msg.buttons:
-                body += "\n\n" + "\n".join(
-                    f"{i+1}. {b.title}" for i, b in enumerate(msg.buttons)
-                )
+                body += "\n\n" + "\n".join(f"{i + 1}. {b.title}" for i, b in enumerate(msg.buttons))
             data["Body"] = body
         try:
             resp = await self.client.post(
