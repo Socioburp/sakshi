@@ -30,6 +30,8 @@ services:
 envVarGroups:
   - name: sakshi-secrets
     envVars:
+      - key: ENV
+        value: prod
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL
@@ -62,5 +64,11 @@ envVarGroups:
         sync: false
       - key: INSTAGRAM_MOCK
         value: "true"
+      - key: IG_APP_ID
+        sync: false
+      - key: IG_APP_SECRET
+        sync: false
+      - key: IG_REDIRECT_URI
+        sync: false
       - key: PUBLIC_BASE_URL
         sync: false
