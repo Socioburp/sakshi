@@ -34,6 +34,19 @@ def _ext_for(mime: str) -> str:
     }.get((mime or "").split(";")[0].strip(), "ogg")
 
 
+# accounts.locale is stored as BCP-47 ("hi-IN"). Vendors disagree on the shape
+# they want, so the conversion lives here, next to each call, not in the caller.
+def bare_code(locale: str) -> str:
+    """'hi-IN' -> 'hi' (ElevenLabs, Deepgram)."""
+    return (locale or "").split("-")[0].lower()
+
+
+def bcp47_code(locale: str) -> str:
+    """'hi' -> 'hi-IN', 'hi-IN' unchanged (Sarvam)."""
+    loc = (locale or "").strip()
+    return loc if "-" in loc else f"{loc.lower()}-IN"
+
+
 class MockStt:
     name = "mock"
     canned = "Kal se weekend sale hai, coconut oil 500 ml two forty nine rupees"
@@ -57,11 +70,13 @@ class ElevenLabsStt:
         files = {"file": (f"audio.{_ext_for(mime)}", audio, mime or "audio/ogg")}
         data: dict[str, Any] = {"model_id": "scribe_v1", "diarize": "false"}
         if hint_languages and len(hint_languages) == 1:
-            data["language_code"] = hint_languages[0]
+            data["language_code"] = bare_code(hint_languages[0])
         async with httpx.AsyncClient(timeout=120) as c:
             r = await c.post(
-                self.URL, headers={"xi-api-key": settings.elevenlabs_api_key},
-                files=files, data=data,
+                self.URL,
+                headers={"xi-api-key": settings.elevenlabs_api_key},
+                files=files,
+                data=data,
             )
             r.raise_for_status()
             j = r.json()
@@ -87,7 +102,7 @@ class DeepgramStt:
         t0 = time.perf_counter()
         params = {"model": "nova-2", "smart_format": "true", "punctuate": "true"}
         if hint_languages:
-            params["language"] = hint_languages[0]
+            params["language"] = bare_code(hint_languages[0])
         else:
             params["detect_language"] = "true"
         async with httpx.AsyncClient(timeout=120) as c:
@@ -123,7 +138,7 @@ class SarvamStt:
         self, audio: bytes, mime: str, hint_languages: list[str] | None = None
     ) -> Transcript:
         t0 = time.perf_counter()
-        lang = (hint_languages or ["unknown"])[0]
+        lang = bcp47_code(hint_languages[0]) if hint_languages else "unknown"
         files = {"file": (f"audio.{_ext_for(mime)}", audio, mime or "audio/ogg")}
         data = {"model": "saarika:v2", "language_code": lang}
         async with httpx.AsyncClient(timeout=120) as c:
