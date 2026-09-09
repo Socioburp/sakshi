@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 
 from app.integrations.razorpay import client as rzp
@@ -20,7 +21,7 @@ async def razorpay_webhook(request: Request) -> Response:
         event = await request.json()
     except ValueError:
         return Response(status_code=status.HTTP_200_OK)
-    rzp.apply_payment(event)
+    await run_in_threadpool(rzp.apply_payment, event)
     return Response(status_code=status.HTTP_200_OK)
 
 
