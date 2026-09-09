@@ -9,6 +9,7 @@ v1's intent router is gone.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -52,6 +53,32 @@ def _text_of(msg: Message) -> str:
     return msg.text or f"[{msg.kind}]"
 
 
+def _covered(rows: list[Message], message: Message) -> list[uuid.UUID]:
+    """The inbound messages this turn is answering: every unanswered inbound
+    row after the last outbound one (they fold into a single user turn),
+    plus the message itself."""
+    ids: list[uuid.UUID] = []
+    for m in rows:
+        if m.direction == "out":
+            ids = []
+        elif m.answered_at is None:
+            ids.append(m.id)
+    if message.id not in ids:
+        ids.append(message.id)
+    return ids
+
+
+def _mark_answered(ids: list[uuid.UUID]) -> None:
+    if not ids:
+        return
+    try:
+        with session_scope() as db:
+            for m in db.query(Message).filter(Message.id.in_(ids), Message.answered_at.is_(None)):
+                m.answered_at = datetime.now(UTC)
+    except Exception:  # noqa: BLE001 - bookkeeping; the reply already went out
+        log.exception("mark_answered_failed")
+
+
 def _history(rows: list[Message]) -> list[dict[str, Any]]:
     """Collapse the message log into alternating turns."""
     out: list[dict[str, Any]] = []
@@ -66,6 +93,12 @@ def _history(rows: list[Message]) -> list[dict[str, Any]]:
             out.append({"role": role, "content": content})
     while out and out[0]["role"] != "user":
         out.pop(0)
+    # A burst of two messages: the first job answers both (they collapse into
+    # one user turn), so the second job's history ends with that assistant
+    # reply. Sending that as the final turn asks the API to CONTINUE the
+    # reply -- a fragment or a repeated, charged tool call. Drop it.
+    while out and out[-1]["role"] != "user":
+        out.pop()
     return out
 
 
@@ -87,6 +120,15 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
         history_rows = (
             repo.recent_messages(db, session_id, HISTORY_LIMIT) if session_id else [message]
         )
+        # A burst: two messages arrive, the first job answers both (they
+        # collapse into one user turn), then the second job runs. Answering
+        # again would repeat the reply -- and repeat a charged tool call. The
+        # answering turn stamps every inbound it covered (see _covered below),
+        # so this is a recorded fact, not an inference from row order.
+        if message.answered_at is not None:
+            log.info("turn_skipped_already_answered", message_id=str(message_id))
+            return {"ok": True, "reason": "already_answered", "tools": [], "media": []}
+        covered = _covered(history_rows, message)
         is_first = len(history_rows) <= 1
         window_left = seconds_left(wa_session)
         latest_text = _text_of(message)
@@ -168,7 +210,9 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
 
     used_tools: list[str] = []
     try:
-        return await _loop(ctx, system, messages, used_tools, trace, message_id, profile)
+        result = await _loop(ctx, system, messages, used_tools, trace, message_id, profile)
+        _mark_answered(covered)
+        return result
     except Exception as exc:  # noqa: BLE001
         # Whatever broke -- the model API, a tool, the database -- the owner
         # must not be left staring at a blue tick. One line, in their language,
@@ -176,6 +220,7 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
         log.exception("turn_failed", message_id=str(message_id), tools=used_tools)
         try:
             await ctx.say(lang.sorry_line(profile))
+            _mark_answered(covered)  # they got a reply, even if it was an apology
         except Exception:  # noqa: BLE001
             log.exception("turn_failed_and_apology_failed", message_id=str(message_id))
         return {"ok": False, "reason": "turn_failed", "error": str(exc)[:300]}

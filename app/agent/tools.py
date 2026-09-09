@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -18,11 +18,12 @@ from sqlalchemy import select
 from app.agent.context import ToolContext
 from app.billing import credits
 from app.creative import pipeline
-from app.creative.brief import CreativeBrief, Grounding
+from app.creative.brief import CreativeBrief, Grounding, check_brand_rules
 from app.db import repo
 from app.db.models import Brand, BrandAsset, Brief, Creative, IgAccount, Publication
 from app.db.session import session_scope
 from app.integrations.instagram import client as ig
+from app.integrations.storage import r2
 from app.logging import get_logger
 from app.memory import embed as memory_embed
 from app.memory import retrieve as memory_retrieve
@@ -158,6 +159,10 @@ TOOLS: list[dict[str, Any]] = [
                 "languages": {"type": "array", "items": {"type": "string"}},
                 "never_say": {"type": "array", "items": {"type": "string"}},
                 "always_say": {"type": "array", "items": {"type": "string"}},
+                "no_logo": {
+                    "type": "boolean",
+                    "description": "True when the owner says they have no logo; stops the ask.",
+                },
                 "palette": {
                     "type": "object",
                     "properties": {
@@ -332,6 +337,7 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         "never_say",
         "always_say",
         "palette",
+        "no_logo",
     }
     with session_scope() as db:
         brand = db.get(Brand, ctx.brand_id)
@@ -339,7 +345,9 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         for key, value in args.items():
             if key not in settable or value in (None, "", [], {}):
                 continue
-            if key in ("never_say", "always_say", "languages"):
+            if key == "no_logo":
+                brand.template_prefs = {**(brand.template_prefs or {}), "no_logo": bool(value)}
+            elif key in ("never_say", "always_say", "languages"):
                 merged = list(dict.fromkeys([*(getattr(brand, key) or []), *value]))
                 setattr(brand, key, merged)
             elif key == "palette":
@@ -370,7 +378,9 @@ async def _recall(ctx: ToolContext, args: dict) -> dict:
 
 
 async def _connect_instagram(ctx: ToolContext, args: dict) -> dict:
-    url = ig.authorize_url(state=str(ctx.account_id))
+    from app.integrations.instagram.oauth import sign_state
+
+    url = ig.authorize_url(state=sign_state(ctx.account_id))
     return {
         "ok": True,
         "connect_url": url,
@@ -426,11 +436,26 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
 
     with session_scope() as db:
         if brief_id:
-            creatives = repo.creatives_for_brief(db, uuid.UUID(brief_id))
+            all_rows = repo.creatives_for_brief(db, uuid.UUID(brief_id))
         else:
             one = db.get(Creative, uuid.UUID(creative_id))
-            creatives = repo.creatives_for_brief(db, one.brief_id) if one else []
-        creatives = [c for c in creatives if c.status in ("ready", "approved")]
+            all_rows = repo.creatives_for_brief(db, one.brief_id) if one else []
+        # A carousel with a failed slide must not ship with the survivors: the
+        # pips say six, the post has five, and the CTA may be on the missing
+        # one. The failed slide can be redone alone now, for one credit.
+        broken = [c.slide_position for c in all_rows if c.status == "failed"]
+        if broken and len(all_rows) > 1:
+            return {
+                "ok": False,
+                "reason": "carousel_has_failed_slides",
+                "failed_slides": broken,
+                "hint": (
+                    "Call regenerate_image ONCE with slide_position set to any failed slide: "
+                    "every failed slide is redone in that one call (1 credit each) and the "
+                    "good slides keep their pictures. Then request_approval again."
+                ),
+            }
+        creatives = [c for c in all_rows if c.status in ("ready", "approved")]
         if not creatives:
             return {"ok": False, "reason": "creative_not_ready"}
 
@@ -464,6 +489,18 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
             }
 
         caption = args.get("caption") or brief.caption.rendered() or brief.headline
+        if args.get("caption"):
+            # The model's own caption goes to Instagram too; the never_say gate
+            # covered the brief's caption but not this override.
+            override = CreativeBrief.model_validate(
+                {
+                    **brief.model_dump(mode="json"),
+                    "caption": {**brief.caption.model_dump(), "body": args["caption"]},
+                }
+            )
+            violations = check_brand_rules(override, db.get(Brand, ctx.brand_id))
+            if violations:
+                return {"ok": False, "reason": "never_say_violation", "violations": violations}
         is_carousel = len(creatives) > 1
         pub = Publication(
             creative_id=creatives[0].id,
@@ -477,8 +514,23 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         db.add(pub)
         db.flush()
         pub_id, token, ig_user_id = pub.id, ig_row.access_token, ig_row.ig_user_id
+        ig_row_id, token_expires_at = ig_row.id, ig_row.token_expires_at
         urls = [c.composed_url for c in creatives]
         creative_ids = [c.id for c in creatives]
+        composed_keys = [c.composed_key for c in creatives]
+
+    # Long-lived tokens die at 60 days. Refresh when inside the last week, so a
+    # connection made in January still posts in April.
+    if token_expires_at and token_expires_at - datetime.now(UTC) < timedelta(days=7):
+        try:
+            fresh = await ig.refresh_long_lived_token(token)
+            with session_scope() as db:
+                row = db.get(IgAccount, ig_row_id)
+                row.access_token, row.token_expires_at = fresh.access_token, fresh.expires_at
+            token = fresh.access_token
+            log.info("ig_token_refreshed", ig_account_id=str(ig_row_id))
+        except Exception:  # noqa: BLE001 - try the publish anyway; a dead token is caught below
+            log.exception("ig_token_refresh_failed", ig_account_id=str(ig_row_id))
 
     try:
         if is_carousel:
@@ -519,7 +571,31 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         with session_scope() as db:
             p = db.get(Publication, pub_id)
             p.status, p.error = "failed", str(exc)[:2000]
+            if ig.is_auth_error(exc):
+                # Stop retrying a dead token; tell the owner to reconnect once.
+                db.get(IgAccount, ig_row_id).status = "disconnected"
+        if ig.is_auth_error(exc):
+            return {
+                "ok": False,
+                "reason": "instagram_reconnect_required",
+                "hint": (
+                    "Instagram no longer accepts this account's login. Call "
+                    "connect_instagram and send the owner the link, in one line."
+                ),
+            }
         return {"ok": False, "reason": "publish_failed", "error": str(exc)[:200]}
+
+    # Out of the expiring prefix. Drafts are swept after DRAFT_TTL_DAYS; a
+    # published post's image must keep resolving for as long as the post
+    # exists -- Instagram has its own copy, but our permalink records do not.
+    promoted: dict[uuid.UUID, str] = {}
+    for cid, key in zip(creative_ids, composed_keys, strict=True):
+        if key and key.startswith("drafts/"):
+            try:
+                # boto3 is sync; a six-slide carousel must not stall the loop.
+                promoted[cid] = await asyncio.to_thread(r2.promote, key)
+            except Exception:  # noqa: BLE001 - the post is live; log and move on
+                log.exception("r2_promote_failed", creative_id=str(cid), key=key)
 
     with session_scope() as db:
         p = db.get(Publication, pub_id)
@@ -529,7 +605,11 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         p.status = "published"
         p.published_at = datetime.now(UTC)
         for cid in creative_ids:
-            db.get(Creative, cid).status = "published"
+            row = db.get(Creative, cid)
+            row.status = "published"
+            if cid in promoted:
+                row.composed_key = row.composed_key.replace("drafts/", "published/", 1)
+                row.composed_url = promoted[cid]
     return {
         "ok": True,
         "permalink": result.permalink,

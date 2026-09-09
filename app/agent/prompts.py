@@ -120,11 +120,17 @@ Here is a well-formed brief for reference:
 
 
 def missing_setup(brand: Any) -> list[str]:
-    """What still has to be learned before this brand is properly set up."""
+    """What still has to be learned before this brand is properly set up.
+
+    An owner who says they have no logo is a finished answer, not a gap: the
+    creatives carry the brand name as a wordmark instead. Before this flag the
+    bot asked for the logo on every single turn, forever.
+    """
     gaps = []
     if not getattr(brand, "category", None):
         gaps.append("industry")
-    if not getattr(brand, "logo_url", None):
+    prefs = getattr(brand, "template_prefs", None) or {}
+    if not getattr(brand, "logo_url", None) and not prefs.get("no_logo"):
         gaps.append("logo")
     return gaps
 
@@ -135,8 +141,15 @@ def _setup_block(brand: Any) -> str:
         return ""
     nxt = gaps[0]
     ask = {
-        "industry": "Ask what kind of business they run. One line, nothing else.",
-        "logo": "Ask them to send their logo as an image. One line, nothing else.",
+        "industry": (
+            "Ask what kind of business they run. One line, nothing else. The moment they "
+            "answer, call update_brand(category=...) in the same turn -- do not just reply."
+        ),
+        "logo": (
+            "Ask them to send their logo as an image. One line, nothing else. If they say "
+            "they have no logo, call update_brand(no_logo=true) and never ask again; their "
+            "brand name will be set as a wordmark on every creative."
+        ),
     }[nxt]
     return (
         f"## Setup still missing: {', '.join(gaps)}\n"
@@ -163,6 +176,16 @@ def build_system(
     if extra:
         parts.append(extra)
     return "\n\n".join(p for p in parts if p)
+
+
+def _no_logo_line(brand: Any) -> str:
+    prefs = getattr(brand, "template_prefs", None) or {}
+    if prefs.get("no_logo") and not getattr(brand, "logo_url", None):
+        return (
+            "They have said they have NO logo. Never ask for one; every creative carries "
+            "their brand name as a wordmark instead."
+        )
+    return ""
 
 
 def _brand_block(brand: Any) -> str:
@@ -195,6 +218,8 @@ def _brand_block(brand: Any) -> str:
         lines.append(f"Their logo: {val('logo_notes')}")
     if val("logo_url"):
         lines.append("A logo is on file and is composited onto every creative.")
+    elif _no_logo_line(brand):
+        lines.append(_no_logo_line(brand))
 
     always = val("always_say", [])
     if always:
