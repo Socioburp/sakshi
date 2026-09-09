@@ -33,8 +33,7 @@ class Brand:
     logo_url = None
     logo_src = None
     logo_analysis = {"has_wordmark": False}
-    palette = {"primary": "#123B2E", "secondary": "#FFFFFF", "accent": "#E4572E",
-               "ink": "#FFFFFF"}
+    palette = {"primary": "#123B2E", "secondary": "#FFFFFF", "accent": "#E4572E", "ink": "#FFFFFF"}
     fonts = {"heading": "Poppins", "body": "Inter"}
 
 
@@ -76,16 +75,16 @@ def busy_background(w: int, h: int, seed: int = 7) -> bytes:
         tone = (rnd.randint(40, 210), rnd.randint(45, 190), rnd.randint(35, 150))
         d.ellipse([x - r, y - r, x + r, y + r], fill=tone)
         if i % 5 == 0:
-            d.line([(0, y), (w, y + rnd.randint(-h // 6, h // 6))],
-                   fill=tone, width=max(2, w // 90))
+            d.line(
+                [(0, y), (w, y + rnd.randint(-h // 6, h // 6))], fill=tone, width=max(2, w // 90)
+            )
     im = im.filter(ImageFilter.GaussianBlur(radius=w / 55))
     px = im.load()
     for y in range(0, h, 2):
         for x in range(0, w, 2):
             n = int(18 * math.sin(x * 0.7) * math.cos(y * 0.5)) + rnd.randint(-14, 14)
             r, g, b = px[x, y]
-            px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)),
-                        max(0, min(255, b + n)))
+            px[x, y] = (max(0, min(255, r + n)), max(0, min(255, g + n)), max(0, min(255, b + n)))
     buf = BytesIO()
     im.save(buf, format="JPEG", quality=92)
     return buf.getvalue()

@@ -49,8 +49,12 @@ SAMPLES = Path(__file__).resolve().parents[1] / "samples" / "voice_notes"
 MANIFEST = SAMPLES / "manifest.json"
 
 MIME_BY_EXT = {
-    ".ogg": "audio/ogg", ".opus": "audio/ogg", ".mp3": "audio/mpeg",
-    ".m4a": "audio/mp4", ".wav": "audio/wav", ".amr": "audio/amr",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
+    ".amr": "audio/amr",
 }
 
 
@@ -147,7 +151,7 @@ def summarise(results: dict) -> None:
         ranked.append((recall, p))
         print(
             f"{p:<14}{recall:>12.1%}{perfect:>10.0%}"
-            f"{(sum(wers)/len(wers) if wers else float('nan')):>8.2f}{p50:>9}"
+            f"{(sum(wers) / len(wers) if wers else float('nan')):>8.2f}{p50:>9}"
         )
     if ranked:
         print(f"\nwinner on product-name recall: {max(ranked)[1]}")
