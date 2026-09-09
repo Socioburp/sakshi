@@ -1,0 +1,70 @@
+# ---- secrets -------------------------------------------------------------
+# app/config.py reads .env via pydantic-settings. Never commit the real one.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+service-account*.json
+
+# ---- python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---- virtualenvs ---------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---- test / lint caches --------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# ---- this project --------------------------------------------------------
+# `make smoke` (scripts/journey_smoke.py) writes rendered creatives here
+out/
+# Real client voice notes for `make bakeoff` are private data.
+# The manifest that describes them IS tracked; the audio is not.
+samples/voice_notes/*
+!samples/voice_notes/manifest.json
+!samples/voice_notes/.gitkeep
+# scratch renders / compositor debug output
+tmp/
+*.local.*
+
+# ---- playwright ----------------------------------------------------------
+# browsers install outside the repo, but the trace/report dirs land here
+playwright-report/
+test-results/
+.playwright/
+
+# ---- editors / os --------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
