@@ -29,7 +29,7 @@ from app.creative import compose, photoreal, photoref
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
 from app.db import repo
-from app.db.models import Brand, BrandAsset, Brief, Creative
+from app.db.models import Account, Brand, BrandAsset, Brief, Creative
 from app.db.session import session_scope
 from app.integrations.storage import r2
 from app.logging import get_logger
@@ -44,9 +44,43 @@ class CreativeFailed(Exception):
 
 
 # --------------------------------------------------------------------------- #
-async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
+_WORKING: dict[str, str] = {
+    "hi": "Bana raha hoon… {secs} second.",
+    "kn": "Maadta iddini… {secs} second.",
+    "ta": "Panren… {secs} second.",
+    "te": "Chestunna… {secs} second.",
+    "mr": "Banavtoy… {secs} second.",
+    "ml": "Cheyyunnu… {secs} second.",
+    "en": "Making it… about {secs} seconds.",
+}
+
+
+def working_line(locale: str | None, slides: int) -> str:
+    lang = ((locale or "en").split("-")[0]).lower()
+    return _WORKING.get(lang, _WORKING["en"]).format(secs=30 if slides <= 1 else 45)
+
+
+# Credits at or below this get a one-line nudge from the agent. Finding out at
+# zero, mid-request, is the worst moment to learn you need a top-up.
+LOW_CREDIT_NUDGE = 2
+
+
+async def generate(
+    ctx: ToolContext,
+    brief: CreativeBrief,
+    *,
+    reuse: dict[int, tuple[str, str]] | None = None,
+) -> dict:
+    """Generate every slide of a brief.
+
+    `reuse` maps slide position -> (background_key, background_url) for slides
+    whose picture is being KEPT. That is how regenerating one slide of a
+    carousel charges for one slide: the others are re-composited over the
+    background they already have, exactly like a copy revision.
+    """
     units = brief.units()
     group_id = uuid.uuid4()
+    reuse = dict(reuse or {})
 
     with session_scope() as db:
         brand = db.get(Brand, ctx.brand_id)
@@ -66,7 +100,10 @@ async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
         # owner's own photo when one genuinely matches -- decided here, before
         # the charge, so the free lane is actually free.
         resolved = _resolve_photos(db, ctx.brand_id, brief, units)
-        billable = sum(1 for u in units if not resolved.get(u.position))
+        billable_positions = {
+            u.position for u in units if not resolved.get(u.position) and u.position not in reuse
+        }
+        billable = len(billable_positions)
 
         brief_row = repo.save_brief(
             db,
@@ -89,6 +126,8 @@ async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
                 height=h,
                 carousel_group_id=group_id if brief.is_carousel() else None,
                 slide_position=slide.position,
+                background_key=reuse.get(slide.position, (None, None))[0],
+                background_url=reuse.get(slide.position, (None, None))[1],
                 status="generating",
                 expires_at=datetime.now(UTC) + timedelta(days=DRAFT_TTL_DAYS),
             )
@@ -120,12 +159,23 @@ async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
                 }
         brand_snapshot = _snapshot(db, brand)
         assets = _load_assets(db, ctx.brand_id, units, resolved)
+        locale = (db.get(Account, ctx.account_id).locale or "en") if ctx.account_id else "en"
+
+    # "Making it..." goes out now -- after validation and the charge, before the
+    # 5-40 seconds of work. On WhatsApp that silence reads as "it broke", and
+    # the owner types again, which queues a second charged request. It is sent
+    # here rather than by the model so it is never skipped, and it is allowed
+    # to fail: a missed progress line must never cost the creative.
+    try:
+        await ctx.say(working_line(locale, len(units)))
+    except Exception:  # noqa: BLE001
+        log.warning("progress_line_failed", account_id=str(ctx.account_id))
 
     # Slides run concurrently. gather with return_exceptions so one bad slide
     # does not discard the ones that already succeeded.
     results = await asyncio.gather(
         *(
-            _build_one(ctx, brief, slide, cid, brand_snapshot, assets, resolved)
+            _build_one(ctx, brief, slide, cid, brand_snapshot, assets, resolved, reuse)
             for slide, cid in zip(units, creative_ids, strict=True)
         ),
         return_exceptions=True,
@@ -133,23 +183,32 @@ async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
 
     ok_urls: list[str] = []
     failures: list[str] = []
+    failed_billable = 0
     for slide, cid, res in zip(units, creative_ids, results, strict=True):
         if isinstance(res, BaseException):
             log.exception("slide_failed", creative_id=str(cid), position=slide.position)
             _mark_failed(cid, str(res))
             failures.append(f"slide {slide.position}: {res}")
+            # A failed slide is refunded only if it was paid for. A free photo
+            # slide that failed to fetch was never charged, so refunding it
+            # would hand back a credit the owner did not spend.
+            if slide.position in billable_positions:
+                failed_billable += 1
         else:
             ok_urls.append(res)
 
     if failures and not ok_urls:
         _refund(ctx, group_id, billable, "creative_failed")
         return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
-    if failures:
-        # Partial carousel: refund only what did not ship.
-        _refund(ctx, group_id, len(failures), "partial_carousel")
+    if failed_billable:
+        # Partial carousel: refund only the paid slides that did not ship.
+        _refund(ctx, group_id, failed_billable, "partial_carousel")
 
-    await _show(ctx, brief, ok_urls)
-    return {
+    delivered = await _show(ctx, brief, ok_urls)
+    with session_scope() as db:
+        balance = db.get(Account, ctx.account_id).credits_balance
+    charged = billable - failed_billable
+    out = {
         "ok": True,
         "brief_id": str(brief_id),
         "creative_ids": [str(c) for c in creative_ids],
@@ -157,10 +216,25 @@ async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
         "slides_ok": len(ok_urls),
         "slides_failed": len(failures),
         "image_urls": ok_urls,
-        "shown_to_user": True,
-        "credits_charged": billable - len(failures),
+        "shown_to_user": delivered,
+        "credits_charged": charged,
+        "credits_left": balance,
         "note": "The owner can see it now. Ask if they want changes; keep it to one line.",
     }
+    if not delivered:
+        # Never tell the model the owner has seen something they have not. The
+        # creative exists and is paid for; the honest move is to say so.
+        out["note"] = (
+            "The creative was made but WhatsApp did NOT deliver it (send failed or the "
+            "24h window is closed). Tell the owner in one line that it is ready and "
+            "will be sent as soon as they reply. Do not describe it."
+        )
+    if balance <= LOW_CREDIT_NUDGE:
+        out["credits_note"] = (
+            f"The owner has {balance} credit(s) left. Mention it in one short line and "
+            "offer a top-up link -- do not lecture."
+        )
+    return out
 
 
 async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> dict:
@@ -173,6 +247,19 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
         prev = repo.creatives_for_brief(db, brief_id)
         if not prev or not all(c.background_key for c in prev):
             return {"ok": False, "reason": "no_background_to_reuse"}
+        now = datetime.now(UTC)
+        if any(c.expires_at and c.expires_at <= now for c in prev):
+            # drafts/ objects are deleted by the R2 lifecycle rule after
+            # DRAFT_TTL_DAYS; composing over a key that is gone would strand the
+            # new rows in "composing". Say so, and point at the paid path.
+            return {
+                "ok": False,
+                "reason": "background_expired",
+                "hint": (
+                    f"Drafts are kept for {DRAFT_TTL_DAYS} days and this one is older. "
+                    "Use regenerate_image (1 credit) or create_creative."
+                ),
+            }
 
         merged = _merge(parent.payload, changes)
         try:
@@ -225,10 +312,7 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
         brand_snapshot = _snapshot(db, brand)
 
     urls = await asyncio.gather(
-        *(
-            _recompose_one(ctx, brief, slide, cid, key, brand_snapshot)
-            for slide, cid, key in pairs
-        )
+        *(_recompose_one(ctx, brief, slide, cid, key, brand_snapshot) for slide, cid, key in pairs)
     )
     await _show(ctx, brief, list(urls))
     return {
@@ -256,13 +340,15 @@ async def regenerate_image(
         payload = dict(parent.payload)
 
     if new_prompt:
-        if slide_position and payload.get("slides"):
-            for s in payload["slides"]:
-                if s["position"] == slide_position:
-                    s["visual_direction"] = {**s["visual_direction"], "prompt": new_prompt}
-                    s["visual_direction"].pop("seed", None)
-                    break
-        else:
+        targets = payload.get("slides") or []
+        if slide_position and targets:
+            targets = [s for s in targets if s["position"] == slide_position]
+        for s in targets:
+            # A carousel's pictures come from the slides, never from the top-level
+            # direction -- writing there used to change nothing and charge for it.
+            s["visual_direction"] = {**s["visual_direction"], "prompt": new_prompt}
+            s["visual_direction"].pop("seed", None)
+        if not payload.get("slides"):
             payload["visual_direction"] = {**payload["visual_direction"], "prompt": new_prompt}
             payload["visual_direction"].pop("seed", None)
 
@@ -270,7 +356,37 @@ async def regenerate_image(
         brief = CreativeBrief.model_validate(payload)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": "invalid_visual_direction", "error": str(exc)[:400]}
-    return await generate(ctx, brief)
+
+    reuse: dict[int, tuple[str, str]] = {}
+    if brief.is_carousel():
+        positions = {u.position for u in brief.units()}
+        if slide_position is not None and slide_position not in positions:
+            return {
+                "ok": False,
+                "reason": "unknown_slide",
+                "hint": f"This carousel has slides {sorted(positions)}.",
+            }
+        if slide_position is not None:
+            # Keep every other slide's picture. Without this, redoing slide 3 of
+            # six re-bought all six -- and replaced five the owner already liked.
+            now = datetime.now(UTC)
+            with session_scope() as db:
+                prev = repo.creatives_for_brief(db, brief_id)
+                if any(c.expires_at and c.expires_at <= now for c in prev):
+                    return {
+                        "ok": False,
+                        "reason": "background_expired",
+                        "hint": (
+                            f"Drafts are kept for {DRAFT_TTL_DAYS} days; the other slides' "
+                            "pictures are gone, so one slide cannot be redone alone. Call "
+                            f"regenerate_image without slide_position ({len(positions)} "
+                            "credits) or create_creative."
+                        ),
+                    }
+                for c in prev:
+                    if c.slide_position != slide_position and c.background_key:
+                        reuse[c.slide_position] = (c.background_key, c.background_url or "")
+    return await generate(ctx, brief, reuse=reuse)
 
 
 # --------------------------------------------------------------------------- #
@@ -282,12 +398,19 @@ async def _build_one(
     brand_snapshot,
     assets: dict[str, BrandAssetSnapshot],
     resolved: dict[int, str] | None = None,
+    reuse: dict[int, tuple[str, str]] | None = None,
 ) -> str:
     w, h = brief.pixel_size()
-    ref = (resolved or {}).get(slide.position) or slide.visual_direction.reference_asset_id
+    ref = (resolved or {}).get(slide.position)
     stage = f"slide{slide.position}"
 
-    if ref and ref in assets:
+    if reuse and slide.position in reuse:
+        # Picture kept from the previous version of this creative.
+        with ctx.trace.stage(f"{stage}:reuse"):
+            key = reuse[slide.position][0]
+            image, mime = r2.get(key), ("image/jpeg" if key.endswith(".jpg") else "image/png")
+        provider_name = "reused"
+    elif ref and ref in assets:
         # The owner's own photograph. No model call, no charge.
         with ctx.trace.stage(f"{stage}:asset_fetch"):
             image, mime = r2.get(assets[ref].storage_key), assets[ref].mime or "image/jpeg"
@@ -320,9 +443,14 @@ async def _build_one(
         png = await compose.compose(brief, slide, brand_snapshot, image, mime)
 
     with ctx.trace.stage(f"{stage}:upload"):
-        ext = "jpg" if "jpeg" in mime else "png"
-        bg_key = r2.key_for(str(ctx.brand_id), str(creative_id), f"bg.{ext}")
-        r2.put(bg_key, image, mime)
+        if provider_name == "reused":
+            # The background already lives in R2 under its old key; a copy per
+            # revision is storage for nothing.
+            bg_key = reuse[slide.position][0]
+        else:
+            ext = "jpg" if "jpeg" in mime else "png"
+            bg_key = r2.key_for(str(ctx.brand_id), str(creative_id), f"bg.{ext}")
+            r2.put(bg_key, image, mime)
         composed_key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.png")
         composed_url = r2.put(composed_key, png, "image/png")
 
@@ -351,9 +479,15 @@ async def _recompose_one(ctx, brief, slide, creative_id, background_key, brand_s
     return url
 
 
-async def _show(ctx: ToolContext, brief: CreativeBrief, urls: list[str]) -> None:
+async def _show(ctx: ToolContext, brief: CreativeBrief, urls: list[str]) -> bool:
+    """Send every image; True only if every send was accepted by the provider."""
+    ok = True
     for i, url in enumerate(urls):
-        await ctx.show(url, caption=brief.headline if i == 0 else "")
+        sent = await ctx.show(url, caption=brief.headline if i == 0 else "")
+        ok = ok and bool(sent)
+    if not ok:
+        log.error("creative_not_delivered", account_id=str(ctx.account_id), urls=len(urls))
+    return ok
 
 
 def _mark_failed(creative_id: uuid.UUID, error: str) -> None:
@@ -408,15 +542,6 @@ def _resolve_photos(
     Within one carousel a photo is used at most once: two slides showing the
     same jar reads as a bug, not as a set.
     """
-    out = {
-        u.position: str(u.visual_direction.reference_asset_id)
-        for u in units
-        if u.visual_direction.reference_asset_id
-    }
-    open_slides = [u for u in units if u.position not in out]
-    if not open_slides:
-        return out
-
     candidates = list(
         db.scalars(
             select(BrandAsset)
@@ -425,7 +550,20 @@ def _resolve_photos(
             .limit(60)
         )
     )
-    if not candidates:
+    known = {str(c.id) for c in candidates}
+
+    # An explicit reference is honoured only if it is a real photo of THIS
+    # brand. The model authors that field; a made-up or foreign id used to skip
+    # billing and then fall through to a paid model call anyway.
+    out: dict[int, str] = {}
+    for u in units:
+        raw = u.visual_direction.reference_asset_id
+        if raw and str(raw) in known:
+            out[u.position] = str(raw)
+        elif raw:
+            log.warning("reference_asset_ignored", position=u.position, asset_id=str(raw))
+    open_slides = [u for u in units if u.position not in out]
+    if not open_slides or not candidates:
         return out
 
     taken = set(out.values())
@@ -450,12 +588,7 @@ def _load_assets(
     units: list[Slide],
     resolved: dict[int, str] | None = None,
 ) -> dict[str, BrandAssetSnapshot]:
-    ids = {
-        u.visual_direction.reference_asset_id
-        for u in units
-        if u.visual_direction.reference_asset_id
-    }
-    ids |= {v for v in (resolved or {}).values() if v}
+    ids = {v for v in (resolved or {}).values() if v}
     if not ids:
         return {}
     out: dict[str, BrandAssetSnapshot] = {}

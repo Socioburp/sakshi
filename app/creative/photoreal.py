@@ -24,6 +24,13 @@ weight it oddly.
 
 from __future__ import annotations
 
+from app.creative.brief import MOOD_MAX
+
+# The brief validator caps the model-authored prompt at 900 characters and the
+# mood at MOOD_MAX. The enrichment adds a bounded amount on top, so the total on
+# the wire is known: 900 + ENRICHMENT_MAX. Enforced below, not just documented.
+ENRICHMENT_MAX = 400
+
 # Present in every enriched prompt; also the idempotency marker.
 _MARKER = "shot on a full-frame camera"
 
@@ -44,11 +51,15 @@ PHOTOREAL_NEGATIVE = (
 )
 
 
+# The whole clause plus the longest mood plus punctuation must fit the budget.
+assert len(CAMERA_DIRECTION) + MOOD_MAX + 8 <= ENRICHMENT_MAX, "enrichment exceeds its budget"
+
+
 def photographic(prompt: str, negative: str | None, *, mood: str | None = None) -> tuple[str, str]:
     """Return (prompt, negative) tuned for a photograph, safely re-runnable."""
     p = (prompt or "").strip()
     if _MARKER not in p:
-        mood_clause = f", {mood.strip()}" if mood and mood.strip() else ""
+        mood_clause = f", {mood.strip()[:MOOD_MAX]}" if mood and mood.strip() else ""
         p = f"{p.rstrip('.,; ')}{mood_clause}. {CAMERA_DIRECTION}."
 
     parts = [s.strip() for s in (negative or "").split(",") if s.strip()]

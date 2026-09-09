@@ -36,7 +36,7 @@ from typing import Any, Protocol
 
 # Photos of the real business. "logo" is excluded: the mark is composited as a
 # lockup, never used as a background.
-USABLE_KINDS = {"product", "shop", "team", "packaging", "ingredient"}
+USABLE_KINDS = {"product", "shop", "team", "other"}  # = ck_brand_assets_kind minus logo
 
 # Below this, upscaling shows before the creative does.
 MIN_SHORT_EDGE = 800
@@ -49,11 +49,56 @@ MIN_SCORE = 2
 
 _WORD = re.compile(r"[a-z0-9]+")
 _STOP = {
-    "the", "and", "for", "with", "our", "your", "this", "that", "from", "into", "onto",
-    "new", "now", "get", "buy", "off", "all", "one", "two", "best", "top", "more",
-    "photo", "photos", "picture", "pictures", "image", "images", "shot", "pic", "img",
-    "jpg", "jpeg", "png", "final", "copy", "edit", "sale", "offer", "today", "week",
-    "weekend", "special", "free", "order", "shop", "store", "post", "insta", "instagram",
+    "the",
+    "and",
+    "for",
+    "with",
+    "our",
+    "your",
+    "this",
+    "that",
+    "from",
+    "into",
+    "onto",
+    "new",
+    "now",
+    "get",
+    "buy",
+    "off",
+    "all",
+    "one",
+    "two",
+    "best",
+    "top",
+    "more",
+    "photo",
+    "photos",
+    "picture",
+    "pictures",
+    "image",
+    "images",
+    "shot",
+    "pic",
+    "img",
+    "jpg",
+    "jpeg",
+    "png",
+    "final",
+    "copy",
+    "edit",
+    "sale",
+    "offer",
+    "today",
+    "week",
+    "weekend",
+    "special",
+    "free",
+    "order",
+    "shop",
+    "store",
+    "post",
+    "insta",
+    "instagram",
 }
 
 
@@ -100,10 +145,11 @@ def is_usable(asset: _Asset) -> bool:
 
 def score(copy: str, direction: str, asset: _Asset) -> int:
     """Weighted words shared between this slide and the photo's label."""
-    label = _tokens(asset.label, asset.kind)
-    return (
-        COPY_WEIGHT * len(_tokens(copy) & label)
-        + DIRECTION_WEIGHT * len(_tokens(direction) & label)
+    # The label only. The kind ("product") is not evidence: a headline that
+    # says "new products" would otherwise match every photo the brand owns.
+    label = _tokens(asset.label)
+    return COPY_WEIGHT * len(_tokens(copy) & label) + DIRECTION_WEIGHT * len(
+        _tokens(direction) & label
     )
 
 
@@ -116,7 +162,7 @@ def choose(copy: str, assets: list[_Asset], direction: str = "") -> Any | None:
     best = max(s for s, _ in ranked)
     # Ties go to the largest photograph: same relevance, more pixels to crop from.
     winners = [a for s, a in ranked if s == best]
-    winners.sort(key=lambda a: ((a.width or 0) * (a.height or 0)), reverse=True)
+    winners.sort(key=lambda a: (a.width or 0) * (a.height or 0), reverse=True)
     return winners[0].id
 
 
@@ -135,6 +181,4 @@ def copy_text(slide: Any, brief: Any) -> str:
 def direction_text(slide: Any) -> str:
     """How the picture was described. Corroborating evidence, never the case."""
     vd = getattr(slide, "visual_direction", None)
-    return " ".join(
-        str(x) for x in (getattr(vd, "prompt", None), getattr(vd, "mood", None)) if x
-    )
+    return " ".join(str(x) for x in (getattr(vd, "prompt", None), getattr(vd, "mood", None)) if x)

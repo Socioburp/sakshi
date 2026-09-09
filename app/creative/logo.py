@@ -126,7 +126,7 @@ def extract_palette(image_bytes: bytes) -> LogoAnalysis:
         return sw["saturation"] < 0.12 and (sw["luminance"] > 0.88 or sw["luminance"] < 0.06)
 
     branded = [sw for sw in swatches if not is_neutral(sw)]
-    branded.sort(key=lambda sw: (sw["share"] * (0.4 + sw["saturation"])), reverse=True)
+    branded.sort(key=lambda sw: sw["share"] * (0.4 + sw["saturation"]), reverse=True)
 
     if not branded:
         # A pure black-and-white mark is a legitimate answer, not a failure.

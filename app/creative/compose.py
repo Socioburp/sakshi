@@ -35,6 +35,7 @@ _env = Environment(
     lstrip_blocks=True,
 )
 
+
 class TextDoesNotFit(RuntimeError):
     """The copy cannot be made to fit even at the minimum font size."""
 
@@ -61,31 +62,77 @@ SUPERSAMPLE = 1
 
 _browser = None
 _playwright = None
-_lock = asyncio.Lock()
+_loop = None  # the loop the BROWSER was launched on
+_lock: asyncio.Lock | None = None
+_lock_loop = None  # the loop the LOCK was created on
+
+
+def _get_lock() -> asyncio.Lock:
+    # A Lock is bound to the loop it is first used on. Creating it at import
+    # time tied it to whichever loop imported the module -- under a test runner
+    # or a worker restart that is not the loop compositing runs on. The lock's
+    # loop is tracked separately from the browser's: keying it on the browser
+    # loop meant every concurrent first caller (six slides of a carousel) got
+    # its own lock and launched its own Chromium.
+    global _lock, _lock_loop
+    running = asyncio.get_running_loop()
+    if _lock is None or _lock_loop is not running:
+        _lock, _lock_loop = asyncio.Lock(), running
+    return _lock
 
 
 async def get_browser():
-    global _browser, _playwright
-    async with _lock:
+    global _browser, _playwright, _loop
+    lock = _get_lock()
+    async with lock:
+        running = asyncio.get_running_loop()
+        if _browser is not None and _loop is not running:
+            # The browser belongs to a loop that no longer exists. It cannot be
+            # closed from here; drop the handles and start clean rather than
+            # hang on a dead transport.
+            log.warning("chromium_loop_changed_relaunching")
+            _browser, _playwright = None, None
         if _browser is None or not _browser.is_connected():
             from playwright.async_api import async_playwright
 
-            _playwright = await async_playwright().start()
-            _browser = await _playwright.chromium.launch(
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none"]
-            )
+            if _playwright is not None:
+                # A previous launch failed or the browser died: release the old
+                # driver before starting another, or they accumulate.
+                try:
+                    await _playwright.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                _playwright = None
+            pw = await async_playwright().start()
+            try:
+                _browser = await pw.chromium.launch(
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none"]
+                )
+            except Exception:
+                await pw.stop()
+                raise
+            _playwright, _loop = pw, running
             log.info("chromium_launched")
     return _browser
 
 
 async def shutdown() -> None:
-    global _browser, _playwright
-    if _browser is not None:
-        await _browser.close()
-        _browser = None
-    if _playwright is not None:
-        await _playwright.stop()
-        _playwright = None
+    global _browser, _playwright, _loop
+    lock = _get_lock()
+    async with lock:
+        if _browser is not None:
+            try:
+                await _browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _browser = None
+        if _playwright is not None:
+            try:
+                await _playwright.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            _playwright = None
+        _loop = None
 
 
 def _brand_context(brand: Any) -> dict[str, Any]:
@@ -112,9 +159,7 @@ def _brand_context(brand: Any) -> dict[str, Any]:
     }
 
 
-def render_html(
-    brief: CreativeBrief, slide: Slide, brand: Any, background_data_uri: str
-) -> str:
+def render_html(brief: CreativeBrief, slide: Slide, brand: Any, background_data_uri: str) -> str:
     name = brief.template_for(slide)
     tpl = _env.get_template(TEMPLATES.get(name, TEMPLATES[DEFAULT_TEMPLATE]))
     w, h = brief.pixel_size()
@@ -227,9 +272,7 @@ async def compose(
                 f"copy still overflows at minimum size: headline={slide.headline!r}"
             )
 
-        shot = await page.screenshot(
-            type="png", clip={"x": 0, "y": 0, "width": w, "height": h}
-        )
+        shot = await page.screenshot(type="png", clip={"x": 0, "y": 0, "width": w, "height": h})
         return _resample(shot, w, h)
     finally:
         await page.close()

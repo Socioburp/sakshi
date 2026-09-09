@@ -45,7 +45,16 @@ _TEXT_REQUEST = re.compile(
     r"label(l|)ed|subtitle|price tag|number overlay)\b",
     re.IGNORECASE,
 )
-_QUOTED = re.compile(r"[\"“”']{1}[^\"“”']{2,}[\"“”']{1}")
+# Double and curly quotes always count. A straight single quote counts only
+# when it opens a word ("'sale'"), never when it sits inside one (potter's).
+_QUOTED = re.compile(
+    r"[\"“”][^\"“”]{2,}[\"“”]"
+    r"|(?<![A-Za-z0-9])'[^']{2,}'(?![A-Za-z0-9])"
+)
+
+# `mood` is appended to the image prompt by the photoreal enrichment, so its
+# length is part of the enrichment budget.
+MOOD_MAX = 80
 
 NEGATIVE_PROMPT_DEFAULT = (
     "text, letters, words, watermark, logo, signature, caption, typography, "
@@ -84,11 +93,24 @@ class VisualDirection(BaseModel):
 
     prompt: str = Field(min_length=10, max_length=900)
     negative_prompt: str = NEGATIVE_PROMPT_DEFAULT
-    mood: str | None = None
+    mood: str | None = Field(default=None, max_length=MOOD_MAX)
     reference_asset_id: str | None = Field(
         default=None, description="brand_assets.id when the post features a real product photo"
     )
     seed: int | None = None
+
+    @field_validator("mood")
+    @classmethod
+    def no_text_in_mood(cls, v: str | None) -> str | None:
+        # `mood` is appended to the positive prompt by the photoreal enrichment,
+        # so "bold typography with the slogan" here would reach the image model
+        # having skipped the check below.
+        if v and _TEXT_REQUEST.search(v):
+            raise ValueError(
+                "visual_direction.mood describes atmosphere only (e.g. 'warm, homely'); "
+                "it must not ask for text, logos or lettering."
+            )
+        return v.strip() if v else v
 
     @field_validator("prompt")
     @classmethod
@@ -221,11 +243,31 @@ def check_brand_rules(brief: CreativeBrief, brand: Any) -> list[str]:
     model can set to true itself.
     """
     parts = [brief.headline, brief.subhead, brief.cta, brief.caption.body, brief.alt_text]
+    parts += list(brief.caption.hashtags or [])
     for s in brief.slides:
         parts += [s.headline, s.subhead]
-    haystack = " ".join(p for p in parts if p).lower()
+    haystack = _fold(" ".join(p for p in parts if p))
     rules = getattr(brand, "never_say", None) or []
-    return [phrase for phrase in rules if phrase.lower() in haystack]
+    hits = []
+    for phrase in rules:
+        needle = _fold(phrase)
+        if needle and re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack):
+            hits.append(phrase)
+    return hits
+
+
+_FOLD = re.compile(r"[\W_]+")  # \W is Unicode-aware: Devanagari, Kannada, Tamil survive
+
+
+def _fold(text: str) -> str:
+    """Lower-case, punctuation and spacing collapsed: "100 % Pure!" == "100% pure".
+
+    Whole-phrase matching on the folded text means "Free" no longer blocks
+    "Freedom Sale", and "#cheap" in the hashtags no longer slips past "cheap".
+    Letters in any script are kept, so a never_say written in Devanagari still
+    matches copy written in Devanagari.
+    """
+    return _FOLD.sub(" ", text.lower()).strip()
 
 
 EXAMPLE = {
