@@ -34,6 +34,12 @@ def embed_texts(texts: list[str], input_type: str = "document") -> list[list[flo
     if not texts:
         return []
     if not settings.voyage_api_key:
+        if settings.is_prod and input_type == "document":
+            # A zero vector has no direction: cosine distance to it is NaN, so
+            # a row WRITTEN this way can never be retrieved, even after the
+            # key is fixed. Failing loudly beats memory that silently forgets.
+            # Reads degrade quietly instead: a zero query matches nothing.
+            raise RuntimeError("VOYAGE_API_KEY is unset; refusing to write unretrievable memory")
         # Deterministic stand-in so local runs and tests do not need a key.
         log.warning("voyage_key_missing", note="using zero vectors")
         return [[0.0] * settings.embed_dim for _ in texts]
