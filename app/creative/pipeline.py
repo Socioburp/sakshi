@@ -431,8 +431,9 @@ def _resolve_photos(
     taken = set(out.values())
     for u in open_slides:
         pick = photoref.choose(
-            photoref.slide_text(u, brief),
+            photoref.copy_text(u, brief),
             [c for c in candidates if str(c.id) not in taken],
+            direction=photoref.direction_text(u),
         )
         if pick is not None:
             out[u.position] = str(pick)

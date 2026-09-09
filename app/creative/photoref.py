@@ -14,10 +14,19 @@ validated and before anything is charged:
   no reference, nothing matches ->  generate, and charge for it
 
 Matching is deliberately literal: the words the owner used when they sent the
-photo, against the words in the copy and the visual direction for this slide.
-A wrong photograph is worse than a generated one -- it shows a product they are
-not selling today -- so a slide with no real overlap generates instead. The bar
-is a whole meaningful word, not a fuzzy score.
+photo, against the words in this slide. A wrong photograph is worse than a
+generated one -- it shows a product they are not selling today -- so a slide
+with no real overlap generates instead.
+
+Two rules keep that bar honest, and both exist because a looser version picked
+a photo of a shopfront for a post about mangoes:
+
+* **The copy counts double.** `visual_direction.prompt` is a long scene
+  description full of words like "light", "warm" and "soft". The headline is
+  what the owner is actually selling. A word shared with the headline is
+  evidence; a word shared with the lighting notes is a coincidence.
+* **One word is never enough.** MIN_SCORE is 2, so a single generic collision
+  cannot spend a slide on the wrong photograph.
 """
 
 from __future__ import annotations
@@ -31,6 +40,12 @@ USABLE_KINDS = {"product", "shop", "team", "packaging", "ingredient"}
 
 # Below this, upscaling shows before the creative does.
 MIN_SHORT_EDGE = 800
+
+# Weighted so a headline match outranks a scene-description match, and the bar
+# is set above a single accidental word.
+COPY_WEIGHT = 2
+DIRECTION_WEIGHT = 1
+MIN_SCORE = 2
 
 _WORD = re.compile(r"[a-z0-9]+")
 _STOP = {
@@ -57,8 +72,19 @@ def _tokens(*chunks: str | None) -> set[str]:
             continue
         for w in _WORD.findall(chunk.lower()):
             if len(w) > 2 and w not in _STOP:
-                out.add(w.rstrip("s") or w)
+                out.add(_singular(w))
     return out
+
+
+def _singular(w: str) -> str:
+    """Crude but symmetric: both sides of the comparison get the same treatment.
+
+    Only a single trailing "s", and never after another "s" -- rstrip("s") turned
+    "glass" into "gla" and quietly changed what matched.
+    """
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
 
 
 def is_usable(asset: _Asset) -> bool:
@@ -72,15 +98,19 @@ def is_usable(asset: _Asset) -> bool:
     return True
 
 
-def score(slide_text: str, asset: _Asset) -> int:
-    """Whole meaningful words shared between the slide and the photo's label."""
-    return len(_tokens(slide_text) & _tokens(asset.label, asset.kind))
+def score(copy: str, direction: str, asset: _Asset) -> int:
+    """Weighted words shared between this slide and the photo's label."""
+    label = _tokens(asset.label, asset.kind)
+    return (
+        COPY_WEIGHT * len(_tokens(copy) & label)
+        + DIRECTION_WEIGHT * len(_tokens(direction) & label)
+    )
 
 
-def choose(slide_text: str, assets: list[_Asset]) -> Any | None:
+def choose(copy: str, assets: list[_Asset], direction: str = "") -> Any | None:
     """Best real photograph for this slide, or None to fall through to the model."""
-    ranked = [(score(slide_text, a), a) for a in assets if is_usable(a)]
-    ranked = [(s, a) for s, a in ranked if s > 0]
+    ranked = [(score(copy, direction, a), a) for a in assets if is_usable(a)]
+    ranked = [(s, a) for s, a in ranked if s >= MIN_SCORE]
     if not ranked:
         return None
     best = max(s for s, _ in ranked)
@@ -90,16 +120,21 @@ def choose(slide_text: str, assets: list[_Asset]) -> Any | None:
     return winners[0].id
 
 
-def slide_text(slide: Any, brief: Any) -> str:
-    """Everything the slide is about, in one string, for matching."""
-    vd = getattr(slide, "visual_direction", None)
+def copy_text(slide: Any, brief: Any) -> str:
+    """What the owner is selling: the words a person will read."""
     return " ".join(
         str(x)
         for x in (
             getattr(slide, "headline", None) or getattr(brief, "headline", None),
             getattr(slide, "subhead", None),
-            getattr(vd, "prompt", None),
-            getattr(vd, "mood", None),
         )
         if x
+    )
+
+
+def direction_text(slide: Any) -> str:
+    """How the picture was described. Corroborating evidence, never the case."""
+    vd = getattr(slide, "visual_direction", None)
+    return " ".join(
+        str(x) for x in (getattr(vd, "prompt", None), getattr(vd, "mood", None)) if x
     )
