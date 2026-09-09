@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import compose
+from app.creative import compose, photoreal, photoref
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
 from app.db import repo
@@ -46,7 +46,6 @@ class CreativeFailed(Exception):
 # --------------------------------------------------------------------------- #
 async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
     units = brief.units()
-    billable = sum(1 for u in units if not u.visual_direction.reference_asset_id)
     group_id = uuid.uuid4()
 
     with session_scope() as db:
@@ -62,6 +61,12 @@ async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
                 "violations": violations,
                 "hint": "Rewrite the copy without those phrases and call the tool again.",
             }
+
+        # Real photograph first. Any slide the agent left unreferenced gets the
+        # owner's own photo when one genuinely matches -- decided here, before
+        # the charge, so the free lane is actually free.
+        resolved = _resolve_photos(db, ctx.brand_id, brief, units)
+        billable = sum(1 for u in units if not resolved.get(u.position))
 
         brief_row = repo.save_brief(
             db,
@@ -114,13 +119,13 @@ async def generate(ctx: ToolContext, brief: CreativeBrief) -> dict:
                     "hint": "Tell the owner they are out of credits and offer a top-up.",
                 }
         brand_snapshot = _snapshot(db, brand)
-        assets = _load_assets(db, ctx.brand_id, units)
+        assets = _load_assets(db, ctx.brand_id, units, resolved)
 
     # Slides run concurrently. gather with return_exceptions so one bad slide
     # does not discard the ones that already succeeded.
     results = await asyncio.gather(
         *(
-            _build_one(ctx, brief, slide, cid, brand_snapshot, assets)
+            _build_one(ctx, brief, slide, cid, brand_snapshot, assets, resolved)
             for slide, cid in zip(units, creative_ids, strict=True)
         ),
         return_exceptions=True,
@@ -276,9 +281,10 @@ async def _build_one(
     creative_id: uuid.UUID,
     brand_snapshot,
     assets: dict[str, BrandAssetSnapshot],
+    resolved: dict[int, str] | None = None,
 ) -> str:
     w, h = brief.pixel_size()
-    ref = slide.visual_direction.reference_asset_id
+    ref = (resolved or {}).get(slide.position) or slide.visual_direction.reference_asset_id
     stage = f"slide{slide.position}"
 
     if ref and ref in assets:
@@ -289,11 +295,19 @@ async def _build_one(
     else:
         provider = get_provider()
         provider_name = provider.name
+        # A photograph is asked for in the words a photograph is described in;
+        # the rendered look is named in the negative. Applied in code so every
+        # slide gets it, not only the ones the model remembered to dress up.
+        prompt, negative = photoreal.photographic(
+            slide.visual_direction.prompt,
+            slide.visual_direction.negative_prompt,
+            mood=slide.visual_direction.mood,
+        )
         with ctx.trace.stage(f"{stage}:imagegen", provider=provider.name):
             res = await provider.generate(
                 ImageRequest(
-                    prompt=slide.visual_direction.prompt,
-                    negative=slide.visual_direction.negative_prompt,
+                    prompt=prompt,
+                    negative=negative,
                     width=w,
                     height=h,
                     seed=slide.visual_direction.seed,
@@ -382,12 +396,65 @@ class BrandAssetSnapshot:
         self.id, self.storage_key, self.mime = id, storage_key, mime
 
 
-def _load_assets(db, brand_id: uuid.UUID, units: list[Slide]) -> dict[str, BrandAssetSnapshot]:
+def _resolve_photos(
+    db, brand_id: uuid.UUID, brief: CreativeBrief, units: list[Slide]
+) -> dict[int, str]:
+    """Slide position -> brand_assets.id for every slide that should use a real photo.
+
+    An explicit reference always wins. For the rest, the owner's own photographs
+    are matched against this slide's copy, and a slide with no genuine match is
+    left to the image model rather than given a photograph of the wrong product.
+
+    Within one carousel a photo is used at most once: two slides showing the
+    same jar reads as a bug, not as a set.
+    """
+    out = {
+        u.position: str(u.visual_direction.reference_asset_id)
+        for u in units
+        if u.visual_direction.reference_asset_id
+    }
+    open_slides = [u for u in units if u.position not in out]
+    if not open_slides:
+        return out
+
+    candidates = list(
+        db.scalars(
+            select(BrandAsset)
+            .where(BrandAsset.brand_id == brand_id, BrandAsset.kind != "logo")
+            .order_by(BrandAsset.created_at.desc())
+            .limit(60)
+        )
+    )
+    if not candidates:
+        return out
+
+    taken = set(out.values())
+    for u in open_slides:
+        pick = photoref.choose(
+            photoref.slide_text(u, brief),
+            [c for c in candidates if str(c.id) not in taken],
+        )
+        if pick is not None:
+            out[u.position] = str(pick)
+            taken.add(str(pick))
+    auto = sorted(p for p in out if p in {u.position for u in open_slides})
+    if auto:
+        log.info("real_photo_matched", brand_id=str(brand_id), slides=auto)
+    return out
+
+
+def _load_assets(
+    db,
+    brand_id: uuid.UUID,
+    units: list[Slide],
+    resolved: dict[int, str] | None = None,
+) -> dict[str, BrandAssetSnapshot]:
     ids = {
         u.visual_direction.reference_asset_id
         for u in units
         if u.visual_direction.reference_asset_id
     }
+    ids |= {v for v in (resolved or {}).values() if v}
     if not ids:
         return {}
     out: dict[str, BrandAssetSnapshot] = {}
@@ -404,7 +471,15 @@ def _load_assets(db, brand_id: uuid.UUID, units: list[Slide]) -> dict[str, Brand
 class _BrandSnapshot:
     """Detached copy so compositing does not hold a DB session open."""
 
-    __slots__ = ("name", "logo_url", "logo_src", "palette", "fonts", "never_say")
+    __slots__ = (
+        "name",
+        "logo_url",
+        "logo_src",
+        "logo_analysis",
+        "palette",
+        "fonts",
+        "never_say",
+    )
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -437,6 +512,7 @@ def _snapshot(db, brand: Brand) -> _BrandSnapshot:
         name=brand.name,
         logo_url=brand.logo_url,
         logo_src=logo_src or brand.logo_url,
+        logo_analysis=dict(brand.logo_analysis or {}),
         palette=dict(brand.palette or {}),
         fonts=dict(brand.fonts or {}),
         never_say=list(brand.never_say or []),
