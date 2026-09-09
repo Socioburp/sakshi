@@ -37,3 +37,8 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# setuptools cannot guess the package when app/, migrations/, templates/ and
+# samples/ all sit at the top level, so `pip install -e .` is told explicitly.
+[tool.setuptools.packages.find]
+include = ["app*"]
