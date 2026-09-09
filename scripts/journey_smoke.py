@@ -47,12 +47,21 @@ _blobs: dict[str, bytes] = {}
 r2.put = lambda key, data, ct=None: (_blobs.__setitem__(key, data), f"file://local/{key}")[1]
 r2.get = lambda key: _blobs[key]
 r2.public_url = lambda key: f"file://local/{key}"
+r2.promote = lambda key: (
+    _blobs.__setitem__(key.replace("drafts/", "published/", 1), _blobs[key]),
+    f"file://local/{key.replace('drafts/', 'published/', 1)}",
+)[1]
 
 # -- stub 2/3: the queue -> run jobs inline -------------------------------- #
 from app.channels.whatsapp import ingest as ingest_mod  # noqa: E402
 
 JOBS: list[tuple[str, dict]] = []
-ingest_mod.enqueue = lambda **kw: (JOBS.append((kw["kind"], kw["payload"])), "job")[1]
+# The job ROW still goes into Postgres with the message (that is the point of
+# add_job); only the Redis push is replaced, so the jobs run inline here.
+ingest_mod.push_job = lambda job_id, kind, payload, scheduled_for=None: (
+    JOBS.append((str(job_id), kind, payload)),
+    True,
+)[1]
 
 # -- stub 3/3: Anthropic -> a scripted conversation ------------------------ #
 from app.agent import runner  # noqa: E402
@@ -103,12 +112,13 @@ from app.agent.tools import _publish_to_instagram  # noqa: E402
 from app.channels.whatsapp.adapters import get_adapter  # noqa: E402
 from app.creative.brief import CreativeBrief  # noqa: E402
 from app.db import repo  # noqa: E402
-from app.db.models import (  # noqa: E402  # noqa: E402
+from app.db.models import (  # noqa: E402
     Brand,
     BrandAsset,
     BrandMemory,
     Brief,
     IgAccount,
+    Job,
     Publication,
 )
 from app.db.session import session_scope  # noqa: E402
@@ -145,9 +155,16 @@ async def inbound(**message) -> None:
     payload = {"messages": [{"id": f"mock-{uuid.uuid4()}", "from": WA, **message}]}
     r = client.post("/webhooks/whatsapp", json=payload)
     assert r.status_code == 200, r.text
+    ran: list[uuid.UUID] = []
     while JOBS:
-        kind, job = JOBS.pop(0)
+        job_id, kind, job = JOBS.pop(0)
         await HANDLERS[kind](job)
+        ran.append(uuid.UUID(job_id))
+    # The rows went into Postgres with the messages; a `make worker` on this
+    # database must not find THESE "queued" and run them again. Only these:
+    # a shared dev database may hold real ones.
+    with session_scope() as db:
+        db.query(Job).filter(Job.id.in_(ran)).update({"status": "done"}, synchronize_session=False)
 
 
 def last_texts(n: int = 3) -> list[str]:
