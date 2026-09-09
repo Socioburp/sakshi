@@ -1,23 +1,34 @@
 {% extends "_base.html.j2" %}
+{% set hl = slide.headline|length %}
+{% set hf = 0.088 if hl < 20 else (0.078 if hl < 32 else 0.068) %}
 {% block styles %}
-  .bg { height: {{ (height*0.62)|round|int }}px; }
-  .scrim { background: linear-gradient(180deg, rgba(0,0,0,.25) 0%, rgba(0,0,0,0) 40%); }
+  {# The photograph gets the top 62% uncropped by text; the panel below is where
+     the words live, so nothing is ever set over a busy area. #}
+  .bg { height: {{ (height*0.63)|round|int }}px; }
+  .scrim { height: {{ (height*0.63)|round|int }}px;
+           background: linear-gradient(180deg, rgba(0,0,0,.22) 0%, rgba(0,0,0,0) 38%); }
+  .grain { height: {{ (height*0.63)|round|int }}px; }
   .panel { position: absolute; left: 0; right: 0; bottom: 0;
            height: {{ (height*0.40)|round|int }}px; background: {{ brand.primary }};
-           border-radius: {{ (width*0.05)|round|int }}px {{ (width*0.05)|round|int }}px 0 0;
-           padding: {{ (width*0.07)|round|int }}px; display: flex; flex-direction: column; }
-  .headline { font-size: {{ (width*0.078)|round|int }}px; color: {{ brand.ink }}; }
-  .subhead { font-size: {{ (width*0.034)|round|int }}px; }
+           border-radius: {{ (width*0.055)|round|int }}px {{ (width*0.055)|round|int }}px 0 0;
+           padding: {{ (width*0.072)|round|int }}px; display: flex; flex-direction: column;
+           box-shadow: 0 -{{ (width*0.012)|round|int }}px
+                       {{ (width*0.05)|round|int }}px rgba(0,0,0,.28); }
+  .headline { font-size: {{ (width * hf)|round|int }}px; color: {{ brand.ink }};
+              text-shadow: none; }
+  .subhead { font-size: {{ (width*0.033)|round|int }}px; text-shadow: none; max-width: 86%; }
   .footrow { display: flex; align-items: center; justify-content: space-between;
-             margin-top: auto; }
+             gap: {{ (width*0.03)|round|int }}px; margin-top: auto; }
+  .footrow .logo { height: {{ (width*0.052)|round|int }}px;
+                   max-width: {{ (width*0.34)|round|int }}px; filter: none; }
 {% endblock %}
 {% block body %}
-  <div class="scrim"></div>
   <div class="panel">
     <h1 class="headline">{{ slide.headline }}</h1>
     {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
     <div class="footrow">
-      <span class="brandline">{{ brand.name }}</span>
+      {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
+      {% else %}<span class="brandline">{{ brand.name }}</span>{% endif %}
       {% if show_cta %}<span class="cta">{{ brief.cta }}</span>{% endif %}
     </div>
   </div>

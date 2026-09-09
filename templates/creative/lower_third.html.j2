@@ -1,20 +1,31 @@
 {% extends "_base.html.j2" %}
+{% set hl = slide.headline|length %}
+{% set hf = 0.104 if hl < 18 else (0.092 if hl < 30 else (0.080 if hl < 42 else 0.070)) %}
 {% block styles %}
-  .scrim { background: linear-gradient(180deg, rgba(0,0,0,0) 40%, rgba(0,0,0,.82) 100%); }
+  {# Weighted to the bottom third, but eased: the photograph stays legible in
+     its top two thirds instead of dying under a black wash. #}
+  .scrim { background: linear-gradient(180deg,
+      rgba(0,0,0,.30) 0%, rgba(0,0,0,.06) 22%, rgba(0,0,0,0) 40%,
+      rgba(0,0,0,.20) 58%, rgba(0,0,0,.52) 76%, rgba(0,0,0,.76) 100%); }
   .content { justify-content: flex-end; text-align: left; }
-  .headline { font-size: {{ (width*0.090)|round|int }}px; max-width: 82%; }
-  .subhead { font-size: {{ (width*0.038)|round|int }}px; max-width: 74%; }
-  .cta { margin-top: {{ (width*0.042)|round|int }}px; }
-  .top { position: absolute; top: {{ (width*0.06)|round|int }}px;
-         left: {{ (width*0.075)|round|int }}px; }
+  .headline { font-size: {{ (width * hf)|round|int }}px; max-width: 84%; }
+  .subhead { font-size: {{ (width*0.036)|round|int }}px; max-width: 70%; }
+  .cta { margin-top: {{ (width*0.044)|round|int }}px; }
+  .top { position: absolute; top: {{ (width*0.062)|round|int }}px;
+         left: {{ (width*0.078)|round|int }}px; }
+  {# Accent hairline: a small, deliberate mark that ties the copy block to the
+     brand colour without another coloured shape competing with the CTA. #}
+  .rule { width: {{ (width*0.10)|round|int }}px; height: {{ (width*0.008)|round|int }}px;
+          background: {{ brand.accent }}; border-radius: 999px;
+          margin: 0 0 {{ (width*0.030)|round|int }}px; }
 {% endblock %}
 {% block body %}
-  <div class="scrim"></div>
   <div class="top">
     {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
     {% else %}<span class="brandline">{{ brand.name }}</span>{% endif %}
   </div>
   <div class="content">
+    <div class="rule"></div>
     <h1 class="headline">{{ slide.headline }}</h1>
     {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
     {% if show_cta %}<div class="cta">{{ brief.cta }}</div>{% endif %}
