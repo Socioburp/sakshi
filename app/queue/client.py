@@ -27,9 +27,7 @@ _client: redis.Redis | None = None
 def get_redis() -> redis.Redis:
     global _client
     if _client is None:
-        _client = redis.Redis.from_url(
-            settings.redis_url, decode_responses=True, socket_timeout=10
-        )
+        _client = redis.Redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=10)
     return _client
 
 

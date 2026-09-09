@@ -39,36 +39,56 @@ async def transcribe_and_handle(payload: dict) -> None:
             url=payload.get("media_url"),
             mime=payload.get("media_mime"),
         )
-        with t.stage("media_download"):
-            audio, mime = await adapter.download_media(ref)
+        try:
+            with t.stage("media_download"):
+                audio, mime = await adapter.download_media(ref)
+        except Exception:  # noqa: BLE001
+            log.exception("media_download_failed", message_id=str(message_id))
+            await run_turn(message_id=message_id, trace=t)
+            return
 
         with session_scope() as db:
             account = db.get(Account, account_id)
-            brand = db.query(Brand).filter(Brand.account_id == account_id).first()
             # The locale we locked from their typed messages is a far better STT
             # hint than a default -- a Kannada speaker's voice note transcribed
             # as Hindi loses exactly the words that matter, the product names.
-            hints = [h for h in [account.locale if account else None] if h]
-            hints += [x for x in (brand.languages or []) if x not in hints] if brand else []
+            # "en-IN" is the column default, never a locked choice (English is
+            # not lockable from text), so it is not evidence about this voice
+            # note. Forcing a Kannada speaker's first note through English
+            # loses exactly the product names. No hint = provider auto-detect.
+            # brand.languages is seeded ["en", "hi"] for everyone, so it would
+            # force a Kannada speaker's first note through Hindi. The only hint
+            # worth giving is a locale the owner has actually locked.
+            locale = account.locale if account else None
+            hints = [locale] if locale and not locale.lower().startswith("en") else []
 
-        with t.stage("stt", provider=None, bytes=len(audio)):
-            result = await transcribe(audio, mime, hint_languages=hints or None)
+        result = None
+        try:
+            with t.stage("stt", provider=None, bytes=len(audio)):
+                result = await transcribe(audio, mime, hint_languages=hints or None)
+        except Exception:  # noqa: BLE001
+            # The riskiest vendor call in the product must not end in silence.
+            # The runner sees "[voice note, could not be transcribed]" and the
+            # agent asks them to type it -- one line, in their language.
+            log.exception("stt_failed", message_id=str(message_id), hints=hints)
 
         with session_scope() as db:
             msg = db.get(Message, message_id)
-            msg.transcript = result.text
-            msg.transcript_provider = result.provider
-            msg.transcript_lang = result.language
-            msg.transcript_confidence = result.confidence
             msg.media_mime = mime
+            if result is not None:
+                msg.transcript = result.text
+                msg.transcript_provider = result.provider
+                msg.transcript_lang = result.language
+                msg.transcript_confidence = result.confidence
 
-        log.info(
-            "voice_note_transcribed",
-            message_id=str(message_id),
-            provider=result.provider,
-            lang=result.language,
-            chars=len(result.text),
-        )
+        if result is not None:
+            log.info(
+                "voice_note_transcribed",
+                message_id=str(message_id),
+                provider=result.provider,
+                lang=result.language,
+                chars=len(result.text),
+            )
         await run_turn(message_id=message_id, trace=t)
 
 
@@ -103,8 +123,18 @@ async def handle_image(payload: dict) -> None:
             await run_turn(message_id=message_id, trace=t)
             return
 
-        is_logo = payload.get("is_logo_candidate", not already_has_logo)
+        # Decided NOW, not when the webhook landed. An owner who sends the logo
+        # and a product shot in the same breath produced two payloads both
+        # flagged as the logo candidate; the second one used to overwrite the
+        # first -- logo, palette and notes replaced by a photo of a jar.
+        is_logo = bool(payload.get("is_logo_candidate", True)) and not already_has_logo
         kind = "logo" if is_logo else "product"
+        # The caption is the label the photo-first lane matches on. "coconut
+        # oil 500ml" typed under a picture is worth more than any vision pass.
+        with session_scope() as db:
+            m = db.get(Message, message_id)
+            caption = (m.text or "").strip() if m is not None else ""
+        dims = _image_size(image) if not is_logo else None
 
         with t.stage("asset_upload"):
             ext = "png" if "png" in (mime or "") else "jpg"
@@ -121,12 +151,12 @@ async def handle_image(payload: dict) -> None:
                 BrandAsset(
                     brand_id=brand_id,
                     kind=kind,
-                    label="Logo" if is_logo else None,
+                    label="Logo" if is_logo else (caption[:160] or None),
                     storage_key=key,
                     url=url,
                     mime=mime,
-                    width=analysis.width if analysis else None,
-                    height=analysis.height if analysis else None,
+                    width=analysis.width if analysis else (dims[0] if dims else None),
+                    height=analysis.height if analysis else (dims[1] if dims else None),
                     source_message_id=message_id,
                 )
             )
@@ -162,7 +192,10 @@ async def handle_image(payload: dict) -> None:
                     f"{', '.join(f'{k} {v}' for k, v in analysis.palette.items())}"
                     + (f"; {analysis.summary}" if analysis.summary else "")
                     if analysis
-                    else "[sent a photo, saved to their brand assets]"
+                    else (
+                        f"[sent a product photo, saved to their brand assets"
+                        f"{': ' + caption if caption else ''}]"
+                    )
                 )
 
         log.info(
@@ -172,6 +205,19 @@ async def handle_image(payload: dict) -> None:
             palette=(analysis.palette if analysis else None),
         )
         await run_turn(message_id=message_id, trace=t)
+
+
+def _image_size(data: bytes) -> tuple[int, int] | None:
+    """Pixel size of an inbound photo. Only the header is decoded."""
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as im:
+            return im.size
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def publish_scheduled(payload: dict) -> None:
