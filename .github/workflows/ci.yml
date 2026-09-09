@@ -53,7 +53,6 @@ jobs:
 
       - name: Format check
         run: ruff format --check app scripts tests
-        continue-on-error: true   # drop this line once the tree is ruff-format clean
 
       - name: Tests
         run: pytest -q
