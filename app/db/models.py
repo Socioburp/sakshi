@@ -194,6 +194,9 @@ class Message(Base):
     transcript_provider: Mapped[str | None] = mapped_column(String(32))
     transcript_lang: Mapped[str | None] = mapped_column(String(16))
     transcript_confidence: Mapped[float | None] = mapped_column()
+    # Stamped by the agent turn that folded this inbound message into its
+    # reply. NULL means no turn has answered it yet.
+    answered_at: Mapped[datetime | None] = mapped_column(TS)
     raw: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
 
@@ -263,6 +266,9 @@ class Creative(Base):
     composed_url: Mapped[str | None] = mapped_column(Text)
     imagegen_provider: Mapped[str | None] = mapped_column(String(32))
     imagegen_job_id: Mapped[str | None] = mapped_column(String(120))
+    # Was THIS slide charged for? Set at charge time so a reaper that finds the
+    # row stuck after a crash can refund exactly what was paid, once.
+    billed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     cost_micros: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False)
     error: Mapped[str | None] = mapped_column(Text)

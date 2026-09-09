@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -21,30 +22,45 @@ def now() -> datetime:
 
 # --------------------------------------------------------------------------- #
 def get_or_create_account(db: Session, wa_phone: str, display_name: str | None = None) -> Account:
+    """Find or create, safely under concurrent first contact.
+
+    A new owner's "hi" and their voice note arrive in the same second and are
+    ingested concurrently. Check-then-insert raised IntegrityError for the
+    second one and silently dropped their message -- on the very first
+    contact. The insert now runs in a savepoint; the loser re-reads.
+    """
     acct = db.scalar(select(Account).where(Account.wa_phone == wa_phone))
     if acct:
         if display_name and not acct.display_name:
             acct.display_name = display_name
             db.flush()
         return acct
-    acct = Account(
-        wa_phone=wa_phone,
-        display_name=display_name,
-        credits_balance=settings.free_trial_credits,
-    )
-    db.add(acct)
-    db.flush()
-    db.add(
-        Brand(
-            account_id=acct.id,
-            name=display_name or "My brand",
-            languages=["en", "hi"],
-            palette={},
-            fonts={},
-        )
-    )
-    db.flush()
-    return acct
+    try:
+        with db.begin_nested():
+            acct = Account(
+                wa_phone=wa_phone,
+                display_name=display_name,
+                credits_balance=settings.free_trial_credits,
+            )
+            db.add(acct)
+            db.flush()
+            db.add(
+                Brand(
+                    account_id=acct.id,
+                    name=display_name or "My brand",
+                    languages=["en", "hi"],
+                    palette={},
+                    fonts={},
+                )
+            )
+            db.flush()
+        return acct
+    except IntegrityError:
+        db.expire_all()
+        acct = db.scalar(select(Account).where(Account.wa_phone == wa_phone))
+        if acct is None:  # pragma: no cover - the unique index guarantees a winner
+            raise
+        return acct
 
 
 def default_brand(db: Session, account_id: uuid.UUID) -> Brand | None:
@@ -72,8 +88,21 @@ def touch_session(db: Session, account: Account, wa_id: str, inbound: bool) -> W
         db.flush()
         sess = None
     if sess is None:
-        sess = WaSession(account_id=account.id, wa_id=wa_id, state={})
-        db.add(sess)
+        # Same race as the account: two first messages, one live session.
+        try:
+            with db.begin_nested():
+                sess = WaSession(account_id=account.id, wa_id=wa_id, state={})
+                db.add(sess)
+                db.flush()
+        except IntegrityError:
+            db.expire_all()
+            sess = db.scalar(
+                select(WaSession)
+                .where(WaSession.account_id == account.id, WaSession.wa_id == wa_id)
+                .where(WaSession.closed_at.is_(None))
+                .order_by(WaSession.created_at.desc())
+                .limit(1)
+            )
     if inbound:
         sess.last_inbound_at = ts
         sess.window_expires_at = ts + WA_WINDOW
@@ -167,12 +196,23 @@ def latest_creative_for_brief(db: Session, brief_id: uuid.UUID) -> Creative | No
     )
 
 
-def mark_approved(db: Session, *, brief_id: str, via: str) -> int:
-    """Stamp every slide of a brief as approved. Returns how many were stamped."""
+def mark_approved(
+    db: Session, *, brief_id: str, via: str, account_id: uuid.UUID | None = None
+) -> int:
+    """Stamp every slide of a brief as approved. Returns how many were stamped.
+
+    Scoped to the account that tapped: a button id is ours, but Twilio's and
+    Gupshup's payloads arrive from the provider verbatim, and an approval must
+    never land on another account's creative.
+    """
     try:
         bid = uuid.UUID(brief_id)
     except (ValueError, AttributeError):
         return 0
+    if account_id is not None:
+        brief = db.get(Brief, bid)
+        if brief is None or brief.account_id != account_id:
+            return 0
     rows = creatives_for_brief(db, bid)
     stamped = 0
     for row in rows:
