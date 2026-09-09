@@ -5,6 +5,8 @@ from __future__ import annotations
 import uuid
 import uuid as _uuid
 
+from sqlalchemy import select
+
 from app.agent.runner import run_turn
 from app.channels.base import MediaRef
 from app.channels.whatsapp.adapters import get_adapter
@@ -39,6 +41,14 @@ async def transcribe_and_handle(payload: dict) -> None:
             url=payload.get("media_url"),
             mime=payload.get("media_mime"),
         )
+        with session_scope() as db:
+            existing = db.get(Message, message_id)
+            if existing is not None and existing.transcript:
+                # A re-run (reaper, duplicate delivery): the transcript is
+                # already there; do not pay the vendor twice.
+                await run_turn(message_id=message_id, trace=t)
+                return
+
         try:
             with t.stage("media_download"):
                 audio, mime = await adapter.download_media(ref)
@@ -104,6 +114,15 @@ async def handle_image(payload: dict) -> None:
     account_id = _uuid.UUID(payload["account_id"])
 
     with trace(account_id=account_id) as t:
+        with session_scope() as db:
+            already = db.scalar(
+                select(BrandAsset).where(BrandAsset.source_message_id == message_id).limit(1)
+            )
+        if already is not None:
+            # A re-run: the photo is stored and the brand updated; just answer.
+            await run_turn(message_id=message_id, trace=t)
+            return
+
         adapter = get_adapter(payload.get("provider"))
         ref = MediaRef(
             id=payload.get("media_id"),
@@ -117,7 +136,9 @@ async def handle_image(payload: dict) -> None:
             brand = repo.default_brand(db, account_id)
             brand_id = brand.id if brand else None
             brand_name = brand.name if brand else "your brand"
-            already_has_logo = bool(brand and brand.logo_url)
+            already_has_logo = bool(
+                brand and (brand.logo_url or (brand.template_prefs or {}).get("no_logo"))
+            )
 
         if brand_id is None:
             await run_turn(message_id=message_id, trace=t)
