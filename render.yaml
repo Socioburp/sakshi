@@ -1,0 +1,66 @@
+# Render blueprint. Put the web service and the worker in the SAME region as
+# your Neon project -- every agent turn makes several round trips to Postgres,
+# and cross-region adds ~150ms to each of them.
+services:
+  - type: web
+    name: sakshi-api
+    runtime: python
+    region: singapore
+    plan: starter
+    buildCommand: pip install -e . && playwright install --with-deps chromium
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - fromGroup: sakshi-secrets
+
+  - type: worker
+    name: sakshi-worker
+    runtime: python
+    region: singapore
+    plan: starter
+    buildCommand: pip install -e . && playwright install --with-deps chromium
+    startCommand: python -m app.queue.worker
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - fromGroup: sakshi-secrets
+
+envVarGroups:
+  - name: sakshi-secrets
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        sync: false
+      - key: VOYAGE_API_KEY
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_PUBLIC_BASE_URL
+        sync: false
+      - key: WA_PROVIDER
+        sync: false
+      - key: WA_VERIFY_TOKEN
+        sync: false
+      - key: WA_APP_SECRET
+        sync: false
+      - key: WA_ACCESS_TOKEN
+        sync: false
+      - key: WA_PHONE_NUMBER_ID
+        sync: false
+      - key: INSTAGRAM_MOCK
+        value: "true"
+      - key: PUBLIC_BASE_URL
+        sync: false

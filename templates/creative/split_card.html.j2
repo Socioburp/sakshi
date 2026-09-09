@@ -1,0 +1,24 @@
+{% extends "_base.html.j2" %}
+{% block styles %}
+  .bg { height: {{ (height*0.62)|round|int }}px; }
+  .scrim { background: linear-gradient(180deg, rgba(0,0,0,.25) 0%, rgba(0,0,0,0) 40%); }
+  .panel { position: absolute; left: 0; right: 0; bottom: 0;
+           height: {{ (height*0.40)|round|int }}px; background: {{ brand.primary }};
+           border-radius: {{ (width*0.05)|round|int }}px {{ (width*0.05)|round|int }}px 0 0;
+           padding: {{ (width*0.07)|round|int }}px; display: flex; flex-direction: column; }
+  .headline { font-size: {{ (width*0.078)|round|int }}px; color: {{ brand.ink }}; }
+  .subhead { font-size: {{ (width*0.034)|round|int }}px; }
+  .footrow { display: flex; align-items: center; justify-content: space-between;
+             margin-top: auto; }
+{% endblock %}
+{% block body %}
+  <div class="scrim"></div>
+  <div class="panel">
+    <h1 class="headline">{{ slide.headline }}</h1>
+    {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
+    <div class="footrow">
+      <span class="brandline">{{ brand.name }}</span>
+      {% if show_cta %}<span class="cta">{{ brief.cta }}</span>{% endif %}
+    </div>
+  </div>
+{% endblock %}

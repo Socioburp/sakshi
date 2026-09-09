@@ -1,0 +1,187 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Sakshi Creative Brief",
+  "description": "Emitted by the Fable 5.1 agent BEFORE any image call. This is the unit of revision, the debug surface, and what gets replayed on failure. If the brief is wrong, never spend money on an image.",
+  "type": "object",
+  "required": [
+    "intent",
+    "format",
+    "headline",
+    "visual_direction"
+  ],
+  "properties": {
+    "intent": {
+      "type": "string",
+      "enum": [
+        "promo",
+        "new_product",
+        "festive",
+        "testimonial",
+        "announcement",
+        "educational",
+        "behind_the_scenes"
+      ]
+    },
+    "format": {
+      "type": "object",
+      "required": [
+        "type",
+        "aspect_ratio"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "single",
+            "carousel"
+          ]
+        },
+        "aspect_ratio": {
+          "type": "string",
+          "enum": [
+            "1:1",
+            "4:5",
+            "9:16"
+          ]
+        },
+        "slide_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6,
+          "description": "1 for a single post; 2-6 for a carousel. The product offers 2-6 today; Instagram itself allows up to 10."
+        }
+      }
+    },
+    "headline": {
+      "type": "string",
+      "maxLength": 60
+    },
+    "subhead": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "cta": {
+      "type": "string",
+      "maxLength": 30
+    },
+    "visual_direction": {
+      "type": "object",
+      "required": [
+        "prompt"
+      ],
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "Background/hero image prompt ONLY. Must NOT request any text, logos, or watermarks \u2014 those are composited separately with the brand's real fonts."
+        },
+        "negative_prompt": {
+          "type": "string"
+        },
+        "mood": {
+          "type": "string"
+        },
+        "reference_asset_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "brand_assets.id when the post features a real product photo"
+        }
+      }
+    },
+    "template_id": {
+      "type": "string",
+      "description": "Which HTML template in templates/creative/ to composite with. Agent picks based on text volume and intent.",
+      "default": "centered_overlay"
+    },
+    "palette_override": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Only for festive posts that intentionally deviate. Null means use brands.palette."
+    },
+    "caption": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "hashtags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 15
+        },
+        "language": {
+          "type": "string",
+          "default": "en"
+        }
+      }
+    },
+    "alt_text": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "Instagram accessibility field. Passed on the media container."
+    },
+    "grounding": {
+      "type": "object",
+      "description": "What was retrieved from brand_memory to build this brief. Logged for debugging retrieval quality.",
+      "properties": {
+        "catalog_item_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "style_anchor_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rejection_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "slides": {
+      "type": "array",
+      "description": "Carousel only, 2-6 items. Each slide gets its own image call \u2014 dispatched IN PARALLEL.",
+      "items": {
+        "type": "object",
+        "required": [
+          "position",
+          "headline",
+          "visual_direction"
+        ],
+        "properties": {
+          "position": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "headline": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "subhead": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "visual_direction": {
+            "type": "object"
+          },
+          "template_id": {
+            "type": "string"
+          }
+        }
+      },
+      "maxItems": 6
+    }
+  }
+}

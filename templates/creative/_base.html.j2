@@ -1,0 +1,57 @@
+{# Shared shell. Every template is exactly width x height with no scrollbars. #}
+<!DOCTYPE html>
+<html lang="{{ brief.caption.language }}">
+<head>
+<meta charset="utf-8">
+{% if brand.google_fonts %}<link rel="stylesheet" href="{{ brand.google_fonts }}">{% endif %}
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: {{ width }}px; height: {{ height }}px;
+               overflow: hidden; background: {{ brand.primary }}; }
+  .stage { position: relative; width: {{ width }}px; height: {{ height }}px; }
+  .bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .scrim { position: absolute; inset: 0; }
+  .content { position: absolute; inset: 0; display: flex; flex-direction: column;
+             padding: {{ (width * 0.075) | round | int }}px; }
+  .headline { font-family: '{{ brand.heading_font }}', system-ui, sans-serif;
+              font-weight: 800; line-height: 1.02; letter-spacing: -0.02em;
+              color: {{ brand.ink }}; margin: 0; text-wrap: balance; }
+  .subhead { font-family: '{{ brand.body_font }}', system-ui, sans-serif;
+             font-weight: 400; line-height: 1.3; color: {{ brand.ink }};
+             opacity: .92; margin: {{ (width*0.022)|round|int }}px 0 0; }
+  .cta { display: inline-flex; align-items: center; align-self: flex-start;
+         font-family: '{{ brand.body_font }}', system-ui, sans-serif; font-weight: 700;
+         background: {{ brand.accent }}; color: {{ brand.secondary }};
+         padding: {{ (width*0.026)|round|int }}px {{ (width*0.045)|round|int }}px;
+         border-radius: 999px; font-size: {{ (width*0.036)|round|int }}px;
+         letter-spacing: .01em; }
+  .logo { height: {{ (width*0.07)|round|int }}px; object-fit: contain; }
+  .brandline { font-family: '{{ brand.body_font }}', system-ui, sans-serif;
+               font-weight: 600; font-size: {{ (width*0.028)|round|int }}px;
+               color: {{ brand.ink }}; opacity: .85; letter-spacing: .06em;
+               text-transform: uppercase; }
+  {# Carousel affordance: tells the reader there is more to swipe to. #}
+  .pips { position: absolute; top: {{ (width*0.06)|round|int }}px;
+          right: {{ (width*0.06)|round|int }}px; display: flex;
+          gap: {{ (width*0.012)|round|int }}px; }
+  .pip { width: {{ (width*0.016)|round|int }}px; height: {{ (width*0.016)|round|int }}px;
+         border-radius: 50%; background: {{ brand.ink }}; opacity: .35; }
+  .pip.on { opacity: 1; background: {{ brand.accent }}; }
+  .spacer { flex: 1 1 auto; }
+  {% block styles %}{% endblock %}
+</style>
+</head>
+<body>
+  <div class="stage">
+    <img class="bg" src="{{ background }}" alt="">
+    {% if slide_count > 1 %}
+    <div class="pips">
+      {% for i in range(1, slide_count + 1) %}
+      <span class="pip {{ 'on' if i == slide.position else '' }}"></span>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% block body %}{% endblock %}
+  </div>
+</body>
+</html>

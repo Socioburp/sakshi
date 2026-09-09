@@ -1,0 +1,22 @@
+{% extends "_base.html.j2" %}
+{% block styles %}
+  .scrim { background: linear-gradient(180deg, rgba(0,0,0,0) 40%, rgba(0,0,0,.82) 100%); }
+  .content { justify-content: flex-end; text-align: left; }
+  .headline { font-size: {{ (width*0.090)|round|int }}px; max-width: 82%; }
+  .subhead { font-size: {{ (width*0.038)|round|int }}px; max-width: 74%; }
+  .cta { margin-top: {{ (width*0.042)|round|int }}px; }
+  .top { position: absolute; top: {{ (width*0.06)|round|int }}px;
+         left: {{ (width*0.075)|round|int }}px; }
+{% endblock %}
+{% block body %}
+  <div class="scrim"></div>
+  <div class="top">
+    {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
+    {% else %}<span class="brandline">{{ brand.name }}</span>{% endif %}
+  </div>
+  <div class="content">
+    <h1 class="headline">{{ slide.headline }}</h1>
+    {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
+    {% if show_cta %}<div class="cta">{{ brief.cta }}</div>{% endif %}
+  </div>
+{% endblock %}

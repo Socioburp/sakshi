@@ -1,0 +1,9 @@
+[
+  {
+    "file": "kn_oil_shop_01.ogg",
+    "language": "kn",
+    "reference": "REPLACE ME with the human transcript of the voice note",
+    "must_catch": ["Nandini", "ghee", "500 ml", "249"],
+    "notes": "example row -- delete once you have real recordings"
+  }
+]
