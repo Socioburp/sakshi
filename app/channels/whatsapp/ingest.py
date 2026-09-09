@@ -13,7 +13,7 @@ from app.channels.base import InboundMessage
 from app.db import repo
 from app.db.session import session_scope
 from app.logging import get_logger
-from app.queue.client import enqueue
+from app.queue.client import add_job, push_job
 
 log = get_logger(__name__)
 
@@ -36,7 +36,9 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
             session_id=sess.id,
             channel="whatsapp",
             provider=msg.provider,
-            provider_message_id=msg.provider_message_id,
+            # "" is what adapters send when the provider gave no id; the unique
+            # index would make the second such message collide. NULLs do not.
+            provider_message_id=msg.provider_message_id or None,
             direction="in",
             kind=msg.kind,
             text=msg.text,
@@ -58,7 +60,9 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
         # agent's word for whether the client agreed.
         if msg.interactive_id and msg.interactive_id.startswith(APPROVE_PREFIX):
             brief_id = msg.interactive_id[len(APPROVE_PREFIX) :]
-            approved = repo.mark_approved(db, brief_id=brief_id, via="button")
+            approved = repo.mark_approved(
+                db, brief_id=brief_id, via="button", account_id=account.id
+            )
             log.info("approval_recorded", brief_id=brief_id, slides=approved)
 
         if msg.kind in AUDIO_KINDS:
@@ -67,13 +71,12 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
             kind = "handle_image"
         else:
             kind = "handle_message"
-        is_logo_candidate = msg.kind in IMAGE_KINDS and not (brand and brand.logo_url)
-
-    # Enqueue outside the transaction so the worker can never see a row that
-    # has not committed yet.
-    enqueue(
-        kind=kind,
-        payload={
+        # An owner who said "no logo" sends product photos, not a logo.
+        no_logo = bool(brand and (brand.template_prefs or {}).get("no_logo"))
+        is_logo_candidate = (
+            msg.kind in IMAGE_KINDS and not (brand and brand.logo_url) and not no_logo
+        )
+        payload = {
             "message_id": str(message_id),
             "account_id": str(account_id),
             "media_id": msg.media.id if msg.media else None,
@@ -81,9 +84,24 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
             "media_mime": msg.media.mime if msg.media else None,
             "provider": msg.provider,
             "is_logo_candidate": is_logo_candidate,
-        },
-        dedupe_key=f"{msg.provider}:{msg.provider_message_id}",
-    )
+        }
+        # The job row commits WITH the message row. A message that exists with
+        # no job is unprocessable forever: the provider's retry is (correctly)
+        # deduped as a duplicate message, so nothing ever comes back for it.
+        job = add_job(
+            db,
+            kind=kind,
+            payload=payload,
+            dedupe_key=(
+                f"{msg.provider}:{msg.provider_message_id}" if msg.provider_message_id else None
+            ),
+        )
+        job_id = job.id if job else None
+
+    # Push after the commit so the worker can never see an uncommitted row. If
+    # the push itself fails, the row is "queued" and the reaper re-pushes it.
+    if job_id is not None:
+        push_job(job_id, kind, payload)
     log.info("wa_ingested", message_id=str(message_id), kind=msg.kind, job=kind)
     return message_id
 
