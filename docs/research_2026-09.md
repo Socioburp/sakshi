@@ -95,6 +95,27 @@ likes 1, comments 2, saves 3, shares 3, follows 5, divided by reach; a post
 that beats the brand's median by 1.5x, once ten days old, earns a follow-up
 idea. Below four measured posts nothing is said.
 
+## Photo-to-reel (adopted: `app/creative/reel.py`, publish path)
+
+| Claim | Confidence | Source |
+|---|---|---|
+| Reels container: `POST /{ig-user-id}/media` with `media_type=REELS`, `video_url` (public, Meta fetches it), `caption`, `cover_url`, `share_to_feed`; then poll `status_code` to FINISHED, then `media_publish` | 0.9 | [Meta: create a Reel / IG media reference](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media) |
+| Reel video spec: MP4 (moov atom at front), H.264 or HEVC, progressive scan, closed GOP, 4:2:0; AAC audio <=48kHz; 9:16 recommended; 23-60 FPS; 3s-15min; <=25Mbps VBR; <=300MB | 0.9 | same reference (Video specifications) |
+| A video container transcodes on Meta's side and can take over a minute to reach FINISHED; containers expire after 24h; 400 containers / rolling 24h | 0.85 | same reference (Container lifecycle, rate limit) |
+| ffmpeg flags for a compliant file: `-c:v libx264 -profile:v high -pix_fmt yuv420p -g 2*fps -flags +cgop -movflags +faststart` with a silent AAC track (`anullsrc`) | 0.9 (verified: rendered files probe as H.264 High / yuv420p / faststart, played back) | measured here; ffmpeg H.264 / faststart docs |
+| imageio-ffmpeg ships a static ffmpeg (BSD-2) and exposes `get_ffmpeg_exe()`; the build here has libx264 and AAC | 0.9 (measured) | [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg) |
+
+Adopted: a reel is the approved still set in motion, not a new creative. The
+compositor's PNG (real fonts, logo, grid-safe padding) fades in over a slow
+push-in of the background photograph; PIL yields raw RGB frames piped to
+ffmpeg's stdin, so a 7-second 1080x1920 clip encodes in ~8s on CPU with
+nothing but two images in memory. The push-in crops at most 4% a side, inside
+every layout's padding, so no word is ever clipped. The MP4 is sent as a
+WhatsApp video (playable, forwardable to Status) and published as a Reel with
+the still as its cover. It costs one image credit -- the picture is made once
+-- and a copy revision re-renders the motion for free. The grid guard skips
+reels (a reel is 9:16 by definition and shown in its own tab).
+
 ## Considered, not adopted (yet)
 
 - **IC-Light / FLUX.2 image-to-image relighting** (lllyasviel/IC-Light, Apache-2.0;
