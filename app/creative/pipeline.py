@@ -20,12 +20,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import select
 
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import compose, photoreal, photoref, product
+from app.creative import claims, compose, photoreal, photoref, product
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
 from app.db import repo
@@ -66,6 +67,36 @@ def working_line(locale: str | None, slides: int) -> str:
 LOW_CREDIT_NUDGE = 2
 
 
+def claim_gate(brief: CreativeBrief, brand: Any) -> dict[str, Any] | None:
+    """The industry rulebook, applied like never_say: server-side, before any
+    charge. Returns the tool result to hand back, or None when the copy is fine.
+    Advice-level hits ride along on the success path (see `claim_notes`)."""
+    prefs = getattr(brand, "template_prefs", None) or {}
+    hits = claims.check(brief, getattr(brand, "category", None), prefs.get("substantiated"))
+    blocked = claims.blocking(hits)
+    if not blocked:
+        return None
+    return {
+        "ok": False,
+        "reason": "claim_guard",
+        "charged": 0,
+        "violations": [v.as_dict() for v in blocked],
+        "hint": (
+            "These claims cannot ship in this industry. Rewrite using the suggested "
+            "wording (or something the owner can prove) and call the tool again. If the "
+            "owner has a certificate for a phrase, record it with "
+            "update_brand(substantiated=[...]) first."
+        ),
+    }
+
+
+def claim_notes(brief: CreativeBrief, brand: Any) -> list[dict[str, str]]:
+    """Advice-level claims to soften next time; never a gate."""
+    prefs = getattr(brand, "template_prefs", None) or {}
+    hits = claims.check(brief, getattr(brand, "category", None), prefs.get("substantiated"))
+    return [v.as_dict() for v in hits if v.severity == "advise"]
+
+
 async def generate(
     ctx: ToolContext,
     brief: CreativeBrief,
@@ -96,6 +127,9 @@ async def generate(
                 "violations": violations,
                 "hint": "Rewrite the copy without those phrases and call the tool again.",
             }
+        blocked = claim_gate(brief, brand)
+        if blocked:
+            return blocked
 
         # Real photograph first. Any slide the agent left unreferenced gets the
         # owner's own photo when one genuinely matches -- decided here, before
@@ -253,6 +287,12 @@ async def generate(
         "credits_left": balance,
         "note": "The owner can see it now. Ask if they want changes; keep it to one line.",
     }
+    if advice := claim_notes(brief, brand_snapshot):
+        out["claim_notes"] = advice
+        out["claim_hint"] = (
+            "Shipped, but these phrases invite a complaint in this industry; use the "
+            "suggested wording next time. Do not mention this to the owner unprompted."
+        )
     if template_switched:
         out["template"] = brief.template_id
         out["template_note"] = (
@@ -308,6 +348,9 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
         violations = check_brand_rules(brief, brand)
         if violations:
             return {"ok": False, "reason": "never_say_violation", "violations": violations}
+        blocked = claim_gate(brief, brand)
+        if blocked:
+            return blocked
 
         units = brief.units()
         if len(units) != len(prev):
@@ -763,6 +806,7 @@ class _BrandSnapshot:
         "palette",
         "fonts",
         "never_say",
+        "template_prefs",
     )
 
     def __init__(self, **kw):
@@ -801,4 +845,5 @@ def _snapshot(db, brand: Brand) -> _BrandSnapshot:
         palette=dict(brand.palette or {}),
         fonts=dict(brand.fonts or {}),
         never_say=list(brand.never_say or []),
+        template_prefs=dict(brand.template_prefs or {}),
     )
