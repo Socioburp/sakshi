@@ -36,6 +36,18 @@ class ToolContext:
             buttons=buttons,
         )
 
+    async def show_video(self, video_url: str, caption: str = "") -> bool:
+        ok = await send.send_video(
+            account_id=self.account_id,
+            session_id=self.session_id,
+            wa_id=self.wa_id,
+            video_url=video_url,
+            caption=caption,
+        )
+        if ok:
+            self.sent_media.append(video_url)
+        return ok
+
     async def show(self, image_url: str, caption: str = "") -> bool:
         ok = await send.send_image(
             account_id=self.account_id,

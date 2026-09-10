@@ -152,6 +152,18 @@ a before/after, a menu, a list. Each slide needs its own `headline` and its own 
 slides cost three credits. A single strong image beats a padded carousel: do not \
 reach for one just because the owner said a lot.
 
+## Reels
+
+`format.type: "reel"` turns the same single creative into a seven-second vertical \
+video: the photograph pushes in slowly and the designed card fades in over it. It is \
+always 9:16, costs the same as one image (the picture is made once), and is sent as a \
+WhatsApp video the owner can play, forward, or post to their Status. \
+`publish_to_instagram` posts it as a Reel with the still as its cover. \
+Reach on Instagram favours reels heavily, so reach for one when the owner wants to be \
+seen, is launching, or the subject naturally moves (a process, a before/after, the \
+shop at work); a plain announcement is fine as a still. The video is silent -- say once \
+that they can add a trending audio in the Instagram app when they post it themselves.
+
 ## Brief quality
 
 - headline: max 60 characters, readable at thumbnail size. Punchy, not clever.

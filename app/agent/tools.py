@@ -892,10 +892,11 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
             if blocked:
                 return blocked
         is_carousel = len(creatives) > 1
+        is_reel = bool(creatives[0].video_url) and not is_carousel
         pub = Publication(
             creative_id=creatives[0].id,
             ig_account_id=ig_row.id,
-            media_type="CAROUSEL" if is_carousel else "IMAGE",
+            media_type="CAROUSEL" if is_carousel else "REELS" if is_reel else "IMAGE",
             caption=caption,
             hashtags=brief.caption.hashtags,
             alt_text=brief.alt_text,
@@ -906,6 +907,7 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         pub_id, token, ig_user_id = pub.id, ig_row.access_token, ig_row.ig_user_id
         ig_row_id, token_expires_at = ig_row.id, ig_row.token_expires_at
         urls = [c.composed_url for c in creatives]
+        video_url, video_key = creatives[0].video_url, creatives[0].video_key
         creative_ids = [c.id for c in creatives]
         composed_keys = [c.composed_key for c in creatives]
         first_brief_id = creatives[0].brief_id
@@ -946,6 +948,14 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
                 children=list(children),
                 caption=caption,
             )
+        elif is_reel:
+            container_id = await ig.create_reel_container(
+                ig_user_id=ig_user_id,
+                access_token=token,
+                video_url=video_url,
+                caption=caption,
+                cover_url=urls[0],
+            )
         else:
             container_id = await ig.create_media_container(
                 ig_user_id=ig_user_id,
@@ -954,7 +964,11 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
                 caption=caption,
                 alt_text=brief.alt_text,
             )
-        await ig.wait_for_container(container_id=container_id, access_token=token)
+        await ig.wait_for_container(
+            container_id=container_id,
+            access_token=token,
+            timeout_s=ig.REEL_CONTAINER_TIMEOUT_S if is_reel else 60,
+        )
         result = await ig.publish_container(
             ig_user_id=ig_user_id, access_token=token, container_id=container_id
         )
@@ -987,6 +1001,12 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
                 promoted[cid] = await asyncio.to_thread(r2.promote, key)
             except Exception:  # noqa: BLE001 - the post is live; log and move on
                 log.exception("r2_promote_failed", creative_id=str(cid), key=key)
+    promoted_video: str | None = None
+    if is_reel and video_key and video_key.startswith("drafts/"):
+        try:
+            promoted_video = await asyncio.to_thread(r2.promote, video_key)
+        except Exception:  # noqa: BLE001
+            log.exception("r2_promote_failed", creative_id=str(creative_ids[0]), key=video_key)
 
     with session_scope() as db:
         p = db.get(Publication, pub_id)
@@ -1001,6 +1021,9 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
             if cid in promoted:
                 row.composed_key = row.composed_key.replace("drafts/", "published/", 1)
                 row.composed_url = promoted[cid]
+            if promoted_video and cid == creative_ids[0]:
+                row.video_key = row.video_key.replace("drafts/", "published/", 1)
+                row.video_url = promoted_video
         events.record_for_brief(
             db, kind="publish", brief_id=first_brief_id, meta={"permalink": result.permalink}
         )
@@ -1013,6 +1036,7 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         "permalink": result.permalink,
         "media_id": result.media_id,
         "slides": len(urls),
+        "media_type": "REELS" if is_reel else "CAROUSEL" if is_carousel else "IMAGE",
     }
 
 
