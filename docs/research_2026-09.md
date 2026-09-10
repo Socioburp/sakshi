@@ -64,6 +64,37 @@ and below the line and collided with the Latin line at the tight leading.
 Measured here: a Kannada/Tamil/Hindi creative renders in 1.6s including
 browser start-up; the wait for stylesheets and webfonts is bounded at 6s each.
 
+## Expertise round (adopted: `claims.py`, `copybook.py`, `shotlist.py`, `brandkit.py`, grid-safe padding, `plan.py`)
+
+| Claim | Confidence | Source |
+|---|---|---|
+| Instagram's profile grid now shows posts cropped to 3:4 (since Jan 2025), so the outer strips of a 1:1 or 4:5 post are hidden on the profile; 9:16 loses a band top and bottom | 0.85 | Instagram's own announcement of the 3:4 grid (Jan 2025), reproduced by Later / Hootsuite / Buffer grid guides |
+| Single images lost reach and engagement year on year while Reels drive the most interactions and carousels the most saves (Metricool 2026 Instagram study) | 0.75 (one vendor's sample, large but self-selected) | [Metricool Instagram study 2026](https://metricool.com/instagram-study/) |
+| ASCI Code: superlatives, "guaranteed", "cure", "clinically proven" and fairness/skin-tone claims need substantiation or are barred; FSSAI bars "organic"/nutrition claims without certification; SEBI/RBI/RERA bar assured-return and unregistered-project advertising | 0.85 | [ASCI Code for Self-Regulation](https://www.ascionline.in/the-asci-code/), FSSAI Advertising & Claims Regulations 2018, SEBI/RBI advertisement codes, RERA s.3 |
+| Saves and shares are the strongest ranking signals on Instagram; "sends per reach" is named by Instagram's head as a key signal | 0.8 | Adam Mosseri, Instagram (2024 ranking explainers); consistent with the Metricool study |
+
+## Instagram Insights (adopted: `app/integrations/instagram/insights.py`, `app/insights/performance.py`)
+
+| Claim | Confidence | Source |
+|---|---|---|
+| Media insights: `GET /{ig-media-id}/insights?metric=...`; FEED metrics include `comments, follows, likes, profile_activity, profile_visits, reach, saved, shares, total_interactions, views`; REELS include `comments, likes, reach, saved, shares, total_interactions, views, ig_reels_avg_watch_time, ig_reels_video_view_total_time` | 0.9 | [Meta: Instagram media insights reference](https://developers.facebook.com/docs/instagram-platform/reference/instagram-media/insights) |
+| `plays`, `clips_replays_count`, `ig_reels_aggregated_all_plays_count` deprecated for v22.0 and for all versions on 21 April 2025; `impressions` deprecated v22+ for media created after 2 July 2024; `views` introduced across media and user insights on 21 Jan 2025 | 0.9 | same reference; [Instagram Platform changelog](https://developers.facebook.com/docs/instagram-platform/changelog) |
+| Insights data can be delayed up to 48 hours; stored up to 2 years; not available for album (carousel) children; story metrics live 24h | 0.9 | Meta media insights reference |
+| Insights APIs for media and user objects became available on the Instagram API with Instagram Login on 21 Jan 2025; the permission is `instagram_business_manage_insights` and needs App Review | 0.85 | changelog (21 Jan 2025); [Meta permissions reference](https://developers.facebook.com/docs/permissions/) |
+| User insights: `GET /{ig-user-id}/insights` with `period=day`, `metric_type=total_value`, `since/until`; `follower_count` and `online_followers` need 100+ followers; at most 30 days per request | 0.8 | [Meta: IG user insights reference](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/insights) |
+| `/{ig-user-id}/media` returns `id, media_type, media_product_type, timestamp, permalink, caption, like_count, comments_count` with cursor paging | 0.85 | Meta IG media reference (fields list) |
+
+Adopted: the sync reads at most 30 posts a day per brand (about 35 calls,
+inside the 200-per-user-per-hour platform limit), re-reads a post every 6h
+while it is under a week old, every 3 days to a month, then fortnightly;
+`follows`/`profile_visits` are requested for feed posts only, with a
+core-metric fallback when a post refuses a metric. The insights scope is
+added to the connect link only when `IG_INSIGHTS_ENABLED=true`, because an
+unapproved scope fails the whole login dialog. Engagement is weighted
+likes 1, comments 2, saves 3, shares 3, follows 5, divided by reach; a post
+that beats the brand's median by 1.5x, once ten days old, earns a follow-up
+idea. Below four measured posts nothing is said.
+
 ## Considered, not adopted (yet)
 
 - **IC-Light / FLUX.2 image-to-image relighting** (lllyasviel/IC-Light, Apache-2.0;
