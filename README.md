@@ -55,6 +55,7 @@ app/
     pipeline.py            generate | recompose | regenerate_image; slides in parallel
     imagegen/              provider interface: fal | replicate | bfl (FLUX) + mock
     compose.py             headless Chromium, one long-lived browser
+    reel.py                photo -> 7s vertical reel (Ken Burns + card), MP4 via ffmpeg
   memory/
     embed.py               Voyage embeddings, brand_memory only
     retrieve.py            cosine search, optional precomputed vector
