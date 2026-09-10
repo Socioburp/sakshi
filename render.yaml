@@ -79,3 +79,12 @@ envVarGroups:
         sync: false
       - key: PUBLIC_BASE_URL
         sync: false
+      # Image generation: set to fal | replicate | bfl with its key.
+      - key: IMAGEGEN_PROVIDER
+        sync: false
+      - key: FAL_KEY
+        sync: false
+      - key: REPLICATE_API_TOKEN
+        sync: false
+      - key: BFL_API_KEY
+        sync: false

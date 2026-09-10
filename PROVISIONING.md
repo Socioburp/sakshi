@@ -89,8 +89,9 @@ an always-on Render Redis instance is idle most of the day.
 | Anthropic | console.anthropic.com → API keys | `ANTHROPIC_API_KEY` |
 | Anthropic | same console → Models; copy the **exact model id** | `ANTHROPIC_MODEL` |
 | Voyage | dash.voyageai.com | `VOYAGE_API_KEY` |
-| Image provider A | your candidate | `IMAGEGEN_A_API_KEY` |
-| Image provider B | your candidate | `IMAGEGEN_B_API_KEY` |
+| fal.ai | fal.ai/dashboard/keys | `FAL_KEY` (set `IMAGEGEN_PROVIDER=fal`) |
+| Replicate | replicate.com/account/api-tokens | `REPLICATE_API_TOKEN` (`IMAGEGEN_PROVIDER=replicate`) |
+| Black Forest Labs | dashboard.bfl.ai | `BFL_API_KEY` (`IMAGEGEN_PROVIDER=bfl`) |
 | STT ×3 | ElevenLabs, Deepgram, Sarvam — all three, for the bake-off | `ELEVENLABS_API_KEY`, `DEEPGRAM_API_KEY`, `SARVAM_API_KEY` |
 
 `ANTHROPIC_MODEL` is deliberately left blank in `.env.example` and the app

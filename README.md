@@ -53,7 +53,7 @@ app/
     brief.py               the contract + the no-text-in-prompt validator
     logo.py                palette measured from pixels; character read by vision
     pipeline.py            generate | recompose | regenerate_image; slides in parallel
-    imagegen/              provider interface + two candidates + mock
+    imagegen/              provider interface: fal | replicate | bfl (FLUX) + mock
     compose.py             headless Chromium, one long-lived browser
   memory/
     embed.py               Voyage embeddings, brand_memory only
@@ -123,9 +123,11 @@ decision most likely to be wrong if you choose on vendor benchmarks.
 
 - `ANTHROPIC_MODEL` — copy the exact id from the console; the app refuses to
   start the agent without it rather than guessing.
-- `ProviderA.ENDPOINT` / `ProviderB.ENDPOINT` in `creative/imagegen/providers.py`
-  — fill in for your two candidates. A wrong payload shape here fails silently
-  as a blank background, so it is left explicit rather than guessed.
+- Which image vendor to pay. `IMAGEGEN_PROVIDER` defaults to `mock`; set it
+  to `fal`, `replicate` or `bfl` together with that vendor's key. All three
+  serve FLUX; the adapters in `creative/imagegen/providers.py` follow each
+  vendor's published contract, retry only the submit, and refuse a blank or
+  unreadable picture rather than compositing over it.
 - The HNSW index on `brand_memory.embedding`. On an empty table a sequential
   scan is faster. The exact statement is in `migrations/versions/0001_initial.py`;
   run it once you have a few thousand rows.
