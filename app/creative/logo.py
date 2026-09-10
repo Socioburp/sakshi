@@ -217,6 +217,57 @@ def _loads(text: str) -> dict[str, Any]:
         return {}
 
 
+PHOTO_PROMPT = """This is a photo a small-business owner sent to their marketing assistant \
+on WhatsApp. Answer with JSON only:
+{"kind": "<product|shop|team|other>",
+ "label": "<what it shows, <=8 words, the way the owner would say it>",
+ "cut_out_ok": <true if a single product object could be cleanly cut out of the \
+background and shown on its own; false for people, shopfronts, scenes, plates of food, \
+multiple items, transparent glass>}
+kind: "product" only for a single sellable item (a bottle, a box, a garment, a jar); \
+"shop" for a storefront or interior; "team" for people; "other" for anything else."""
+
+
+async def describe_photo(image_bytes: bytes, mime: str) -> dict[str, Any]:
+    """What a non-logo photo is, so the product lane only ever cuts out a product.
+
+    Without a model configured this returns {} and the caller falls back to
+    "product" if the owner captioned it, "other" if they did not.
+    """
+    if not settings.anthropic_api_key or not settings.anthropic_model:
+        return {}
+    from anthropic import AsyncAnthropic
+
+    allowed = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+    media_type = mime if mime in allowed else "image/jpeg"
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    resp = await client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=200,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": base64.b64encode(image_bytes).decode(),
+                        },
+                    },
+                    {"type": "text", "text": PHOTO_PROMPT},
+                ],
+            }
+        ],
+    )
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    out = _loads(text)
+    if out.get("kind") not in ("product", "shop", "team", "other"):
+        out.pop("kind", None)
+    return out
+
+
 async def analyse(image_bytes: bytes, mime: str) -> LogoAnalysis:
     result = extract_palette(image_bytes)
     try:

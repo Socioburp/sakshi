@@ -24,12 +24,14 @@ weight it oddly.
 
 from __future__ import annotations
 
+import re
+
 from app.creative.brief import MOOD_MAX
 
 # The brief validator caps the model-authored prompt at 900 characters and the
 # mood at MOOD_MAX. The enrichment adds a bounded amount on top, so the total on
 # the wire is known: 900 + ENRICHMENT_MAX. Enforced below, not just documented.
-ENRICHMENT_MAX = 400
+ENRICHMENT_MAX = 720
 
 # Present in every enriched prompt; also the idempotency marker.
 _MARKER = "shot on a full-frame camera"
@@ -51,16 +53,147 @@ PHOTOREAL_NEGATIVE = (
 )
 
 
-# The whole clause plus the longest mood plus punctuation must fit the budget.
-assert len(CAMERA_DIRECTION) + MOOD_MAX + 8 <= ENRICHMENT_MAX, "enrichment exceeds its budget"
+# --------------------------------------------------------------------------- #
+# the playbook: what a product photographer does differently per category
+# --------------------------------------------------------------------------- #
+# Read from the brand's stated category. Each clause is the ONE decision that
+# separates a category's good product photography from generic "nice photo":
+# the surface, the props that are true, the angle, and one light. Nothing here
+# may ask for lettering -- see the validator in brief.py; a test checks it.
+PLAYBOOK: list[tuple[tuple[str, ...], str]] = [
+    (
+        (
+            "food",
+            "sweet",
+            "mithai",
+            "bakery",
+            "cake",
+            "restaurant",
+            "cafe",
+            "snack",
+            "oil",
+            "ghee",
+            "spice",
+            "pickle",
+            "tea",
+            "coffee",
+            "dairy",
+            "juice",
+            "kitchen",
+        ),
+        "on a natural surface (worn wood, stone or linen), the real ingredients as props, "
+        "three-quarter angle at table height, warm side light with a soft fill, "
+        "steam or fresh droplets only where they would truly be",
+    ),
+    (
+        (
+            "skincare",
+            "cosmetic",
+            "beauty",
+            "salon",
+            "serum",
+            "cream",
+            "soap",
+            "perfume",
+            "hair",
+            "makeup",
+        ),
+        "on a smooth pastel or stone surface, diffused soft light with a gentle gradient, "
+        "one botanical or water-droplet prop, glossy highlights on the packaging kept, "
+        "generous negative space",
+    ),
+    (
+        (
+            "cloth",
+            "apparel",
+            "boutique",
+            "saree",
+            "sari",
+            "kurta",
+            "fashion",
+            "garment",
+            "dress",
+            "ethnic wear",
+            "tailor",
+        ),
+        "worn by a real person mid-movement or arranged as a tidy flat-lay on linen, "
+        "natural window light, weave and drape visible, no mannequin stiffness",
+    ),
+    (
+        ("jewel", "gold", "silver", "diamond", "ornament", "bangle"),
+        "macro on dark velvet or veined marble, one hard key light with a broad soft fill "
+        "so facets sparkle without blown highlights, shallow depth of field",
+    ),
+    (
+        ("electronic", "mobile", "phone", "gadget", "laptop", "appliance", "electric"),
+        "clean graduated studio backdrop, subtle rim light on the edges, a faint "
+        "reflection on the surface, cool neutral tones, precise focus edge to edge",
+    ),
+    (
+        ("furniture", "decor", "home", "interior", "lamp", "mattress", "curtain"),
+        "styled in a lived-in room corner, daylight from one large window, a wider lens "
+        "showing the piece in scale with the room, warm and quiet",
+    ),
+    (
+        (
+            "gym",
+            "fitness",
+            "clinic",
+            "dental",
+            "coaching",
+            "class",
+            "academy",
+            "real estate",
+            "property",
+            "service",
+            "repair",
+            "travel",
+            "event",
+        ),
+        "a candid environmental photograph of the actual place or people at work, "
+        "documentary framing, available light, nothing staged",
+    ),
+]
 
 
-def photographic(prompt: str, negative: str | None, *, mood: str | None = None) -> tuple[str, str]:
+# The camera clause, the longest playbook clause and the longest mood, plus
+# punctuation, must fit the budget.
+_LONGEST_PLAY = max(len(c) for _, c in PLAYBOOK)
+assert len(CAMERA_DIRECTION) + _LONGEST_PLAY + MOOD_MAX + 12 <= ENRICHMENT_MAX, (
+    "enrichment exceeds its budget"
+)
+
+
+def _has_word(text: str, key: str) -> bool:
+    """Whole-word match with a plural allowed: "hair" must not match "chair"."""
+    return re.search(rf"(?<![a-z]){re.escape(key)}(?:s|es)?(?![a-z])", text) is not None
+
+
+def category_direction(category: str | None) -> str:
+    """The playbook clause for a brand category, or an empty string."""
+    cat = (category or "").lower()
+    if not cat:
+        return ""
+    for keys, clause in PLAYBOOK:
+        if any(_has_word(cat, k) for k in keys):
+            return clause
+    return ""
+
+
+def photographic(
+    prompt: str,
+    negative: str | None,
+    *,
+    mood: str | None = None,
+    category: str | None = None,
+) -> tuple[str, str]:
     """Return (prompt, negative) tuned for a photograph, safely re-runnable."""
     p = (prompt or "").strip()
     if _MARKER not in p:
         mood_clause = f", {mood.strip()[:MOOD_MAX]}" if mood and mood.strip() else ""
-        p = f"{p.rstrip('.,; ')}{mood_clause}. {CAMERA_DIRECTION}."
+        play = category_direction(category)
+        play_clause = f" {play}." if play else ""
+        p = f"{p.rstrip('.,; ')}{mood_clause}.{play_clause} {CAMERA_DIRECTION}."
 
     parts = [s.strip() for s in (negative or "").split(",") if s.strip()]
     seen = {s.lower() for s in parts}

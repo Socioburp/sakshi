@@ -25,12 +25,13 @@ from sqlalchemy import select
 
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import compose, photoreal, photoref
+from app.creative import compose, photoreal, photoref, product
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
 from app.db import repo
 from app.db.models import Account, Brand, BrandAsset, Brief, Creative
 from app.db.session import session_scope
+from app.insights import events
 from app.integrations.storage import r2
 from app.logging import get_logger
 
@@ -100,6 +101,24 @@ async def generate(
         # owner's own photo when one genuinely matches -- decided here, before
         # the charge, so the free lane is actually free.
         resolved = _resolve_photos(db, ctx.brand_id, brief, units)
+        assets = _load_assets(db, ctx.brand_id, units, resolved)
+
+        # A product photo and centred type fight for the same pixels. When the
+        # owner's product is in the picture the words move to the lower third
+        # and the product gets the top. Decided HERE -- before the slides are
+        # snapshotted and the brief stored -- so the render, the stored brief,
+        # a later free revision, and the taste/grid history all agree.
+        template_switched = False
+        if brief.template_id == "centered_overlay" and any(
+            (a := assets.get(resolved.get(u.position, ""))) and a.kind == "product" for u in units
+        ):
+            brief.template_id = product.PREFERRED_TEMPLATE
+            for sl in brief.slides:
+                if sl.template_id == "centered_overlay":
+                    sl.template_id = None
+            units = brief.units()
+            template_switched = True
+
         billable_positions = {
             u.position for u in units if not resolved.get(u.position) and u.position not in reuse
         }
@@ -113,6 +132,18 @@ async def generate(
             source_message_id=ctx.message_id,
         )
         brief_id = brief_row.id
+        events.record(
+            db,
+            kind="created",
+            account_id=ctx.account_id,
+            brand_id=ctx.brand_id,
+            brief_id=brief_id,
+            meta={
+                **events.facts_of(brief_row.payload or {}),
+                "photo_slides": sorted(resolved),
+                "reused_slides": sorted(reuse),
+            },
+        )
 
         w, h = brief.pixel_size()
         creative_ids: list[uuid.UUID] = []
@@ -159,7 +190,6 @@ async def generate(
                     "hint": "Tell the owner they are out of credits and offer a top-up.",
                 }
         brand_snapshot = _snapshot(db, brand)
-        assets = _load_assets(db, ctx.brand_id, units, resolved)
         locale = (db.get(Account, ctx.account_id).locale or "en") if ctx.account_id else "en"
 
     # "Making it..." goes out now -- after validation and the charge, before the
@@ -208,6 +238,7 @@ async def generate(
     delivered = await _show(ctx, brief, ok_urls)
     with session_scope() as db:
         balance = db.get(Account, ctx.account_id).credits_balance
+    _schedule_daily_nudge(ctx)
     charged = billable - failed_billable
     out = {
         "ok": True,
@@ -222,6 +253,12 @@ async def generate(
         "credits_left": balance,
         "note": "The owner can see it now. Ask if they want changes; keep it to one line.",
     }
+    if template_switched:
+        out["template"] = brief.template_id
+        out["template_note"] = (
+            "Their product photo is in this creative, so the words were set in the lower "
+            "third to keep the product clear. Do not mention this unless they ask."
+        )
     if not delivered:
         # Never tell the model the owner has seen something they have not. The
         # creative exists and is paid for; the honest move is to say so.
@@ -288,6 +325,14 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
             parent=parent,
         )
         new_brief_id = new_brief.id
+        events.record(
+            db,
+            kind="revise",
+            account_id=ctx.account_id,
+            brand_id=ctx.brand_id,
+            brief_id=parent.id,
+            meta={**events.facts_of(parent.payload or {}), "changed": sorted(changes)},
+        )
         group_id = uuid.uuid4() if brief.is_carousel() else None
         w, h = brief.pixel_size()
 
@@ -387,7 +432,49 @@ async def regenerate_image(
                 for c in prev:
                     if c.slide_position != slide_position and c.background_key:
                         reuse[c.slide_position] = (c.background_key, c.background_url or "")
+    with session_scope() as db:
+        events.record(
+            db,
+            kind="regenerate",
+            account_id=ctx.account_id,
+            brand_id=ctx.brand_id,
+            brief_id=brief_id,
+            meta={**events.facts_of(payload), "slide_position": slide_position},
+        )
     return await generate(ctx, brief, reuse=reuse)
+
+
+# The retention loop. After a creative, the owner gets tomorrow's idea at
+# 10:00 IST -- one line, three buttons -- if they are still inside the 24h
+# window (send.py suppresses it otherwise) and have not switched it off.
+NUDGE_HOUR_IST = 10
+
+
+def _schedule_daily_nudge(ctx: ToolContext) -> None:
+    if not ctx.wa_id:
+        return  # nowhere to send it
+    try:
+        from zoneinfo import ZoneInfo
+
+        from app.queue.client import enqueue
+
+        ist = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        when = now_ist.replace(hour=NUDGE_HOUR_IST, minute=0, second=0, microsecond=0)
+        if when - now_ist < timedelta(hours=1):
+            when += timedelta(days=1)  # today's slot is gone; tomorrow's is inside 24h
+        enqueue(
+            kind="daily_suggestion",
+            payload={
+                "account_id": str(ctx.account_id),
+                "brand_id": str(ctx.brand_id),
+                "wa_id": ctx.wa_id,
+            },
+            dedupe_key=f"daily:{ctx.brand_id}:{when.date().isoformat()}",
+            scheduled_for=when.astimezone(UTC),
+        )
+    except Exception:  # noqa: BLE001 - a missed nudge must never cost the creative
+        log.warning("daily_nudge_schedule_failed", brand_id=str(ctx.brand_id))
 
 
 # A creative still "generating" this long after it was created has lost its
@@ -456,6 +543,22 @@ async def _build_one(
         with ctx.trace.stage(f"{stage}:asset_fetch"):
             image, mime = r2.get(assets[ref].storage_key), assets[ref].mime or "image/jpeg"
         provider_name = "brand_asset"
+        if assets[ref].kind == "product":
+            # Cut the product out and stand it in a studio. Refused cuts fall
+            # back to the photo as it was -- a wrong cut ships a broken product.
+            with ctx.trace.stage(f"{stage}:product_cutout"):
+                studio = await asyncio.to_thread(
+                    product.product_background,
+                    image,
+                    w,
+                    h,
+                    palette=dict(getattr(brand_snapshot, "palette", {}) or {}),
+                    template=brief.template_for(slide),
+                )
+            if studio is not None:
+                image, mime = studio[0], "image/jpeg"
+                provider_name = "product_studio"
+                log.info("product_studio", position=slide.position, **studio[1])
     else:
         provider = get_provider()
         provider_name = provider.name
@@ -466,6 +569,7 @@ async def _build_one(
             slide.visual_direction.prompt,
             slide.visual_direction.negative_prompt,
             mood=slide.visual_direction.mood,
+            category=getattr(brand_snapshot, "category", None),
         )
         with ctx.trace.stage(f"{stage}:imagegen", provider=provider.name):
             res = await provider.generate(
@@ -565,10 +669,10 @@ def _merge(payload: dict, changes: dict) -> dict:
 
 
 class BrandAssetSnapshot:
-    __slots__ = ("id", "storage_key", "mime")
+    __slots__ = ("id", "storage_key", "mime", "kind")
 
-    def __init__(self, id: str, storage_key: str, mime: str | None) -> None:
-        self.id, self.storage_key, self.mime = id, storage_key, mime
+    def __init__(self, id: str, storage_key: str, mime: str | None, kind: str = "product") -> None:
+        self.id, self.storage_key, self.mime, self.kind = id, storage_key, mime, kind
 
 
 def _resolve_photos(
@@ -639,7 +743,7 @@ def _load_assets(
         except ValueError:
             continue
         if asset is not None and asset.brand_id == brand_id:
-            out[raw] = BrandAssetSnapshot(raw, asset.storage_key, asset.mime)
+            out[raw] = BrandAssetSnapshot(raw, asset.storage_key, asset.mime, asset.kind)
     return out
 
 
@@ -648,6 +752,7 @@ class _BrandSnapshot:
 
     __slots__ = (
         "name",
+        "category",
         "logo_url",
         "logo_src",
         "logo_analysis",
@@ -685,6 +790,7 @@ def _snapshot(db, brand: Brand) -> _BrandSnapshot:
             log.warning("logo_inline_failed", brand_id=str(brand.id), key=asset.storage_key)
     return _BrandSnapshot(
         name=brand.name,
+        category=brand.category,
         logo_url=brand.logo_url,
         logo_src=logo_src or brand.logo_url,
         logo_analysis=dict(brand.logo_analysis or {}),
