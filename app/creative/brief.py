@@ -71,13 +71,19 @@ CAROUSEL_MAX = 6
 
 
 class Format(BaseModel):
-    type: Literal["single", "carousel"] = "single"
+    # single: one image. carousel: 2-6 images. reel: one image set in motion,
+    # always 9:16 -- a seven-second push-in over the photo with the card
+    # fading in, published as a Reel (or forwarded to WhatsApp Status).
+    type: Literal["single", "carousel", "reel"] = "single"
     aspect_ratio: AspectRatio = "1:1"
     slide_count: int | None = Field(default=None, ge=1, le=CAROUSEL_MAX)
 
     @model_validator(mode="after")
     def slide_count_matches_type(self) -> Format:
-        if self.type == "single":
+        if self.type == "reel":
+            self.slide_count = 1
+            self.aspect_ratio = "9:16"
+        elif self.type == "single":
             self.slide_count = 1
         elif not self.slide_count:
             self.slide_count = 3
@@ -216,6 +222,9 @@ class CreativeBrief(BaseModel):
 
     def is_carousel(self) -> bool:
         return self.format.type == "carousel"
+
+    def is_reel(self) -> bool:
+        return self.format.type == "reel"
 
     def units(self) -> list[Slide]:
         """Normalise single and carousel into one list the pipeline can loop over."""

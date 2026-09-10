@@ -287,6 +287,14 @@ async def generate(
         "credits_left": balance,
         "note": "The owner can see it now. Ask if they want changes; keep it to one line.",
     }
+    if brief.is_reel():
+        out["format"] = "reel"
+        out["reel_note"] = (
+            "Sent as a 7-second video. It is silent: if they post it themselves, one line "
+            "suggests adding a trending audio in the Instagram app; publish_to_instagram "
+            "posts it as a Reel with the still as its cover. It also works as a WhatsApp "
+            "Status. Say this once, briefly."
+        )
     if advice := claim_notes(brief, brand_snapshot):
         out["claim_notes"] = advice
         out["claim_hint"] = (
@@ -644,38 +652,72 @@ async def _build_one(
         composed_key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.png")
         composed_url = r2.put(composed_key, png, "image/png")
 
+    video_key = video_url = None
+    if brief.is_reel():
+        video_key, video_url = await _render_reel(ctx, creative_id, image, png, stage)
+
     with session_scope() as db:
         c = db.get(Creative, creative_id)
         c.background_key, c.background_url = bg_key, r2.public_url(bg_key)
         c.composed_key, c.composed_url = composed_key, composed_url
+        c.video_key, c.video_url = video_key, video_url
         c.imagegen_provider = provider_name
         c.imagegen_job_id = (job_id or None) and str(job_id)[:120]
         c.cost_micros = int(cost_micros or 0)
         c.status = "ready"
         c.timings = dict(ctx.trace.timings)
-    return composed_url
+    return video_url or composed_url
+
+
+async def _render_reel(ctx, creative_id: uuid.UUID, photo: bytes, card: bytes, stage: str):
+    """The card set in motion: a seven-second MP4 beside the still, in R2.
+
+    CPU-bound (PIL frames piped to ffmpeg), so it runs in a thread and never
+    blocks the other slides or the WhatsApp loop.
+    """
+    from app.creative import reel
+
+    w, h = 1080, 1920
+    with ctx.trace.stage(f"{stage}:reel"):
+        mp4 = await asyncio.to_thread(reel.render, photo, card, width=w, height=h)
+    with ctx.trace.stage(f"{stage}:reel_upload"):
+        key = r2.key_for(str(ctx.brand_id), str(creative_id), "reel.mp4")
+        url = r2.put(key, mp4, "video/mp4")
+    return key, url
 
 
 async def _recompose_one(ctx, brief, slide, creative_id, background_key, brand_snapshot) -> str:
-    with ctx.trace.stage(f"slide{slide.position}:bg_fetch"):
+    stage = f"slide{slide.position}"
+    with ctx.trace.stage(f"{stage}:bg_fetch"):
         image = r2.get(background_key)
-    with ctx.trace.stage(f"slide{slide.position}:compose"):
+    with ctx.trace.stage(f"{stage}:compose"):
         png = await compose.compose(brief, slide, brand_snapshot, image, "image/jpeg")
-    with ctx.trace.stage(f"slide{slide.position}:upload"):
+    with ctx.trace.stage(f"{stage}:upload"):
         key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.png")
         url = r2.put(key, png, "image/png")
+    video_key = video_url = None
+    if brief.is_reel():
+        # A revision of a reel -- or a still turned into one -- re-renders the
+        # motion over the same photograph. Still free: no image call.
+        video_key, video_url = await _render_reel(ctx, creative_id, image, png, stage)
     with session_scope() as db:
         c = db.get(Creative, creative_id)
         c.composed_key, c.composed_url, c.status = key, url, "ready"
+        c.video_key, c.video_url = video_key, video_url
         c.timings = dict(ctx.trace.timings)
-    return url
+    return video_url or url
 
 
 async def _show(ctx: ToolContext, brief: CreativeBrief, urls: list[str]) -> bool:
-    """Send every image; True only if every send was accepted by the provider."""
+    """Send every image (or the reel as a video); True only if every send was
+    accepted by the provider."""
     ok = True
     for i, url in enumerate(urls):
-        sent = await ctx.show(url, caption=brief.headline if i == 0 else "")
+        caption = brief.headline if i == 0 else ""
+        if brief.is_reel():
+            sent = await ctx.show_video(url, caption=caption)
+        else:
+            sent = await ctx.show(url, caption=caption)
         ok = ok and bool(sent)
     if not ok:
         log.error("creative_not_delivered", account_id=str(ctx.account_id), urls=len(urls))

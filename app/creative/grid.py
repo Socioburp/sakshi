@@ -135,6 +135,10 @@ def check(fp: Fingerprint, brief: Any) -> GridNote | None:
     """Compare a brief to the signature. None when it fits or the signature is too thin."""
     if not fp.enough:
         return None
+    # A reel is a video: always 9:16, shown in its own tab, cropped to 4:5 in
+    # the grid. Judging it against the still grid's ratio would flag every reel.
+    if getattr(brief, "is_reel", None) and brief.is_reel():
+        return None
     deviations: list[str] = []
     changes: dict[str, Any] = {}
     severity = 0
