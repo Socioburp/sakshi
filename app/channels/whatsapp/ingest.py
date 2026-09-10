@@ -75,29 +75,40 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
             # "Not today" is not "never": three quiet days, then ideas resume.
             votes.snooze_nudge(db, brand)
 
-        if msg.kind in AUDIO_KINDS:
-            kind = "transcribe_and_handle"
-        elif msg.kind in IMAGE_KINDS:
-            kind = "handle_image"
+        # An Instagram-reply tap (Send/Edit/Skip), or the reply the owner typed
+        # after tapping Edit, is a bounded action: post it, don't run the agent.
+        ig_action = _ig_action(msg, sess)
+        if ig_action is not None:
+            kind = "ig_action"
+            payload = {
+                "message_id": str(message_id),
+                "account_id": str(account_id),
+                **ig_action,
+            }
         else:
-            kind = "handle_message"
-        # An owner who said "no logo" sends product photos, not a logo.
-        no_logo = bool(brand and (brand.template_prefs or {}).get("no_logo"))
-        is_logo_candidate = (
-            msg.kind in IMAGE_KINDS and not (brand and brand.logo_url) and not no_logo
-        )
-        payload = {
-            "message_id": str(message_id),
-            "account_id": str(account_id),
-            "media_id": msg.media.id if msg.media else None,
-            "media_url": msg.media.url if msg.media else None,
-            "media_mime": msg.media.mime if msg.media else None,
-            "provider": msg.provider,
-            "is_logo_candidate": is_logo_candidate,
-            # The worker writes the memory for a tap (a network call to the
-            # embedding vendor) so the webhook never waits on it.
-            "interactive_id": msg.interactive_id,
-        }
+            if msg.kind in AUDIO_KINDS:
+                kind = "transcribe_and_handle"
+            elif msg.kind in IMAGE_KINDS:
+                kind = "handle_image"
+            else:
+                kind = "handle_message"
+            # An owner who said "no logo" sends product photos, not a logo.
+            no_logo = bool(brand and (brand.template_prefs or {}).get("no_logo"))
+            is_logo_candidate = (
+                msg.kind in IMAGE_KINDS and not (brand and brand.logo_url) and not no_logo
+            )
+            payload = {
+                "message_id": str(message_id),
+                "account_id": str(account_id),
+                "media_id": msg.media.id if msg.media else None,
+                "media_url": msg.media.url if msg.media else None,
+                "media_mime": msg.media.mime if msg.media else None,
+                "provider": msg.provider,
+                "is_logo_candidate": is_logo_candidate,
+                # The worker writes the memory for a tap (a network call to the
+                # embedding vendor) so the webhook never waits on it.
+                "interactive_id": msg.interactive_id,
+            }
         # The job row commits WITH the message row. A message that exists with
         # no job is unprocessable forever: the provider's retry is (correctly)
         # deduped as a duplicate message, so nothing ever comes back for it.
@@ -117,6 +128,41 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
         push_job(job_id, kind, payload)
     log.info("wa_ingested", message_id=str(message_id), kind=msg.kind, job=kind)
     return message_id
+
+
+# Instagram-reply tap ids carry the ig_event id: igok=send, iged=edit, igno=skip.
+_IG_TAP_ACTIONS = {"igok:": "send", "iged:": "edit_prompt", "igno:": "skip"}
+
+
+def _ig_action(msg: InboundMessage, sess) -> dict | None:
+    """The ig_action payload fields for a reply tap or a typed edit, else None.
+
+    Reads and writes `sess.state["ig_edit"]`: tapping Edit arms it with the
+    event id, and the next typed message is consumed as that reply and disarms
+    it. A fresh tap always clears any half-finished edit.
+    """
+    state = dict(sess.state or {})
+    iid = msg.interactive_id or ""
+    for prefix, action in _IG_TAP_ACTIONS.items():
+        if iid.startswith(prefix):
+            event_id = iid[len(prefix) :]
+            if action == "edit_prompt":
+                state["ig_edit"] = event_id
+            else:
+                state.pop("ig_edit", None)
+            sess.state = state
+            return {"event_id": event_id, "action": action}
+    # A plain typed message right after an Edit tap is the reply to post.
+    pending = state.get("ig_edit")
+    if pending and not msg.interactive_id and msg.kind == "text" and (msg.text or "").strip():
+        state.pop("ig_edit", None)
+        sess.state = state
+        return {"event_id": pending, "action": "custom", "custom_text": msg.text.strip()}
+    # Any other message clears a stale edit so it can't hijack a later reply.
+    if pending:
+        state.pop("ig_edit", None)
+        sess.state = state
+    return None
 
 
 def record_outbound(
