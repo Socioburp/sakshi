@@ -93,6 +93,7 @@ class Idea:
     reference_asset_id: str | None = None
     festival: str | None = None
     hashtags_hint: list[str] = field(default_factory=list)
+    plan_slot: str | None = None  # the plan date this idea fulfils, if any
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -203,6 +204,16 @@ def suggest(db: Session, brand: Brand, *, today: date | None = None, limit: int 
     recent = _recent_intents(db, brand.id)
     ideas: list[Idea] = []
 
+    # The month's plan comes first: a slot planned for today (or missed
+    # earlier this week) is the idea, and the rest are alternatives.
+    from app.insights import plan as planning
+
+    slot = planning.slot_for(planning.current(db, brand.id, today), today)
+    if slot:
+        ideas.append(
+            Idea(**planning.idea_from_slot(slot, template=template, aspect=aspect, play=play))
+        )
+
     for delta, f in upcoming_festivals(today)[:1]:
         when = f"in {delta} day{'s' if delta != 1 else ''}"
         ideas.append(
@@ -284,6 +295,8 @@ def suggest(db: Session, brand: Brand, *, today: date | None = None, limit: int 
     # Rank: festival first, then the unused photo, then whatever does not
     # repeat what they just posted.
     def key(i: Idea) -> tuple[int, int]:
+        if i.plan_slot:
+            return (-1, -1)
         repeat = 1 if i.intent in recent and not i.festival else 0
         base = 0 if i.festival else 1 if i.reference_asset_id else 2
         return (repeat, base)
