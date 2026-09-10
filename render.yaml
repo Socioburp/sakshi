@@ -19,12 +19,19 @@ services:
     name: sakshi-worker
     runtime: python
     region: singapore
-    plan: starter
-    buildCommand: pip install -e . && playwright install --with-deps chromium
+    # The product lane (background replacement on the owner's photos) runs a
+    # 1.2GB CPU model on this service; "starter" (512MB) is OOM-killed by the
+    # first product creative. Keep "standard" (2GB) or set CUTOUT_ENABLED=false.
+    plan: standard
+    buildCommand: >-
+      pip install -e . && playwright install --with-deps chromium &&
+      python -c "from app.creative.product import warm_up; warm_up()"
     startCommand: python -m app.queue.worker
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
+      - key: CUTOUT_ENABLED
+        value: "true"
       - fromGroup: sakshi-secrets
 
 envVarGroups:
