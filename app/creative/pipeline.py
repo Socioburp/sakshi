@@ -531,6 +531,7 @@ async def _build_one(
     w, h = brief.pixel_size()
     ref = (resolved or {}).get(slide.position)
     stage = f"slide{slide.position}"
+    job_id, cost_micros = None, 0  # set only when a vendor was paid
 
     if reuse and slide.position in reuse:
         # Picture kept from the previous version of this creative.
@@ -583,6 +584,7 @@ async def _build_one(
                 )
             )
         image, mime = res.data, res.mime
+        job_id, cost_micros = res.job_id, res.cost_micros
 
     with ctx.trace.stage(f"{stage}:compose"):
         png = await compose.compose(brief, slide, brand_snapshot, image, mime)
@@ -604,6 +606,8 @@ async def _build_one(
         c.background_key, c.background_url = bg_key, r2.public_url(bg_key)
         c.composed_key, c.composed_url = composed_key, composed_url
         c.imagegen_provider = provider_name
+        c.imagegen_job_id = (job_id or None) and str(job_id)[:120]
+        c.cost_micros = int(cost_micros or 0)
         c.status = "ready"
         c.timings = dict(ctx.trace.timings)
     return composed_url

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from PIL import Image
 
+from app.creative import fonts
 from app.creative.brief import CreativeBrief, Slide
 from app.logging import get_logger
 
@@ -28,9 +30,13 @@ log = get_logger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "templates" / "creative"
 
+# Autoescape must cover ".html.j2": select_autoescape(["html"]) matches names
+# that END in .html, which none of these do, so for a while every headline
+# and brand name reached Chromium as raw markup. Anything that must stay raw
+# (the font stack) is marked |safe explicitly.
 _env = Environment(
     loader=FileSystemLoader(TEMPLATE_DIR),
-    autoescape=select_autoescape(["html", "xml"]),
+    autoescape=select_autoescape(enabled_extensions=("html", "xml", "j2"), default=True),
     trim_blocks=True,
     lstrip_blocks=True,
 )
@@ -59,6 +65,9 @@ DEFAULT_TEMPLATE = "centered_overlay"
 # leading, tracking, an eased scrim, grain -- not from brute pixels. Raise this
 # to 2 for a print-resolution one-off, never for the WhatsApp path.
 SUPERSAMPLE = 1
+
+# How long the render waits for webfonts after the network goes idle.
+FONT_WAIT_S = 6.0
 
 _browser = None
 _playwright = None
@@ -135,9 +144,18 @@ async def shutdown() -> None:
         _loop = None
 
 
+_FONT_NAME_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 \-]{0,48}$")
+
+
+def _font_name(value: Any, default: str) -> str:
+    """A family name safe to place inside quotes in a stylesheet."""
+    name = str(value or "").strip()
+    return name if _FONT_NAME_OK.match(name) else default
+
+
 def _brand_context(brand: Any) -> dict[str, Any]:
     palette = dict(getattr(brand, "palette", {}) or {})
-    fonts = dict(getattr(brand, "fonts", {}) or {})
+    faces = dict(getattr(brand, "fonts", {}) or {})
     analysis = dict(getattr(brand, "logo_analysis", {}) or {})
     # A wordmark and an emblem are not the same shape and must not be sized the
     # same way. Sizing both by height makes a wide wordmark span the canvas and
@@ -153,20 +171,42 @@ def _brand_context(brand: Any) -> dict[str, Any]:
         "secondary": palette.get("secondary", "#FFFFFF"),
         "accent": palette.get("accent", "#E4572E"),
         "ink": palette.get("ink", "#FFFFFF"),
-        "heading_font": fonts.get("heading", "Poppins"),
-        "body_font": fonts.get("body", "Inter"),
-        "google_fonts": fonts.get("google_fonts_href"),
+        "heading_font": _font_name(faces.get("heading"), "Poppins"),
+        "body_font": _font_name(faces.get("body"), "Inter"),
+        "google_fonts": faces.get("google_fonts_href"),
     }
+
+
+def _copy_text(brief: CreativeBrief, slide: Slide, brand_ctx: dict[str, Any]) -> str:
+    """Every string the template can set in type, for script detection."""
+    bits = [
+        getattr(slide, "headline", "") or "",
+        getattr(slide, "subhead", "") or "",
+        brief.cta or "",
+        getattr(slide, "badge", "") or "",
+        str(brand_ctx.get("name") or ""),
+    ]
+    return " ".join(b for b in bits if b)
 
 
 def render_html(brief: CreativeBrief, slide: Slide, brand: Any, background_data_uri: str) -> str:
     name = brief.template_for(slide)
     tpl = _env.get_template(TEMPLATES.get(name, TEMPLATES[DEFAULT_TEMPLATE]))
     w, h = brief.pixel_size()
+    brand_ctx = _brand_context(brand)
+    # The faces the copy needs, not the faces the brand chose: a Kannada
+    # headline in a Latin display font is tofu unless a Kannada face is loaded.
+    scripts = fonts.script_families(_copy_text(brief, slide, brand_ctx))
+    brand_ctx["fonts_href"] = fonts.google_fonts_href(
+        brand_ctx["heading_font"], brand_ctx["body_font"]
+    )
+    brand_ctx["script_fonts_href"] = fonts.script_fonts_href(scripts)
+    brand_ctx["font_stack"] = fonts.css_stack(scripts)
+    brand_ctx["indic"] = bool(scripts)
     return tpl.render(
         brief=brief,
         slide=slide,
-        brand=_brand_context(brand),
+        brand=brand_ctx,
         background=background_data_uri,
         width=w,
         height=h,
@@ -246,13 +286,18 @@ async def compose(
         viewport={"width": w, "height": h}, device_scale_factor=SUPERSAMPLE
     )
     try:
-        await page.set_content(html, wait_until="networkidle")
-        # Webfonts settle after networkidle on slow links; a short wait beats
-        # shipping a creative in a fallback face.
+        # The document is set immediately; the wait is for stylesheets and
+        # fonts. Bounded twice -- here and on fonts.ready -- because a font
+        # host that stalls must cost seconds, not the creative: the page is
+        # rendered in the fallback face instead.
         try:
-            await page.evaluate("document.fonts.ready")
+            await page.set_content(html, wait_until="networkidle", timeout=int(FONT_WAIT_S * 1000))
+        except Exception:  # noqa: BLE001 - playwright's TimeoutError
+            log.warning("page_not_idle", template=brief.template_for(slide))
+        try:
+            await asyncio.wait_for(page.evaluate("document.fonts.ready"), FONT_WAIT_S)
         except Exception:  # noqa: BLE001
-            pass
+            log.warning("fonts_not_settled", template=brief.template_for(slide))
 
         try:
             fit = await page.evaluate(FIT_JS)

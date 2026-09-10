@@ -35,6 +35,8 @@ ENRICHMENT_MAX = 720
 
 # Present in every enriched prompt; also the idempotency marker.
 _MARKER = "shot on a full-frame camera"
+# Public name for the providers: the camera clause starts here.
+CAMERA_MARKER = _MARKER
 
 CAMERA_DIRECTION = (
     f"{_MARKER} with a 50mm prime at f/2.0, natural directional daylight from one side, "
