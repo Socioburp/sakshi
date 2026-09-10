@@ -4,7 +4,8 @@ At-least-once, deduped by the job row: a job runs when its row says "queued".
 A failing handler is retried with backoff up to MAX_ATTEMPTS, then marked dead.
 Every ~30s the worker also reaps: re-pushes jobs whose push was lost, retries
 jobs whose worker died, and fails creatives stuck mid-generation -- refunding
-exactly the slides that were charged.
+exactly the slides that were charged. Once an hour it queues an Instagram
+Insights read for every connected account that has not been read today.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ log = get_logger(__name__)
 _stop = asyncio.Event()
 PROMOTE_EVERY = 1.0  # seconds; scheduled posts must not wait for an idle queue
 REAP_EVERY = 30.0
+SWEEP_EVERY = 3600.0  # Insights: once a day per brand, checked hourly
 
 
 def _claim(job_id: str) -> int | None:
@@ -141,7 +143,15 @@ def _reap_creatives() -> int:
     return reap_stuck_creatives()
 
 
-async def housekeeping(last_promote: float, last_reap: float) -> tuple[float, float]:
+def _sweep_insights() -> int:
+    from app.insights.performance import sweep
+
+    return sweep()
+
+
+async def housekeeping(
+    last_promote: float, last_reap: float, last_sweep: float = 0.0
+) -> tuple[float, float, float]:
     now = time.monotonic()
     if now - last_promote >= PROMOTE_EVERY:
         promote_due_jobs()
@@ -153,7 +163,13 @@ async def housekeeping(last_promote: float, last_reap: float) -> tuple[float, fl
         except Exception:  # noqa: BLE001
             log.exception("reap_failed")
         last_reap = now
-    return last_promote, last_reap
+    if now - last_sweep >= SWEEP_EVERY:
+        try:
+            _sweep_insights()
+        except Exception:  # noqa: BLE001
+            log.exception("insights_sweep_failed")
+        last_sweep = now
+    return last_promote, last_reap, last_sweep
 
 
 async def main() -> None:
@@ -161,9 +177,11 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _stop.set)
     log.info("worker_started", handlers=sorted(HANDLERS))
-    last_promote = last_reap = 0.0
+    last_promote = last_reap = last_sweep = 0.0
     while not _stop.is_set():
-        last_promote, last_reap = await housekeeping(last_promote, last_reap)
+        last_promote, last_reap, last_sweep = await housekeeping(
+            last_promote, last_reap, last_sweep
+        )
         did_work = await run_once()
         if not did_work:
             await asyncio.sleep(0.2)

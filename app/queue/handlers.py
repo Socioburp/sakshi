@@ -292,6 +292,17 @@ async def publish_scheduled(payload: dict) -> None:
         await _publish_to_instagram(ctx, {"creative_id": payload["creative_id"]})
 
 
+async def sync_insights(payload: dict) -> None:
+    """Read a brand's Instagram numbers. Queued hourly by the sweep (once a
+    day per brand) and 48h after each publish; a no-op without a connection."""
+    from app.insights import performance
+
+    result = await performance.sync_brand(uuid.UUID(payload["brand_id"]))
+    if not result.get("ok") and result.get("reason") == "sync_failed":
+        # Let the worker's retry/backoff have a go: a vendor blip, not a fact.
+        raise RuntimeError(result.get("error") or "insights sync failed")
+
+
 async def daily_suggestion(payload: dict) -> None:
     """Tomorrow's post, offered before they ask. One line, three buttons.
 
@@ -353,6 +364,14 @@ async def daily_suggestion(payload: dict) -> None:
             brand_id=str(brand_id),
         )
         return
+    # Fresh numbers before the idea is chosen: the sweep usually got here
+    # first, in which case this is a no-op. A failed read never costs the nudge.
+    try:
+        from app.insights import performance
+
+        await performance.sync_if_due(brand_id)
+    except Exception:  # noqa: BLE001
+        log.exception("daily_suggestion_sync_failed", brand_id=str(brand_id))
     with session_scope() as db:
         brand = db.get(Brand, brand_id)
         sess = repo.latest_session(db, wa_id, account_id=account_id)
@@ -364,7 +383,8 @@ async def daily_suggestion(payload: dict) -> None:
         acct = db.get(Account, account_id)
         locale = (acct.locale if acct else None) or "en"
         idea_dicts = [i.as_dict() for i in ideas]
-        # Monday: the week's line-up rides above the idea, once per week.
+        # Monday: last week's numbers and the week's line-up ride above the
+        # idea, once per week.
         week_lines = _week_lineup(db, brand, locale)
 
     lang = locale.split("-")[0].lower()
@@ -394,10 +414,11 @@ async def daily_suggestion(payload: dict) -> None:
 
 
 def _week_lineup(db, brand: Brand, locale: str) -> str | None:
-    """The plan's line-up for this week, on Mondays, once."""
+    """Monday, once: last week's Instagram numbers, then the plan's line-up."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
+    from app.insights import performance
     from app.insights import plan as planning
 
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
@@ -407,12 +428,21 @@ def _week_lineup(db, brand: Brand, locale: str) -> str | None:
     prefs = brand.template_prefs or {}
     if prefs.get("plan_week_sent") == stamp:
         return None
-    text = planning.week_message(
-        planning.current(db, brand.id, today), today, (locale or "en").split("-")[0].lower()
-    )
-    if text:
+    lang = (locale or "en").split("-")[0].lower()
+    parts = []
+    try:
+        readout = performance.week_readout(db, brand.id, today, lang)
+    except Exception:  # noqa: BLE001 - the line-up must not wait on the numbers
+        log.exception("week_readout_failed", brand_id=str(brand.id))
+        readout = None
+    if readout:
+        parts.append(readout)
+    lineup = planning.week_message(planning.current(db, brand.id, today), today, lang)
+    if lineup:
+        parts.append(lineup)
+    if parts:
         brand.template_prefs = {**prefs, "plan_week_sent": stamp}
-    return text
+    return "\n\n".join(parts) or None
 
 
 async def _phrase_nudge(idea, lang: str) -> str:
@@ -471,4 +501,5 @@ HANDLERS = {
     "handle_image": handle_image,
     "transcribe_and_handle": transcribe_and_handle,
     "publish_scheduled": publish_scheduled,
+    "sync_insights": sync_insights,
 }
