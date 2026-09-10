@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.creative import grid
+from app.creative import brandkit, grid
 from app.creative.photoreal import category_direction
 from app.db.models import Brand, BrandAsset, Brief, CreativeEvent
 from app.insights.profile import Taste, taste
@@ -198,7 +198,10 @@ def suggest(db: Session, brand: Brand, *, today: date | None = None, limit: int 
     # approved-post signature second. Otherwise the guard would refuse the
     # bot's own idea.
     fp = grid.fingerprint(db, brand.id)
-    template = _prefer(t, "template", fp.dominant(fp.templates) or "lower_third")
+    look = brandkit.LOOKS.get((brand.template_prefs or {}).get("look") or "") or brandkit.pick(
+        brand.category
+    )
+    template = _prefer(t, "template", fp.dominant(fp.templates) or look.family[0])
     aspect = _prefer(t, "aspect", fp.dominant(fp.aspects) or "4:5")
     play = category_direction(brand.category)
     recent = _recent_intents(db, brand.id)
