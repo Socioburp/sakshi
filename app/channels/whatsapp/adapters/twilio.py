@@ -91,8 +91,8 @@ class TwilioAdapter:
 
     async def send(self, msg: OutboundMessage) -> SendResult:
         data = {"From": settings.twilio_from, "To": f"whatsapp:{msg.to}"}
-        if msg.kind == "image":
-            data["MediaUrl"] = msg.image_url
+        if msg.kind in ("image", "video"):
+            data["MediaUrl"] = msg.image_url if msg.kind == "image" else msg.video_url
             data["Body"] = msg.caption or ""
         else:
             # Twilio has no native reply buttons on the basic API; degrade to

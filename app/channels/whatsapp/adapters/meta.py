@@ -163,6 +163,11 @@ class MetaAdapter:
                 "type": "image",
                 "image": {"link": msg.image_url, "caption": msg.caption or ""},
             }
+        if msg.kind == "video":
+            return base | {
+                "type": "video",
+                "video": {"link": msg.video_url, "caption": msg.caption or ""},
+            }
         if msg.kind == "buttons":
             return base | {
                 "type": "interactive",
