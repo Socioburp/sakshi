@@ -62,9 +62,10 @@ class Button:
 @dataclass(slots=True)
 class OutboundMessage:
     to: str
-    kind: Literal["text", "image", "buttons"] = "text"
+    kind: Literal["text", "image", "video", "buttons"] = "text"
     text: str | None = None
     image_url: str | None = None
+    video_url: str | None = None  # MP4 on a public URL (a reel)
     caption: str | None = None
     buttons: list[Button] = field(default_factory=list)
 
