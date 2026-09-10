@@ -122,7 +122,17 @@ PLAYBOOK: list[tuple[tuple[str, ...], str]] = [
         "natural window light, weave and drape visible, no mannequin stiffness",
     ),
     (
-        ("jewel", "gold", "silver", "diamond", "ornament", "bangle"),
+        (
+            "jewel",
+            "jewellery",
+            "jewelry",
+            "jeweller",
+            "gold",
+            "silver",
+            "diamond",
+            "ornament",
+            "bangle",
+        ),
         "macro on dark velvet or veined marble, one hard key light with a broad soft fill "
         "so facets sparkle without blown highlights, shallow depth of field",
     ),

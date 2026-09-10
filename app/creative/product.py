@@ -64,6 +64,14 @@ PLACEMENT = {
     "lower_third": (0.17, 0.57, 0.68),
     "split_card": (0.24, 0.72, 0.62),
     "centered_overlay": (0.17, 0.40, 0.50),
+    # The band covers the top 34%; the product stands in the photo below it,
+    # above the footer row.
+    "top_band": (0.40, 0.84, 0.70),
+    # Words top-left: the product goes right of centre, lower half.
+    "poster_stack": (0.42, 0.86, 0.56),
+    # The card shows the top 56% of the picture, framed; the product sits in
+    # the middle of that band.
+    "frame_card": (0.10, 0.50, 0.62),
 }
 # Type in the middle of the canvas and a product in the middle of the canvas
 # cannot both win. A product creative asked for as centered_overlay is set as

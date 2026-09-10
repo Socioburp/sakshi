@@ -36,6 +36,9 @@ TEMPLATE_NAMES = {
     "centered_overlay": "big centred headline over the photo",
     "lower_third": "photo on top, words in the lower third",
     "split_card": "photo above a solid brand-colour panel",
+    "top_band": "brand-colour band with the words on top, photo below",
+    "poster_stack": "poster: big headline top-left over the photo",
+    "frame_card": "catalogue card: framed photo, words beneath it",
 }
 
 

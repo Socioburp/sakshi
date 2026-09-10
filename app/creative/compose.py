@@ -50,8 +50,38 @@ TEMPLATES = {
     "centered_overlay": "centered_overlay.html.j2",
     "lower_third": "lower_third.html.j2",
     "split_card": "split_card.html.j2",
+    "top_band": "top_band.html.j2",
+    "poster_stack": "poster_stack.html.j2",
+    "frame_card": "frame_card.html.j2",
 }
 DEFAULT_TEMPLATE = "centered_overlay"
+
+# Instagram's profile grid shows the centre 3:4 of every post (the square grid
+# went in 2025). A 1:1 post loses 12.5% on each side there; a 9:16 post loses
+# a band top and bottom. Anything a reader must see -- headline, CTA, the
+# mark -- stays inside that zone, plus a small margin.
+GRID_RATIO = 3 / 4
+GRID_MARGIN = 0.03  # of width, inside the safe zone
+
+
+def grid_insets(width: int, height: int) -> tuple[int, int]:
+    """(x, y) pixels trimmed on each side when the grid shows a 3:4 centre crop."""
+    if width / height > GRID_RATIO:
+        return int(round((width - height * GRID_RATIO) / 2)), 0
+    return 0, int(round((height - width / GRID_RATIO) / 2))
+
+
+def padding_for(width: int, height: int) -> dict[str, int]:
+    """Content padding that clears the grid crop as well as the design's own
+    margins. Templates read pad_x / pad_top / pad_bottom from the context."""
+    x_in, y_in = grid_insets(width, height)
+    margin = int(round(width * GRID_MARGIN))
+    return {
+        "pad_x": max(int(round(width * 0.078)), x_in + margin),
+        "pad_top": max(int(round(width * 0.075)), y_in + margin),
+        "pad_bottom": max(int(round(width * 0.085)), y_in + margin),
+    }
+
 
 # Supersampling dial, measured rather than assumed.
 #
@@ -203,6 +233,8 @@ def render_html(brief: CreativeBrief, slide: Slide, brand: Any, background_data_
     brand_ctx["script_fonts_href"] = fonts.script_fonts_href(scripts)
     brand_ctx["font_stack"] = fonts.css_stack(scripts)
     brand_ctx["indic"] = bool(scripts)
+    prefs = getattr(brand, "template_prefs", None) or {}
+    brand_ctx["signature"] = prefs.get("signature") or "none"
     return tpl.render(
         brief=brief,
         slide=slide,
@@ -210,6 +242,7 @@ def render_html(brief: CreativeBrief, slide: Slide, brand: Any, background_data_
         background=background_data_uri,
         width=w,
         height=h,
+        **padding_for(w, h),
         # The CTA belongs to the post, and on a carousel it earns its place on
         # the last slide only -- repeating it on every slide reads as a template.
         show_cta=bool(brief.cta)
@@ -224,9 +257,9 @@ def render_html(brief: CreativeBrief, slide: Slide, brand: Any, background_data_
 # browser already knows the rendered size, so measure it instead of hoping the
 # copy limit was tight enough.
 FIT_JS = """
-() => {
+([xi, yi]) => {
   const stage = document.querySelector('.stage');
-  const boxes = [...document.querySelectorAll('.content, .panel')];
+  const boxes = [...document.querySelectorAll('.content, .panel, .band, .card')];
   const fits = (el) => {
     const s = stage.getBoundingClientRect();
     const r = el.getBoundingClientRect();
@@ -249,8 +282,17 @@ FIT_JS = """
   };
   const head = shrink('.headline', 30, 60);
   const sub = boxes.some(b => !fits(b)) ? shrink('.subhead', 20, 40) : 0;
+  // Grid safety: everything a reader must see sits inside the 3:4 centre crop.
+  const s = stage.getBoundingClientRect();
+  const must = [...document.querySelectorAll('.headline, .subhead, .cta, .logo, .brandline')];
+  const unsafe = must.filter(el => {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    return r.left < s.left + xi - 1 || r.right > s.right - xi + 1
+        || r.top < s.top + yi - 1 || r.bottom > s.bottom - yi + 1;
+  }).map(el => el.className);
   return {headline_steps: head, subhead_steps: sub,
-          fits: boxes.every(b => fits(b))};
+          fits: boxes.every(b => fits(b)), grid_safe: unsafe.length === 0, unsafe};
 }
 """
 
@@ -300,9 +342,15 @@ async def compose(
             log.warning("fonts_not_settled", template=brief.template_for(slide))
 
         try:
-            fit = await page.evaluate(FIT_JS)
+            fit = await page.evaluate(FIT_JS, list(grid_insets(w, h)))
         except Exception:  # noqa: BLE001
             fit = {"fits": None}
+        if fit.get("grid_safe") is False:
+            # Not fatal -- the post itself is whole -- but a thumbnail with a
+            # clipped headline is what makes a grid look amateur.
+            log.warning(
+                "grid_unsafe", template=brief.template_for(slide), elements=fit.get("unsafe")
+            )
         if fit.get("headline_steps") or fit.get("subhead_steps"):
             log.info(
                 "text_autofit",

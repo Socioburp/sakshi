@@ -110,7 +110,7 @@ CATEGORY_HABITS: list[tuple[tuple[str, ...], str]] = [
         "sizes available, and 'DM for price' is fine here.",
     ),
     (
-        ("jewel", "gold", "silver", "diamond", "ornament"),
+        ("jewel", "jewellery", "jewelry", "jeweller", "gold", "silver", "diamond", "ornament"),
         "Jewellery sells on trust and occasion: hallmark/BIS if true, making charges, "
         "exchange policy; never a price without the owner's say.",
     ),
