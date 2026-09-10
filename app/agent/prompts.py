@@ -72,6 +72,10 @@ instead of a generated stand-in, and costs nothing. Prefer it whenever the post 
 about a specific product they sell. Their product is cut out and stood in a clean \
 studio automatically; the product itself is never redrawn.
 
+`list_brand_assets` also says which shots are still missing (`coverage.next`). When a \
+post would be better with a photo they do not have, ask for that ONE shot with its \
+one-line how-to -- never "send more photos". Photos are the ceiling on everything.
+
 When a photo note carries `QUALITY:` (blurry, dark, washed out, low resolution), say so \
 in one friendly line and ask for another shot -- while they are still holding the \
 product. Do not build on that photo unless they insist.
@@ -193,11 +197,18 @@ def build_system(
 ) -> str:
     import json
 
+    from app.creative import claims, copybook
+
     parts = [SYSTEM.format(example=json.dumps(EXAMPLE, ensure_ascii=False, indent=2))]
     # Language first, before anything else: it governs every other instruction.
     parts.append(language_block)
     parts.append(_brand_block(brand))
     parts.append(_setup_block(brand))
+    # What converts for this kind of shop, and what its industry may not claim.
+    category = getattr(brand, "category", None)
+    prefs = getattr(brand, "template_prefs", None) or {}
+    parts.append(copybook.prompt_block(category, prefs.get("locality")))
+    parts.append(claims.prompt_block(category))
     if memory_block:
         parts.append(memory_block)
     if extra:

@@ -198,6 +198,18 @@ TOOLS: list[dict[str, Any]] = [
                         "False when the owner asks to stop the daily post idea; true to resume."
                     ),
                 },
+                "substantiated": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Claims the owner can prove (a certificate, a study): e.g. "
+                        "['FSSAI licensed', 'ISO 9001']. Exempt from the industry claim guard."
+                    ),
+                },
+                "locality": {
+                    "type": "string",
+                    "description": "The area/neighbourhood the shop serves, e.g. 'Indiranagar'.",
+                },
                 "palette": {
                     "type": "object",
                     "properties": {
@@ -491,6 +503,8 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         "palette",
         "no_logo",
         "daily_nudge",
+        "substantiated",
+        "locality",
     }
     with session_scope() as db:
         brand = db.get(Brand, ctx.brand_id)
@@ -500,6 +514,12 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
                 continue
             if key in ("no_logo", "daily_nudge"):
                 brand.template_prefs = {**(brand.template_prefs or {}), key: bool(value)}
+            elif key == "substantiated":
+                have = list((brand.template_prefs or {}).get("substantiated") or [])
+                merged = list(dict.fromkeys([*have, *[str(v)[:80] for v in value]]))[:20]
+                brand.template_prefs = {**(brand.template_prefs or {}), key: merged}
+            elif key == "locality":
+                brand.template_prefs = {**(brand.template_prefs or {}), key: str(value)[:80]}
             elif key in ("never_say", "always_say", "languages"):
                 merged = list(dict.fromkeys([*(getattr(brand, key) or []), *value]))
                 setattr(brand, key, merged)
@@ -651,9 +671,13 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
                     "caption": {**brief.caption.model_dump(), "body": args["caption"]},
                 }
             )
-            violations = check_brand_rules(override, db.get(Brand, ctx.brand_id))
+            brand_row = db.get(Brand, ctx.brand_id)
+            violations = check_brand_rules(override, brand_row)
             if violations:
                 return {"ok": False, "reason": "never_say_violation", "violations": violations}
+            blocked = pipeline.claim_gate(override, brand_row)
+            if blocked:
+                return blocked
         is_carousel = len(creatives) > 1
         pub = Publication(
             creative_id=creatives[0].id,
@@ -784,6 +808,8 @@ async def _check_credits(ctx: ToolContext, args: dict) -> dict:
 
 
 async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
+    from app.creative import shotlist
+
     with session_scope() as db:
         rows = db.scalars(
             select(BrandAsset)
@@ -791,6 +817,8 @@ async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
             .order_by(BrandAsset.created_at.desc())
             .limit(25)
         ).all()
+        brand = db.get(Brand, ctx.brand_id)
+        cov = shotlist.coverage(rows, brand.category if brand else None)
         return {
             "ok": True,
             "assets": [
@@ -802,10 +830,12 @@ async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
                 }
                 for a in rows
             ],
+            "coverage": cov,
             "note": (
                 "A photo with no label was sent without a caption. When a post is about "
                 "a product they have a photo of, put that id in "
-                "visual_direction.reference_asset_id -- the real photograph is used, free."
+                "visual_direction.reference_asset_id -- the real photograph is used, free. "
+                "coverage.next is the one photo to ask for next, with how to take it."
             ),
         }
 
