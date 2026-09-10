@@ -292,6 +292,174 @@ async def publish_scheduled(payload: dict) -> None:
         await _publish_to_instagram(ctx, {"creative_id": payload["creative_id"]})
 
 
+async def ig_event_notify(payload: dict) -> None:
+    """A comment or DM arrived: draft a reply and send it to the owner to approve.
+
+    The draft (an LLM call) and the WhatsApp send both happen here, off the
+    webhook. Re-running is safe: an event already past 'new' is left alone, so
+    a duplicate job never nudges the owner twice.
+    """
+    from app.agent import buttons as btn
+    from app.channels.whatsapp import send
+    from app.db.models import IgEvent
+    from app.inbox import service
+
+    event_id = uuid.UUID(payload["event_id"])
+    with session_scope() as db:
+        ev = db.get(IgEvent, event_id)
+        if ev is None or ev.status != "new":
+            return
+        brand = db.get(Brand, ev.brand_id)
+        if brand is None:
+            return
+        acct = db.get(Account, brand.account_id)
+        wa_id = acct.wa_phone if acct else None
+        locale = (acct.locale if acct else None) or "en"
+        # Only reachable inside the 24h window; outside it a template message
+        # would be needed, which is a later feature. Leave the event 'new' so a
+        # future inbound could resurface it.
+        sess = repo.latest_session(db, wa_id, account_id=brand.account_id) if wa_id else None
+        if sess is None or not repo.window_is_open(sess):
+            log.info("ig_event_window_closed", event_id=str(event_id))
+            return
+        session_id = sess.id
+        kind, text = ev.kind, ev.text or ""
+        from_username = ev.from_username
+        facts = service.facts_for(db, brand.id, text)
+        brand_obj = brand
+
+    lang = locale.split("-")[0].lower()
+    reply = await service.draft(kind=kind, text=text, brand=brand_obj, facts=facts, lang=lang)
+    with session_scope() as db:
+        ev = db.get(IgEvent, event_id)
+        if ev is None or ev.status != "new":
+            return  # a tap raced us; do not overwrite
+        ev.draft_reply = reply
+        ev.status = "drafted"
+    message = service.owner_message(
+        kind=kind, from_username=from_username, text=text, draft_text=reply, lang=lang
+    )
+    ok = await send.send_text(
+        account_id=brand_obj.account_id,
+        session_id=session_id,
+        wa_id=wa_id,
+        text=message[:1000],
+        buttons=btn.ig_buttons(str(event_id), locale),
+    )
+    log.info("ig_event_notified" if ok else "ig_event_notify_suppressed", event_id=str(event_id))
+
+
+async def ig_action(payload: dict) -> None:
+    """Act on the owner's tap: send the drafted reply, post an edit, or skip.
+
+    Posting to Instagram (the reply or DM) is the network call kept off the
+    webhook. Every path ends in one confirmation line to the owner.
+    """
+    from app.channels.whatsapp import send
+    from app.db.models import IgAccount, IgEvent
+    from app.integrations.instagram import client as ig
+
+    event_id = uuid.UUID(payload["event_id"])
+    action = payload["action"]  # send | skip | edit_prompt | custom
+    custom_text = (payload.get("custom_text") or "").strip()
+
+    with session_scope() as db:
+        ev = db.get(IgEvent, event_id)
+        if ev is None:
+            return
+        brand = db.get(Brand, ev.brand_id)
+        acct = db.get(Account, brand.account_id) if brand else None
+        wa_id = acct.wa_phone if acct else None
+        locale = (acct.locale if acct else None) or "en"
+        sess = repo.latest_session(db, wa_id, account_id=brand.account_id) if wa_id else None
+        session_id = sess.id if sess else None
+        status_now = ev.status
+        kind = ev.kind
+        object_id = ev.ig_object_id
+        from_id = ev.from_id
+        draft_reply = ev.draft_reply or ""
+        ig_row = db.get(IgAccount, ev.ig_account_id) if ev.ig_account_id else None
+        token = ig_row.access_token if ig_row else None
+        ig_user_id = ig_row.ig_user_id if ig_row else None
+    lang = locale.split("-")[0].lower()
+
+    async def _confirm(text: str) -> None:
+        if wa_id and session_id and brand is not None:
+            await send.send_text(
+                account_id=brand.account_id, session_id=session_id, wa_id=wa_id, text=text
+            )
+
+    if action == "edit_prompt":
+        await _confirm(_IG_EDIT_PROMPT.get(lang, _IG_EDIT_PROMPT["en"]))
+        return
+    if action == "skip":
+        if status_now in ("new", "drafted", "approved"):
+            with session_scope() as db:
+                ev = db.get(IgEvent, event_id)
+                if ev and ev.status in ("new", "drafted", "approved"):
+                    ev.status = "skipped"
+        await _confirm(_IG_SKIPPED.get(lang, _IG_SKIPPED["en"]))
+        return
+    if status_now in ("sent",):
+        return  # already posted; a double tap is a no-op
+
+    reply_text = custom_text if action == "custom" else draft_reply
+    if not reply_text:
+        await _confirm(_IG_SKIPPED.get(lang, _IG_SKIPPED["en"]))
+        return
+    if ig_row is None or not token:
+        with session_scope() as db:
+            ev = db.get(IgEvent, event_id)
+            if ev:
+                ev.status, ev.error = "failed", "instagram_not_connected"
+        await _confirm(_IG_RECONNECT.get(lang, _IG_RECONNECT["en"]))
+        return
+    try:
+        if kind in ("comment", "mention"):
+            reply_id = await ig.reply_to_comment(
+                comment_id=object_id, access_token=token, message=reply_text
+            )
+        else:
+            reply_id = await ig.send_dm(
+                ig_user_id=ig_user_id, access_token=token, recipient_id=from_id, text=reply_text
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("ig_reply_failed", event_id=str(event_id))
+        with session_scope() as db:
+            ev = db.get(IgEvent, event_id)
+            if ev:
+                ev.status, ev.error = "failed", str(exc)[:2000]
+                if ig.is_auth_error(exc) and ev.ig_account_id:
+                    row = db.get(IgAccount, ev.ig_account_id)
+                    if row:
+                        row.status = "disconnected"
+        msg = _IG_RECONNECT if ig.is_auth_error(exc) else _IG_FAILED
+        await _confirm(msg.get(lang, msg["en"]))
+        return
+    with session_scope() as db:
+        ev = db.get(IgEvent, event_id)
+        if ev:
+            ev.status, ev.reply_text, ev.reply_ig_id = "sent", reply_text, str(reply_id)
+    await _confirm(_IG_SENT.get(lang, _IG_SENT["en"]))
+    log.info("ig_reply_sent", event_id=str(event_id), kind=kind)
+
+
+_IG_EDIT_PROMPT = {
+    "en": "Type the reply you'd like to post, and I'll send it. Or tap Skip on the message above.",
+    "hi": "Jo reply post karna hai wo type karein, main bhej dunga. Ya upar Skip dabayein.",
+}
+_IG_SENT = {"en": "Posted ✅", "hi": "Post ho gaya ✅"}
+_IG_SKIPPED = {"en": "Skipped — nothing was posted.", "hi": "Chhod diya — kuch post nahi hua."}
+_IG_FAILED = {
+    "en": "Couldn't post that reply just now. Try again in a bit.",
+    "hi": "Abhi reply post nahi ho paya. Thodi der mein phir se try karein.",
+}
+_IG_RECONNECT = {
+    "en": "Instagram needs reconnecting before I can reply. Ask me to connect it.",
+    "hi": "Reply se pehle Instagram dobara connect karna hoga. Mujhse connect karne ko kahein.",
+}
+
+
 async def sync_insights(payload: dict) -> None:
     """Read a brand's Instagram numbers. Queued hourly by the sweep (once a
     day per brand) and 48h after each publish; a no-op without a connection."""
@@ -502,4 +670,6 @@ HANDLERS = {
     "transcribe_and_handle": transcribe_and_handle,
     "publish_scheduled": publish_scheduled,
     "sync_insights": sync_insights,
+    "ig_event_notify": ig_event_notify,
+    "ig_action": ig_action,
 }
