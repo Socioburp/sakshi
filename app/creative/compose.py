@@ -22,6 +22,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from PIL import Image
 
+from app.config import settings
 from app.creative import fonts
 from app.creative.brief import CreativeBrief, Slide
 from app.logging import get_logger
@@ -145,7 +146,8 @@ async def get_browser():
             pw = await async_playwright().start()
             try:
                 _browser = await pw.chromium.launch(
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none"]
+                    executable_path=settings.chromium_executable or None,
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none"],
                 )
             except Exception:
                 await pw.stop()
