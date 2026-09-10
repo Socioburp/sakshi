@@ -286,3 +286,112 @@ async def test_first_nudge_is_the_photo_checklist_when_photos_are_scarce(owner, 
         assert db.get(Brand, brand_id).template_prefs.get("shotlist_sent") is True
     await handlers.daily_suggestion(payload)  # the checklist is sent once; then an idea
     assert len(sent) == 2 and [b.id for b in sent[1]["buttons"]] == ["make:1", "next", "skip"]
+
+
+def test_plan_build_arcs_mix_and_rebuild_keeps_made_slots(owner):
+    from app.db.models import Brand, BrandAsset
+    from app.db.session import session_scope
+    from app.insights import plan as P
+
+    account_id, brand_id = owner
+    with session_scope() as db:
+        for label, key in (("groundnut oil", "x"), ("coconut oil", "y")):
+            db.add(BrandAsset(brand_id=brand_id, kind="product", label=label, storage_key=key))
+        brand = db.get(Brand, brand_id)
+        row = P.build(db, brand, date(2026, 11, 1), goal="footfall", cadence=4)
+        slots = row.slots
+        assert row.goal == "footfall" and row.cadence == 4
+        dates = [s["date"] for s in slots]
+        assert dates == sorted(dates) and len(set(dates)) == len(dates)
+        # Diwali (8 Nov) arc: 3 Nov teaser, 6 Nov offer, 7 Nov last day.
+        by_date = {s["date"]: s for s in slots}
+        assert by_date["2026-11-03"]["campaign"] == "Diwali"
+        offer = by_date["2026-11-06"]
+        assert offer["intent"] == "festive" and "special" in offer["headline_idea"]
+        assert by_date["2026-11-07"]["headline_idea"].startswith("Last day")
+        # Offers dominate a footfall month; education is a carousel.
+        pillars = [s["pillar"] for s in slots if not s.get("campaign")]
+        assert pillars.count("offer") >= max(pillars.count(p) for p in set(pillars)) - 1
+        plain = [s for s in slots if not s.get("campaign")]
+        assert all(s["format"] == "carousel" for s in plain if s["pillar"] == "education")
+        assert all(a["pillar"] != b["pillar"] for a, b in zip(plain, plain[1:], strict=False))
+        assert "groundnut oil" in " ".join(s["headline_idea"] for s in slots)
+
+        # A slot gets made; a replan with a new goal keeps it.
+        first = slots[0]["date"]
+        assert P.mark(db, brand_id, first, status="made", brief_id=uuid.uuid4())
+        row = P.build(db, brand, date(2026, 11, 1), goal="leads", cadence=3)
+        kept = [s for s in row.slots if s["date"] == first]
+        assert kept and kept[0]["status"] == "made"
+        assert P.describe(row)["posts_made"] == 1 and P.describe(row)["goal"] == "leads"
+        assert "Diwali" in P.describe(row)["campaigns"]
+
+
+def test_todays_plan_slot_is_the_first_suggestion(owner):
+    from app.db.models import Brand
+    from app.db.session import session_scope
+    from app.insights import plan as P
+    from app.insights import suggest
+
+    account_id, brand_id = owner
+    with session_scope() as db:
+        brand = db.get(Brand, brand_id)
+        row = P.build(db, brand, date(2026, 10, 1), goal="awareness", cadence=7)
+        today = date.fromisoformat(row.slots[10]["date"])
+        ideas = suggest.suggest(db, brand, today=today)
+        assert ideas[0].plan_slot == today.isoformat()
+        assert ideas[0].headline_idea == row.slots[10]["headline_idea"]
+        assert ideas[0].as_dict()["plan_slot"] == today.isoformat()
+        # Tomorrow's slot is not offered today (a missed one earlier this week is).
+        assert all(i.plan_slot in (None, today.isoformat()) for i in ideas)
+
+
+async def test_plan_month_tool_builds_shows_and_marks_the_slot(owner, monkeypatch):
+    from app.agent import tools
+    from app.agent.context import ToolContext
+    from app.db.models import WaSession
+    from app.db.session import session_scope
+    from app.insights import plan as P
+    from app.telemetry.stages import trace
+
+    account_id, brand_id = owner
+    with session_scope() as db:
+        sess = WaSession(account_id=account_id, wa_id=f"91{uuid.uuid4().int % 10**10:010d}")
+        db.add(sess)
+        db.flush()
+        session_id = sess.id
+    t = trace(account_id=account_id).__enter__()
+    ctx = ToolContext(account_id, brand_id, session_id, "", t)
+
+    empty = await tools.dispatch(ctx, "plan_month", {})
+    assert empty["ok"] and empty["plan"] is None and "ONE question" in empty["hint"]
+    built = await tools.dispatch(
+        ctx, "plan_month", {"goal": "launch", "launch": "Amla hair oil", "cadence": 5}
+    )
+    assert built["ok"] and built["built"] and built["plan"]["goal"] == "launch"
+    assert built["plan"]["posts_planned"] >= 18
+    with session_scope() as db:
+        row = P.current(db, brand_id, P.date.today())
+        assert row is not None and any("Amla hair oil" in s["headline_idea"] for s in row.slots)
+    shown = await tools.dispatch(ctx, "plan_month", {})
+    assert shown["ok"] and not shown["built"] and shown["plan"]["goal"] == "launch"
+
+    # Building suggestion #1 that came from the plan closes its slot.
+    with session_scope() as db:
+        row = P.current(db, brand_id, P.date.today())
+        slot_date = next(s["date"] for s in row.slots if s["status"] == "planned")
+        sess = db.get(WaSession, session_id)
+        sess.state = {"suggestions": [{"rank": 1, "plan_slot": slot_date, "headline_idea": "x"}]}
+
+    async def fake_generate(ctx_, brief, **kw):
+        return {"ok": True, "brief_id": str(uuid.uuid4()), "creative_ids": [], "image_urls": []}
+
+    monkeypatch.setattr(tools.pipeline, "generate", fake_generate)
+    from app.creative.brief import EXAMPLE
+
+    res = await tools.dispatch(ctx, "create_creative", {"brief": EXAMPLE, "suggestion_rank": 1})
+    assert res["ok"]
+    with session_scope() as db:
+        row = P.current(db, brand_id, P.date.today())
+        made = [s for s in row.slots if s["date"] == slot_date]
+        assert made and made[0]["status"] == "made" and made[0]["brief_id"] == res["brief_id"]
