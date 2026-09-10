@@ -237,3 +237,34 @@ async def test_recompose_refuses_an_expired_draft(owner, blobs):
     )
     assert res["reason"] == "background_expired"
     assert _balance(account_id) == 9, "a refused revision must not charge"
+
+
+async def test_claim_guard_blocks_before_any_charge(owner, blobs):
+    """A skincare brand cannot ship 'cures'; nothing is charged, the agent
+    gets the phrase, the reason and a rewrite; advice-level claims ship with
+    a note; a substantiated phrase passes."""
+    from app.creative import pipeline
+    from app.db.models import Brand
+    from app.db.session import session_scope
+
+    account_id, brand_id = owner
+    with session_scope() as db:
+        db.get(Brand, brand_id).category = "skincare"
+    payload = {**EXAMPLE, "headline": "Cures acne in 7 days"}
+    res = await pipeline.generate(_ctx(account_id, brand_id), CreativeBrief.model_validate(payload))
+    assert res["ok"] is False and res["reason"] == "claim_guard" and res["charged"] == 0
+    assert res["violations"][0]["phrase"].startswith("cures")
+    assert "helps" in res["violations"][0]["rewrite"]
+    assert _balance(account_id) == 10
+
+    advice = {**EXAMPLE, "headline": "No.1 serum in the city"}
+    res = await pipeline.generate(_ctx(account_id, brand_id), CreativeBrief.model_validate(advice))
+    assert res["ok"] and res["claim_notes"][0]["severity"] == "advise"
+    assert _balance(account_id) == 9
+
+    with session_scope() as db:
+        b = db.get(Brand, brand_id)
+        b.template_prefs = {**(b.template_prefs or {}), "substantiated": ["dermatologist tested"]}
+    okd = {**EXAMPLE, "headline": "Dermatologist tested, made with kokum"}
+    res = await pipeline.generate(_ctx(account_id, brand_id), CreativeBrief.model_validate(okd))
+    assert res["ok"] and "claim_notes" not in res

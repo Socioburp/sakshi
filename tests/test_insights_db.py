@@ -199,6 +199,11 @@ async def test_daily_nudge_sends_once_with_three_buttons(owner, monkeypatch):
     with session_scope() as db:
         acct = db.get(Account, account_id)
         repo.touch_session(db, acct, wa, inbound=True)  # inside the 24h window
+        # The photo-day checklist has its own test; this one is about ideas.
+        from app.db.models import Brand
+
+        b = db.get(Brand, brand_id)
+        b.template_prefs = {**(b.template_prefs or {}), "shotlist_sent": True}
     sent = []
 
     async def fake_send_text(**kw):
@@ -250,3 +255,34 @@ def _run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+async def test_first_nudge_is_the_photo_checklist_when_photos_are_scarce(owner, monkeypatch):
+    """Fewer than three photos on file: the daily job sends the photo-day
+    checklist once (no buttons), then goes back to ideas."""
+    from app.channels.whatsapp import send
+    from app.db import repo
+    from app.db.models import Account, Brand
+    from app.db.session import session_scope
+    from app.queue import handlers
+
+    account_id, brand_id = owner
+    wa = f"9199{uuid.uuid4().int % 10**8:08d}"
+    with session_scope() as db:
+        acct = db.get(Account, account_id)
+        repo.touch_session(db, acct, wa, inbound=True)
+    sent = []
+
+    async def fake_send_text(**kw):
+        sent.append(kw)
+        return True
+
+    monkeypatch.setattr(send, "send_text", fake_send_text)
+    payload = {"account_id": str(account_id), "brand_id": str(brand_id), "wa_id": wa}
+    await handlers.daily_suggestion(payload)
+    assert len(sent) == 1 and sent[0]["text"].startswith("Photo day!")
+    assert "buttons" not in sent[0]
+    with session_scope() as db:
+        assert db.get(Brand, brand_id).template_prefs.get("shotlist_sent") is True
+    await handlers.daily_suggestion(payload)  # the checklist is sent once; then an idea
+    assert len(sent) == 2 and [b.id for b in sent[1]["buttons"]] == ["make:1", "next", "skip"]
