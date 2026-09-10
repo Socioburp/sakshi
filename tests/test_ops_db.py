@@ -475,3 +475,86 @@ async def test_dead_token_disconnects_and_asks_to_reconnect(owner, blobs, chromi
             db.query(IgAccount).filter(IgAccount.brand_id == ctx.brand_id).one().status
             == "disconnected"
         )
+
+
+# --------------------------------------------------------------------------- #
+# reels: the still, set in motion
+# --------------------------------------------------------------------------- #
+async def test_reel_is_rendered_sent_as_video_and_published_as_a_reel(owner, blobs, chromium):
+    from app.agent.tools import _publish_to_instagram
+    from app.creative import pipeline
+    from app.db import repo
+    from app.db.models import Creative, IgAccount, Publication
+    from app.db.session import session_scope
+
+    account_id, brand_id = owner
+    ctx = _ctx(account_id, brand_id)
+    brief = CreativeBrief.model_validate(
+        {**EXAMPLE, "format": {"type": "reel", "aspect_ratio": "1:1"}}
+    )
+    res = await pipeline.generate(ctx, brief)
+    assert res["ok"] and res["format"] == "reel"
+    # One image call only: a reel costs the same as a single still.
+    assert res["credits_charged"] == 1
+    # The delivered url is the video, not the still.
+    assert res["image_urls"][0].endswith("reel.mp4")
+
+    with session_scope() as db:
+        row = db.query(Creative).filter(Creative.brief_id == uuid.UUID(res["brief_id"])).one()
+        assert row.width == 1080 and row.height == 1920
+        assert row.video_key and row.video_url and row.video_key.endswith("reel.mp4")
+        assert row.composed_key and row.composed_url, "the still cover is kept too"
+        mp4 = blobs[row.video_key]
+    # A real, playable MP4 shaped for Meta's fetcher.
+    from app.creative import reel
+
+    info = reel.probe(mp4)
+    assert info["width"] == 1080 and info["height"] == 1920 and info["faststart"] is True
+
+    with session_scope() as db:
+        repo.mark_approved(db, brief_id=res["brief_id"], via="button", account_id=account_id)
+        db.add(
+            IgAccount(
+                brand_id=brand_id,
+                ig_user_id="17841400000000000",
+                status="connected",
+                access_token="tok",
+                token_expires_at=datetime.now(UTC) + timedelta(days=2),
+            )
+        )
+    pub = await _publish_to_instagram(ctx, {"brief_id": res["brief_id"]})
+    assert pub["ok"] and pub["media_type"] == "REELS", pub
+    with session_scope() as db:
+        publication = (
+            db.query(Publication)
+            .join(Creative, Publication.creative_id == Creative.id)
+            .filter(Creative.brief_id == uuid.UUID(res["brief_id"]))
+            .one()
+        )
+        assert publication.media_type == "REELS"
+        row = db.query(Creative).filter(Creative.brief_id == uuid.UUID(res["brief_id"])).one()
+        # Both the still cover and the video are promoted out of the draft prefix.
+        assert row.composed_key.startswith("published/")
+        assert row.video_key.startswith("published/") and row.status == "published"
+
+
+async def test_revising_a_reel_re_renders_the_video_free(owner, blobs, chromium):
+    from app.creative import pipeline
+    from app.db.models import Creative
+    from app.db.session import session_scope
+
+    account_id, brand_id = owner
+    ctx = _ctx(account_id, brand_id)
+    brief = CreativeBrief.model_validate({**EXAMPLE, "format": {"type": "reel"}})
+    first = await pipeline.generate(ctx, brief)
+    assert first["ok"] and _balance(account_id) == 9
+
+    revised = await pipeline.recompose(
+        ctx, brief_id=uuid.UUID(first["brief_id"]), changes={"headline": "Now in bigger jars"}
+    )
+    assert revised["ok"] and revised["credits_charged"] == 0
+    assert revised["image_urls"][0].endswith("reel.mp4")
+    assert _balance(account_id) == 9, "a reel revision is free, like any copy change"
+    with session_scope() as db:
+        row = db.query(Creative).filter(Creative.brief_id == uuid.UUID(revised["brief_id"])).one()
+        assert row.video_url and row.video_key.endswith("reel.mp4")

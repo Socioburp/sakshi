@@ -53,6 +53,6 @@ def test_revise_is_advertised_as_free():
 def test_carousel_is_reachable_from_the_tool_surface():
     create = next(t for t in TOOLS if t["name"] == "create_creative")
     fmt = create["input_schema"]["properties"]["brief"]["properties"]["format"]
-    assert set(fmt["properties"]["type"]["enum"]) == {"single", "carousel"}
+    assert set(fmt["properties"]["type"]["enum"]) == {"single", "carousel", "reel"}
     regen = next(t for t in TOOLS if t["name"] == "regenerate_image")
     assert "slide_position" in regen["input_schema"]["properties"]
