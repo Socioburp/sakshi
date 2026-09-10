@@ -395,3 +395,31 @@ async def test_plan_month_tool_builds_shows_and_marks_the_slot(owner, monkeypatc
         row = P.current(db, brand_id, P.date.today())
         made = [s for s in row.slots if s["date"] == slot_date]
         assert made and made[0]["status"] == "made" and made[0]["brief_id"] == res["brief_id"]
+
+
+async def test_category_picks_the_brand_kit_once_and_look_can_be_changed(owner):
+    from app.agent import tools
+    from app.agent.context import ToolContext
+    from app.db.models import Brand
+    from app.db.session import session_scope
+    from app.telemetry.stages import trace
+
+    account_id, brand_id = owner
+    t = trace(account_id=account_id).__enter__()
+    ctx = ToolContext(account_id, brand_id, None, "", t)
+    res = await tools.dispatch(ctx, "update_brand", {"category": "premium skincare"})
+    assert "look=editorial" in res["updated"]
+    with session_scope() as db:
+        b = db.get(Brand, brand_id)
+        assert b.fonts["heading"] == "Playfair Display"
+        assert b.template_prefs["look"] == "editorial" and b.template_prefs["signature"] == "none"
+    # A later category edit does not silently re-skin a brand that has posts.
+    await tools.dispatch(ctx, "update_brand", {"category": "skincare and bakery"})
+    with session_scope() as db:
+        assert db.get(Brand, brand_id).template_prefs["look"] == "editorial"
+    # The owner asks for a louder feel.
+    res = await tools.dispatch(ctx, "update_brand", {"look": "bold"})
+    assert "look" in res["updated"]
+    with session_scope() as db:
+        b = db.get(Brand, brand_id)
+        assert b.fonts["heading"] == "Manrope" and b.template_prefs["signature"] == "bar"
