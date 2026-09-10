@@ -11,6 +11,10 @@ No model is involved in choosing. The agent turns the winning sketch into
 copy in the owner's language; the choice itself is deterministic, so two
 owners with the same shop on the same day get the same reasoning, and a
 wrong suggestion can be traced to a rule rather than to a mood.
+
+A fifth source arrives once Instagram Insights have been read: the post
+that beat the account's usual gets a follow-up, and the layout, ratio and
+format the followers responded to become the defaults for every idea.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from sqlalchemy.orm import Session
 from app.creative import brandkit, grid
 from app.creative.photoreal import category_direction
 from app.db.models import Brand, BrandAsset, Brief, CreativeEvent
+from app.insights import performance
 from app.insights.profile import Taste, taste
 
 FESTIVALS = Path(__file__).resolve().parents[2] / "docs" / "festivals_in.json"
@@ -94,6 +99,7 @@ class Idea:
     festival: str | None = None
     hashtags_hint: list[str] = field(default_factory=list)
     plan_slot: str | None = None  # the plan date this idea fulfils, if any
+    sequel_of: str | None = None  # the Instagram media id this idea follows up
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -194,15 +200,23 @@ def suggest(db: Session, brand: Brand, *, today: date | None = None, limit: int 
     """Ranked ideas for today, most compelling first."""
     today = today or datetime.now(ZoneInfo("Asia/Kolkata")).date()
     t = taste(db, brand.id)
-    # Defaults come from what they have approved: the vote history first, the
-    # approved-post signature second. Otherwise the guard would refuse the
-    # bot's own idea.
+    # Defaults come from what worked: what their followers responded to
+    # first (Insights), then what the owner approved (taps), then the
+    # approved-post signature. Otherwise the guard would refuse the bot's
+    # own idea.
     fp = grid.fingerprint(db, brand.id)
     look = brandkit.LOOKS.get((brand.template_prefs or {}).get("look") or "") or brandkit.pick(
         brand.category
     )
-    template = _prefer(t, "template", fp.dominant(fp.templates) or look.family[0])
-    aspect = _prefer(t, "aspect", fp.dominant(fp.aspects) or "4:5")
+    perf = performance.build(db, brand.id)
+    best_t = performance.Performance.best(perf.by_template) if perf.enough else None
+    best_a = performance.Performance.best(perf.by_aspect) if perf.enough else None
+    template = (best_t[0] if best_t else None) or _prefer(
+        t, "template", fp.dominant(fp.templates) or look.family[0]
+    )
+    aspect = (best_a[0] if best_a else None) or _prefer(
+        t, "aspect", fp.dominant(fp.aspects) or "4:5"
+    )
     play = category_direction(brand.category)
     recent = _recent_intents(db, brand.id)
     ideas: list[Idea] = []
@@ -238,6 +252,12 @@ def suggest(db: Session, brand: Brand, *, today: date | None = None, limit: int 
                 festival=f["name"],
             )
         )
+
+    sequel = performance.sequel_for(
+        db, brand.id, perf, template=template, aspect=aspect, play=play, today=today
+    )
+    if sequel:
+        ideas.append(Idea(**sequel))
 
     for photo in _unused_photos(db, brand.id)[:1]:
         label = photo.label or "the product"
@@ -295,13 +315,13 @@ def suggest(db: Session, brand: Brand, *, today: date | None = None, limit: int 
             )
         )
 
-    # Rank: festival first, then the unused photo, then whatever does not
-    # repeat what they just posted.
+    # Rank: festival first, then the follow-up to what worked, then the
+    # unused photo, then whatever does not repeat what they just posted.
     def key(i: Idea) -> tuple[int, int]:
         if i.plan_slot:
             return (-1, -1)
-        repeat = 1 if i.intent in recent and not i.festival else 0
-        base = 0 if i.festival else 1 if i.reference_asset_id else 2
+        repeat = 1 if i.intent in recent and not i.festival and not i.sequel_of else 0
+        base = 0 if i.festival else 1 if i.sequel_of else 2 if i.reference_asset_id else 3
         return (repeat, base)
 
     ideas.sort(key=key)
