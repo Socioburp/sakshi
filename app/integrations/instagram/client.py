@@ -40,12 +40,17 @@ SCOPES = [
 # before it is approved fails the whole login dialog, so the connect link
 # adds it only once IG_INSIGHTS_ENABLED says it can be granted.
 INSIGHTS_SCOPE = "instagram_business_manage_insights"
+# Replying to comments and DMs. Both need App Review, so they join the connect
+# link only once IG_ENGAGEMENT_ENABLED says they are granted.
+ENGAGEMENT_SCOPES = ("instagram_business_manage_comments", "instagram_business_manage_messages")
 
 
 def requested_scopes() -> list[str]:
     scopes = list(SCOPES)
     if settings.instagram_mock or settings.ig_insights_enabled:
         scopes.append(INSIGHTS_SCOPE)
+    if settings.instagram_mock or settings.ig_engagement_enabled:
+        scopes.extend(ENGAGEMENT_SCOPES)
     return scopes
 
 
@@ -369,6 +374,73 @@ async def publish_container(
         return IgPublishResult(media_id=media_id, permalink=permalink)
 
 
+# --------------------------------------------------------------------------- #
+# comments and messages (Track A, replies)
+# --------------------------------------------------------------------------- #
+async def reply_to_comment(*, comment_id: str, access_token: str, message: str) -> str:
+    """Public reply under a comment. `POST /{ig-comment-id}/replies`. Text only.
+
+    Returns the new comment's id.
+    """
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="reply_to_comment", comment_id=comment_id)
+        return fixtures.mock_reply_id()
+    async with _client() as c:
+        r = await c.post(
+            f"{GRAPH}/{comment_id}/replies",
+            data={"message": message[:2200], "access_token": access_token},
+        )
+        r.raise_for_status()
+        return str(r.json()["id"])
+
+
+async def hide_comment(*, comment_id: str, access_token: str, hidden: bool = True) -> None:
+    """Hide (or unhide) a comment. `POST /{ig-comment-id}?hide=true`."""
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="hide_comment", comment_id=comment_id, hidden=hidden)
+        return
+    async with _client() as c:
+        r = await c.post(
+            f"{GRAPH}/{comment_id}",
+            data={"hide": "true" if hidden else "false", "access_token": access_token},
+        )
+        r.raise_for_status()
+
+
+async def send_dm(
+    *,
+    ig_user_id: str,
+    access_token: str,
+    recipient_id: str | None = None,
+    comment_id: str | None = None,
+    text: str,
+) -> str:
+    """Send a direct message. `POST /{ig-id}/messages`.
+
+    `recipient_id` replies inside an existing DM thread (the 24h window rules
+    apply). `comment_id` sends a private reply to a public comment, which
+    opens a thread even if the person has never messaged the account. Exactly
+    one of the two is required. Returns the message id.
+    """
+    if not (recipient_id or comment_id) or (recipient_id and comment_id):
+        raise ValueError("send_dm needs exactly one of recipient_id or comment_id")
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="send_dm", recipient_id=recipient_id, comment_id=comment_id)
+        return fixtures.mock_message_id()
+    recipient = {"id": recipient_id} if recipient_id else {"comment_id": comment_id}
+    async with _client() as c:
+        r = await c.post(
+            f"{GRAPH}/{ig_user_id}/messages",
+            json={
+                "recipient": recipient,
+                "message": {"text": text[:1000]},
+                "access_token": access_token,
+            },
+        )
+        r.raise_for_status()
+        return str(r.json().get("message_id") or r.json().get("id") or "")
+
+
 __all__ = [
     "exchange_code_for_token",
     "get_profile",
@@ -376,6 +448,9 @@ __all__ = [
     "create_carousel_container",
     "create_reel_container",
     "publish_container",
+    "reply_to_comment",
+    "hide_comment",
+    "send_dm",
     "wait_for_container",
     "refresh_long_lived_token",
     "is_auth_error",

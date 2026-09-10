@@ -34,6 +34,20 @@ def mock_child_container_id() -> str:
 
 MOCK_REEL_CONTAINER_ID = "18000000000000099"
 MOCK_MEDIA_ID = "17900000000000000"
+_reply_seq = [0]
+_message_seq = [0]
+
+
+def mock_reply_id() -> str:
+    _reply_seq[0] += 1
+    return f"17900000000009{_reply_seq[0]:04d}"
+
+
+def mock_message_id() -> str:
+    _message_seq[0] += 1
+    return f"aWdfZG1fbW9ja3{_message_seq[0]:04d}"
+
+
 MOCK_PERMALINK = "https://www.instagram.com/p/MOCKSHORTCODE/"
 
 
