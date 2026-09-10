@@ -44,10 +44,22 @@
            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>");
            background-size: 150px 150px; }
 
+  {# Padding respects the profile grid: Instagram shows the centre 3:4 of a
+     post in the grid, so a 1:1 post loses 12.5% on each side and a 9:16
+     post loses a band top and bottom. pad_* are computed in compose.py from
+     the aspect ratio; nothing a reader must see sits in the trimmed strip. #}
   .content { position: absolute; inset: 0; display: flex; flex-direction: column;
-             padding: {{ (width * 0.075) | round | int }}px
-                      {{ (width * 0.078) | round | int }}px
-                      {{ (width * 0.085) | round | int }}px; }
+             padding: {{ pad_top }}px {{ pad_x }}px {{ pad_bottom }}px; }
+
+  {# The brand's one repeated mark, chosen with its look (app/creative/brandkit.py).
+     Small, in the accent colour, always in the same place: what makes a grid
+     read as one brand across twenty posts. #}
+  .sig-corner { position: absolute; top: 0; right: 0;
+                width: {{ (width*0.16)|round|int }}px; height: {{ (width*0.16)|round|int }}px;
+                background: linear-gradient(225deg, {{ brand.accent }} 50%, transparent 50%);
+                opacity: .92; }
+  .sig-bar { position: absolute; left: 0; right: 0; bottom: 0;
+             height: {{ (width*0.014)|round|int }}px; background: {{ brand.accent }}; }
 
   {# Display type tightens as it grows: leading below 1 and negative tracking are
      what separate a headline from a paragraph set large. #}
@@ -97,8 +109,8 @@
                text-transform: uppercase; }
 
   {# Carousel affordance: tells the reader there is more to swipe to. #}
-  .pips { position: absolute; top: {{ (width*0.06)|round|int }}px;
-          right: {{ (width*0.06)|round|int }}px; display: flex;
+  .pips { position: absolute; top: {{ [pad_top - (width*0.02)|round|int, (width*0.03)|round|int]|max }}px;
+          left: 50%; transform: translateX(-50%); display: flex;
           gap: {{ (width*0.013)|round|int }}px; }
   .pip { width: {{ (width*0.015)|round|int }}px; height: {{ (width*0.015)|round|int }}px;
          border-radius: 50%; background: {{ brand.ink }}; opacity: .38; }
@@ -112,6 +124,8 @@
     <img class="bg" src="{{ background }}" alt="">
     <div class="scrim"></div>
     <div class="grain"></div>
+    {% if brand.signature == 'corner' %}<div class="sig-corner"></div>{% endif %}
+    {% if brand.signature == 'bar' %}<div class="sig-bar"></div>{% endif %}
     {% if slide_count > 1 %}
     <div class="pips">
       {% for i in range(1, slide_count + 1) %}

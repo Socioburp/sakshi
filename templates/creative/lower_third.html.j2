@@ -11,8 +11,7 @@
   .headline { font-size: {{ (width * hf)|round|int }}px; max-width: 84%; }
   .subhead { font-size: {{ (width*0.036)|round|int }}px; max-width: 70%; }
   .cta { margin-top: {{ (width*0.044)|round|int }}px; }
-  .top { position: absolute; top: {{ (width*0.062)|round|int }}px;
-         left: {{ (width*0.078)|round|int }}px; }
+  .top { position: absolute; top: {{ pad_top }}px; left: {{ pad_x }}px; }
   {# Accent hairline: a small, deliberate mark that ties the copy block to the
      brand colour without another coloured shape competing with the CTA. #}
   .rule { width: {{ (width*0.10)|round|int }}px; height: {{ (width*0.008)|round|int }}px;

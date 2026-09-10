@@ -1,17 +1,22 @@
 {% extends "_base.html.j2" %}
 {% set hl = slide.headline|length %}
 {% set hf = 0.088 if hl < 20 else (0.078 if hl < 32 else 0.068) %}
+{# The panel needs room for the words whatever the aspect: 40% of the height,
+   or 44% of the width on a square post where the grid-safe padding is wide. #}
+{% set panel_h = [(height*0.40)|round|int, (width*0.44)|round|int]|max %}
+{% set photo_h = height - panel_h + (width*0.03)|round|int %}
 {% block styles %}
-  {# The photograph gets the top 62% uncropped by text; the panel below is where
+  {# The photograph gets the top uncropped by text; the panel below is where
      the words live, so nothing is ever set over a busy area. #}
-  .bg { height: {{ (height*0.63)|round|int }}px; }
-  .scrim { height: {{ (height*0.63)|round|int }}px;
+  .bg { height: {{ photo_h }}px; }
+  .scrim { height: {{ photo_h }}px;
            background: linear-gradient(180deg, rgba(0,0,0,.22) 0%, rgba(0,0,0,0) 38%); }
-  .grain { height: {{ (height*0.63)|round|int }}px; }
+  .grain { height: {{ photo_h }}px; }
   .panel { position: absolute; left: 0; right: 0; bottom: 0;
-           height: {{ (height*0.40)|round|int }}px; background: {{ brand.primary }};
+           height: {{ panel_h }}px; background: {{ brand.primary }};
            border-radius: {{ (width*0.055)|round|int }}px {{ (width*0.055)|round|int }}px 0 0;
-           padding: {{ (width*0.072)|round|int }}px; display: flex; flex-direction: column;
+           padding: {{ (width*0.072)|round|int }}px {{ pad_x }}px {{ [pad_bottom, (width*0.072)|round|int]|max }}px;
+           display: flex; flex-direction: column;
            box-shadow: 0 -{{ (width*0.012)|round|int }}px
                        {{ (width*0.05)|round|int }}px rgba(0,0,0,.28); }
   .headline { font-size: {{ (width * hf)|round|int }}px; color: {{ brand.ink }};

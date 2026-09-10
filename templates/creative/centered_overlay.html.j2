@@ -18,7 +18,7 @@
   .headline { font-size: {{ (width * hf)|round|int }}px; max-width: 86%; }
   .subhead { font-size: {{ (width*0.038)|round|int }}px; max-width: 72%; }
   .cta { align-self: center; margin-top: {{ (width*0.052)|round|int }}px; }
-  .foot { position: absolute; left: 0; right: 0; bottom: {{ (width*0.070)|round|int }}px;
+  .foot { position: absolute; left: 0; right: 0; bottom: {{ pad_bottom }}px;
           display: flex; justify-content: center; align-items: center; }
 {% endblock %}
 {% block body %}
