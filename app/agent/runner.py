@@ -183,6 +183,7 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
         current = _current_brief_block(db, wa_session)
         taste_block = _taste_block(db, brand_id)
         pending = _pending_block(wa_session)
+        plan_block = _plan_block(db, brand_id)
 
         system = build_system(
             brand,
@@ -195,6 +196,7 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
                     WINDOW_CLOSING_HINT if 0 < window_left < 3600 else "",
                     current,
                     taste_block,
+                    plan_block,
                     pending,
                 )
                 if x
@@ -261,6 +263,29 @@ def _taste_block(db, brand_id: uuid.UUID) -> str:
         return taste(db, brand_id).as_prompt_block()
     except Exception:  # noqa: BLE001 - advice, never a gate
         log.exception("taste_block_failed", brand_id=str(brand_id))
+        return ""
+
+
+def _plan_block(db, brand_id: uuid.UUID) -> str:
+    """This month's plan, compressed: goal, cadence, the next two slots."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        from app.insights import plan as planning
+
+        today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        row = planning.current(db, brand_id, today)
+        if row is None:
+            return ""
+        d = planning.describe(row)
+        upcoming = [s for s in row.slots if s.get("status") == "planned"][:2]
+        nxt = "; ".join(f"{s['date'][5:]}: {s['headline_idea']}" for s in upcoming) or "none left"
+        return (
+            f"## This month's plan\nGoal: {d['goal']}, {d['cadence_per_week']} posts/week, "
+            f"{d['posts_made']}/{d['posts_planned']} made. Next: {nxt}."
+        )
+    except Exception:  # noqa: BLE001 - context, never a gate
+        log.exception("plan_block_failed", brand_id=str(brand_id))
         return ""
 
 

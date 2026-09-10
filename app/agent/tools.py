@@ -21,7 +21,16 @@ from app.billing import credits
 from app.creative import pipeline
 from app.creative.brief import CreativeBrief, Grounding, check_brand_rules
 from app.db import repo
-from app.db.models import Brand, BrandAsset, Brief, Creative, IgAccount, Publication, WaSession
+from app.db.models import (
+    Brand,
+    BrandAsset,
+    Brief,
+    ContentPlan,
+    Creative,
+    IgAccount,
+    Publication,
+    WaSession,
+)
 from app.db.session import session_scope
 from app.insights import events
 from app.integrations.instagram import client as ig
@@ -80,6 +89,43 @@ TOOLS: list[dict[str, Any]] = [
                 "suggestion_rank": {
                     "type": "integer",
                     "description": "When building an idea from suggest_post: its rank.",
+                },
+            },
+        },
+    },
+    {
+        "name": "plan_month",
+        "description": (
+            "Plan (or replan) this month's posts around a goal, or show the current plan. "
+            "Call it when the owner says what they want this month -- more walk-ins, more "
+            "enquiries, a launch, or just to be seen -- or asks what the plan is. Free. "
+            "The plan feeds the daily idea and the Monday line-up automatically."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "enum": ["footfall", "leads", "launch", "awareness"],
+                    "description": (
+                        "footfall = more walk-ins/orders (offer-heavy); leads = enquiries "
+                        "(proof + education); launch = a new product (teaser -> launch -> "
+                        "proof); awareness = be seen (balanced). Omit to just show the plan."
+                    ),
+                },
+                "cadence": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 7,
+                    "description": "Posts per week the owner will actually approve. Default 4.",
+                },
+                "launch": {
+                    "type": "string",
+                    "description": "The product being launched, when goal is launch.",
+                },
+                "next_month": {
+                    "type": "boolean",
+                    "description": "Plan next month instead of this one.",
                 },
             },
         },
@@ -401,6 +447,9 @@ async def _create_creative(ctx: ToolContext, args: dict) -> dict:
         }
     _set_session_state(ctx, "grid_choice", None)
 
+    # Read before generate clears them: the idea that was built may close a
+    # slot in the month's plan.
+    offered = _get_session_state(ctx, "suggestions") or [] if args.get("suggestion_rank") else []
     result = await pipeline.generate(ctx, brief)
     if result.get("ok"):
         _set_session_state(ctx, "suggestions", None)
@@ -416,7 +465,80 @@ async def _create_creative(ctx: ToolContext, args: dict) -> dict:
                     brief_id=result.get("brief_id"),
                     meta={"rank": args["suggestion_rank"]},
                 )
+                # A built idea that came from the month's plan closes its slot.
+                try:
+                    idea = offered[int(args["suggestion_rank"]) - 1]
+                except (IndexError, ValueError, TypeError):
+                    idea = None
+                if isinstance(idea, dict) and idea.get("plan_slot"):
+                    from app.insights import plan as planning
+
+                    planning.mark(
+                        db,
+                        ctx.brand_id,
+                        idea["plan_slot"],
+                        status="made",
+                        brief_id=result.get("brief_id"),
+                    )
     return result
+
+
+async def _plan_month(ctx: ToolContext, args: dict) -> dict:
+    from zoneinfo import ZoneInfo
+
+    from app.insights import plan as planning
+
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    month = planning.month_start(today)
+    if args.get("next_month"):
+        month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+    with session_scope() as db:
+        brand = db.get(Brand, ctx.brand_id)
+        if brand is None:
+            return {"ok": False, "reason": "unknown_brand"}
+        goal = args.get("goal")
+        if goal:
+            row = planning.build(
+                db,
+                brand,
+                month,
+                goal=goal,
+                cadence=int(args.get("cadence") or 4),
+                launch=(args.get("launch") or None),
+            )
+            built = True
+        else:
+            row = db.scalar(
+                select(ContentPlan).where(
+                    ContentPlan.brand_id == brand.id, ContentPlan.month == month
+                )
+            )
+            built = False
+        if row is None:
+            return {
+                "ok": True,
+                "plan": None,
+                "hint": (
+                    "No plan yet. Ask ONE question: what do they want this month -- more "
+                    "walk-ins, more enquiries, a launch, or to be seen -- then call plan_month "
+                    "with the goal."
+                ),
+            }
+        summary = planning.describe(row)
+        week = planning.week_of(row, today)
+    return {
+        "ok": True,
+        "built": built,
+        "plan": summary,
+        "this_week": [
+            {"date": s["date"], "idea": s["headline_idea"], "status": s["status"]} for s in week
+        ],
+        "hint": (
+            "Tell them in one or two lines: the goal, how many posts a week, and the next "
+            "post. Never list the whole month. Each planned day becomes the daily idea "
+            "automatically; when they tap Make it, build it with create_creative."
+        ),
+    }
 
 
 async def _suggest_post(ctx: ToolContext, args: dict) -> dict:
@@ -842,6 +964,7 @@ async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
 
 _HANDLERS = {
     "create_creative": _create_creative,
+    "plan_month": _plan_month,
     "suggest_post": _suggest_post,
     "request_approval": _request_approval,
     "revise_creative": _revise_creative,

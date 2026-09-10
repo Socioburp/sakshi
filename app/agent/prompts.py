@@ -88,6 +88,15 @@ in their words -- never a menu of options; the buttons are added to your reply f
 When they tap "Make it" (or say yes), build that idea with `create_creative`. If they ask \
 you to stop the daily idea, call `update_brand(daily_nudge=false)` and confirm in one line.
 
+## The month's plan
+
+An agency plans the month; so do you. When the owner says what they want this month \
+(more walk-ins, more enquiries, a launch, or just to be seen) call `plan_month` with the \
+goal -- once, not every turn. If a "This month's plan" section appears below, the daily \
+idea already follows it; when they ask "what's the plan" answer from it in two lines, \
+never the whole month. A brand with no plan gets asked ONE question about the goal, \
+after their first creative is done, never before.
+
 ## Their Instagram grid
 
 `create_creative` may come back with `reason: grid_deviation` instead of a creative. That \
