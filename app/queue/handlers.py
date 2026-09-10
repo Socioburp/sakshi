@@ -364,9 +364,13 @@ async def daily_suggestion(payload: dict) -> None:
         acct = db.get(Account, account_id)
         locale = (acct.locale if acct else None) or "en"
         idea_dicts = [i.as_dict() for i in ideas]
+        # Monday: the week's line-up rides above the idea, once per week.
+        week_lines = _week_lineup(db, brand, locale)
 
     lang = locale.split("-")[0].lower()
     line = await _phrase_nudge(best, lang)
+    if week_lines:
+        line = f"{week_lines}\n\n{line}"
     ok = await send.send_text(
         account_id=account_id,
         session_id=session_id,
@@ -387,6 +391,28 @@ async def daily_suggestion(payload: dict) -> None:
     log.info(
         "daily_suggestion_sent" if ok else "daily_suggestion_suppressed", brand_id=str(brand_id)
     )
+
+
+def _week_lineup(db, brand: Brand, locale: str) -> str | None:
+    """The plan's line-up for this week, on Mondays, once."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.insights import plan as planning
+
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    if today.weekday() != 0:
+        return None
+    stamp = today.isoformat()
+    prefs = brand.template_prefs or {}
+    if prefs.get("plan_week_sent") == stamp:
+        return None
+    text = planning.week_message(
+        planning.current(db, brand.id, today), today, (locale or "en").split("-")[0].lower()
+    )
+    if text:
+        brand.template_prefs = {**prefs, "plan_week_sent": stamp}
+    return text
 
 
 async def _phrase_nudge(idea, lang: str) -> str:
