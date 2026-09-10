@@ -182,6 +182,7 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
         # and it either invented an id or made (and charged) a new creative.
         current = _current_brief_block(db, wa_session)
         taste_block = _taste_block(db, brand_id)
+        perf_block = _performance_block(db, brand_id)
         pending = _pending_block(wa_session)
         plan_block = _plan_block(db, brand_id)
 
@@ -196,6 +197,7 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
                     WINDOW_CLOSING_HINT if 0 < window_left < 3600 else "",
                     current,
                     taste_block,
+                    perf_block,
                     plan_block,
                     pending,
                 )
@@ -263,6 +265,17 @@ def _taste_block(db, brand_id: uuid.UUID) -> str:
         return taste(db, brand_id).as_prompt_block()
     except Exception:  # noqa: BLE001 - advice, never a gate
         log.exception("taste_block_failed", brand_id=str(brand_id))
+        return ""
+
+
+def _performance_block(db, brand_id: uuid.UUID) -> str:
+    """What their followers responded to, once enough posts have numbers."""
+    try:
+        from app.insights import performance
+
+        return performance.build(db, brand_id).as_prompt_block()
+    except Exception:  # noqa: BLE001 - advice, never a gate
+        log.exception("performance_block_failed", brand_id=str(brand_id))
         return ""
 
 

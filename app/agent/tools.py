@@ -141,6 +141,17 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "post_performance",
+        "description": (
+            "How their posts did on Instagram (from Insights): reach, saves and shares per "
+            "post, which format, layout and post type perform, the best time so far, and "
+            "last week's numbers. Free, read-only. Use when they ask how a post did, what "
+            "works, why reach fell, or which post to repeat. Numbers arrive a day or two "
+            "after a post; say 'so far' and never promise reach."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "revise_creative",
         "description": (
             "Change the words on an existing creative and re-send it. Keeps the same "
@@ -577,6 +588,62 @@ async def _suggest_post(ctx: ToolContext, args: dict) -> dict:
     }
 
 
+async def _post_performance(ctx: ToolContext, args: dict) -> dict:
+    from app.insights import performance
+    from app.integrations.instagram import insights
+
+    with session_scope() as db:
+        connected = db.scalar(
+            select(IgAccount)
+            .where(IgAccount.brand_id == ctx.brand_id, IgAccount.status == "connected")
+            .limit(1)
+        )
+        if connected is None:
+            return {
+                "ok": False,
+                "reason": "instagram_not_connected",
+                "hint": "Numbers come from their Instagram account; offer connect_instagram.",
+            }
+        if not insights.can_read_insights(connected.scopes):
+            if ig.settings.ig_insights_enabled:
+                return {
+                    "ok": False,
+                    "reason": "insights_permission_missing",
+                    "hint": (
+                        "Their Instagram was connected before numbers could be read. Offer "
+                        "connect_instagram once more, in one line, so the numbers start."
+                    ),
+                }
+            return {
+                "ok": False,
+                "reason": "insights_not_enabled",
+                "hint": "Post numbers are not switched on yet. Say they are coming; no figures.",
+            }
+        data = performance.summary(db, ctx.brand_id)
+    if data["posts"] == 0:
+        return {
+            "ok": True,
+            **data,
+            "hint": (
+                "No numbers yet. Say so in one line: they arrive a day or two after a post "
+                "goes up. Do not invent figures."
+            ),
+        }
+    early = (
+        f"Fewer than {performance.MIN_POSTS} posts have numbers: call it early days."
+        if not data["enough"]
+        else ""
+    )
+    return {
+        "ok": True,
+        **data,
+        "hint": (
+            "Answer in two or three lines with the numbers that answer THEIR question -- the "
+            "best post and why, or the format/layout that works -- not the whole table. " + early
+        ).strip(),
+    }
+
+
 def _locale(ctx: ToolContext) -> str | None:
     from app.db.models import Account
 
@@ -937,6 +1004,10 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         events.record_for_brief(
             db, kind="publish", brief_id=first_brief_id, meta={"permalink": result.permalink}
         )
+    # Its numbers, once Meta has them (up to 48h): reach, saves, shares.
+    from app.insights import performance
+
+    performance.schedule_after_publish(ctx.brand_id, result.media_id)
     return {
         "ok": True,
         "permalink": result.permalink,
@@ -990,6 +1061,7 @@ _HANDLERS = {
     "create_creative": _create_creative,
     "plan_month": _plan_month,
     "suggest_post": _suggest_post,
+    "post_performance": _post_performance,
     "request_approval": _request_approval,
     "revise_creative": _revise_creative,
     "regenerate_image": _regenerate_image,
