@@ -341,7 +341,9 @@ TOOLS: list[dict[str, Any]] = [
         "name": "connect_instagram",
         "description": (
             "Get the link the owner taps to connect their Instagram account. Send them "
-            "the link; they finish it in the browser."
+            "the link; they finish it in the browser. Connecting also lets Sakshi publish "
+            "for them, read their post numbers, and draft replies to new comments and DMs "
+            "for them to approve."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },

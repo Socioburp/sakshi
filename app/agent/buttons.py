@@ -56,7 +56,47 @@ _TITLES: dict[str, dict[str, str]] = {
         "mr": "Mhatla tasa",
         "ml": "Paranja pole",
     },
+    "ig:send": {
+        "hi": "Bhejo",
+        "en": "Send",
+        "kn": "Kalisi",
+        "ta": "Anuppu",
+        "te": "Pampu",
+        "mr": "Pathva",
+        "ml": "Ayakku",
+    },
+    "ig:edit": {
+        "hi": "Badlo",
+        "en": "Edit",
+        "kn": "Badalisi",
+        "ta": "Maattu",
+        "te": "Marchu",
+        "mr": "Badla",
+        "ml": "Maattu",
+    },
+    "ig:skip": {
+        "hi": "Rehne do",
+        "en": "Skip",
+        "kn": "Bidi",
+        "ta": "Vidu",
+        "te": "Vadileyi",
+        "mr": "Nako",
+        "ml": "Venda",
+    },
 }
+
+# The reply-loop buttons carry the ig_event id in the tap id, so ingest can
+# post exactly the reply the owner approved. Prefixes: igok/iged/igno.
+_IG_ACTION_IDS = {"ig:send": "igok", "ig:edit": "iged", "ig:skip": "igno"}
+
+
+def ig_buttons(event_id: str, locale: str | None) -> list[Button]:
+    lang = ((locale or "en").split("-")[0]).lower()
+    out = []
+    for key, prefix in _IG_ACTION_IDS.items():
+        titles = _TITLES[key]
+        out.append(Button(id=f"{prefix}:{event_id}", title=titles.get(lang, titles["en"])[:20]))
+    return out
 
 
 def button(button_id: str, locale: str | None) -> Button:
