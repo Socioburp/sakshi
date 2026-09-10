@@ -67,6 +67,34 @@ async def send_text(
     return res.ok
 
 
+async def send_video(
+    *,
+    account_id: uuid.UUID,
+    session_id: uuid.UUID | None,
+    wa_id: str,
+    video_url: str,
+    caption: str = "",
+) -> bool:
+    """A reel, as a WhatsApp video: playable in the chat, forwardable to Status."""
+    if not _window_open(session_id, wa_id, account_id):
+        log.warning("send_suppressed_window_closed", wa_id=wa_id)
+        return False
+    adapter = get_adapter()
+    res = await adapter.send(
+        OutboundMessage(to=wa_id, kind="video", video_url=video_url, caption=caption)
+    )
+    record_outbound(
+        account_id=account_id,
+        session_id=session_id,
+        provider=adapter.name,
+        provider_message_id=res.provider_message_id,
+        kind="video",
+        text=caption,
+        media_url=video_url,
+    )
+    return res.ok
+
+
 async def send_image(
     *,
     account_id: uuid.UUID,
