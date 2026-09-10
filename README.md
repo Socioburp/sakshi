@@ -60,6 +60,9 @@ app/
     embed.py               Voyage embeddings, brand_memory only
     retrieve.py            cosine search, optional precomputed vector
     grounding.py           the three lanes the brief contract names
+  inbox/
+    router.py              /webhooks/instagram: verify, persist, enqueue
+    service.py             comment/DM -> drafted reply -> owner taps Send/Edit/Skip
   integrations/
     instagram/             STUBBED behind INSTAGRAM_MOCK; four real signatures
     stt/                   elevenlabs | deepgram | sarvam | mock
