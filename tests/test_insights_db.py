@@ -423,3 +423,194 @@ async def test_category_picks_the_brand_kit_once_and_look_can_be_changed(owner):
     with session_scope() as db:
         b = db.get(Brand, brand_id)
         assert b.fonts["heading"] == "Manrope" and b.template_prefs["signature"] == "bar"
+
+
+# --------------------------------------------------------------------------- #
+# Instagram Insights
+# --------------------------------------------------------------------------- #
+def _connect_instagram(db, brand_id):
+    from app.db.models import IgAccount
+    from app.integrations.instagram import client as ig
+
+    row = IgAccount(
+        brand_id=brand_id,
+        ig_user_id="17841400000000000",
+        username="mock_shop",
+        access_token="IGAA-mock",
+        scopes=ig.requested_scopes(),
+        status="connected",
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+async def test_insights_sync_reads_every_post_and_links_ours_to_its_brief(owner):
+    from app.db.models import Brand, IgAccountStat, PostMetric, Publication
+    from app.db.session import session_scope
+    from app.insights import performance
+    from app.integrations.instagram import fixtures
+
+    account_id, brand_id = owner
+    with session_scope() as db:
+        ig_row = _connect_instagram(db, brand_id)
+        # A post made here, published to the id the mock publish returns.
+        b = _brief_row(
+            db, account_id, brand_id, {**EXAMPLE, "template_id": "lower_third"}, status="published"
+        )
+        creative = (
+            db.query(__import__("app.db.models", fromlist=["Creative"]).Creative)
+            .filter_by(brief_id=b.id)
+            .one()
+        )
+        db.add(
+            Publication(
+                creative_id=creative.id,
+                ig_account_id=ig_row.id,
+                ig_media_id=fixtures.MOCK_MEDIA_ID,
+                status="published",
+                published_at=datetime.now(UTC),
+            )
+        )
+
+    result = await performance.sync_brand(brand_id)
+    assert result["ok"] and result["posts"] == 7 and result["refreshed"] == 7
+    with session_scope() as db:
+        rows = {r.ig_media_id: r for r in db.query(PostMetric).filter_by(brand_id=brand_id)}
+        assert len(rows) == 7
+        ours = rows[fixtures.MOCK_MEDIA_ID]
+        assert ours.publication_id is not None
+        assert ours.facts["template"] == "lower_third" and ours.facts["headline"]
+        assert ours.reach == 640 and ours.saved == 6 and ours.posted_at is not None
+        reel = rows["17900000000000101"]
+        assert reel.media_product_type == "REELS" and reel.reach == 2900 and reel.facts == {}
+        stat = db.query(IgAccountStat).filter_by(brand_id=brand_id).one()
+        assert stat.followers == 1234 and stat.reach > 0
+        assert db.get(Brand, brand_id).template_prefs.get("insights_synced_at")
+
+    again = await performance.sync_brand(brand_id)
+    assert again["ok"] and again["posts"] == 7 and again["refreshed"] == 0, (
+        "nothing is re-read within the hour"
+    )
+    assert await performance.sync_if_due(brand_id) is None, "synced today: the daily job skips"
+    with session_scope() as db:
+        assert db.query(PostMetric).filter_by(brand_id=brand_id).count() == 7
+
+
+async def test_insights_feed_the_prompt_the_defaults_and_a_sequel_idea(owner):
+    from app.db.models import Brand
+    from app.db.session import session_scope
+    from app.insights import performance, suggest
+
+    account_id, brand_id = owner
+    with session_scope() as db:
+        _connect_instagram(db, brand_id)
+    await performance.sync_brand(brand_id)
+    with session_scope() as db:
+        perf = performance.build(db, brand_id)
+        assert perf.posts == 7 and perf.enough
+        assert perf.top[0]["kind"] == "carousel", "saves and shares per reach put the how-to first"
+        block = perf.as_prompt_block()
+        assert "Reels reach" in block and "Carousels are saved most" in block
+        assert "3 ways to use groundnut oil" in block
+        brand = db.get(Brand, brand_id)
+        ideas = suggest.suggest(db, brand)
+        sequel = next(i for i in ideas if i.sequel_of)
+        assert sequel.sequel_of == "17900000000000102"
+        assert sequel.format == "carousel" and sequel.intent == "educational"
+        assert "1.8x your usual" in sequel.why and "58 saves" in sequel.why
+        assert sequel.headline_idea.endswith(": part 2")
+        # Ranked above the unused photo and the how-to, below only a festival/plan slot.
+        kinds = [(i.festival is not None, i.sequel_of is not None) for i in ideas]
+        first_sequel = kinds.index((False, True))
+        assert all(f for f, _ in kinds[:first_sequel]), "only a festival outranks it"
+        suggest.record_suggested(db, brand, ideas)
+        ideas2 = suggest.suggest(db, brand)
+        assert not any(i.sequel_of for i in ideas2), "offered once a month, not every day"
+        summary = performance.summary(db, brand_id)
+        assert summary["posts"] == 7 and summary["top"][0]["reach"] == 1250
+        assert summary["by_format"]["reels"]["posts"] == 1
+        assert "media_id" not in summary["top"][0]
+
+
+def test_week_readout_compares_last_week_with_the_one_before(owner):
+    from datetime import date
+
+    from app.db.models import IgAccountStat, PostMetric
+    from app.db.session import session_scope
+    from app.insights import performance
+
+    _, brand_id = owner
+    monday = date(2026, 9, 14)
+    with session_scope() as db:
+        assert performance.week_readout(db, brand_id, monday) is None, "nothing yet: no readout"
+        for mid, day, reach, saved, shares, caption in (
+            ("a1", date(2026, 9, 8), 900, 12, 3, "Fresh batch"),
+            ("a2", date(2026, 9, 10), 1500, 30, 20, "How we press it"),
+            ("b1", date(2026, 9, 2), 1000, 8, 2, "Back in stock"),
+        ):
+            db.add(
+                PostMetric(
+                    brand_id=brand_id,
+                    ig_media_id=mid,
+                    posted_at=datetime(day.year, day.month, day.day, 8, tzinfo=UTC),
+                    reach=reach,
+                    saved=saved,
+                    shares=shares,
+                    likes=10,
+                    caption=caption,
+                )
+            )
+        db.add(IgAccountStat(brand_id=brand_id, day=date(2026, 9, 13), followers=1300))
+        db.add(IgAccountStat(brand_id=brand_id, day=date(2026, 9, 6), followers=1280))
+        db.flush()
+        text = performance.week_readout(db, brand_id, monday)
+        assert text == (
+            "Last week on Instagram: 2 posts, reach 2,400 (up 140% on the week before), "
+            '42 saves. Best: "How we press it" with 30 saves. Followers: 1,300 (+20).'
+        )
+        hi = performance.week_readout(db, brand_id, monday, "hi")
+        assert hi.startswith("Pichhle hafte Instagram par: 2 posts") and "zyada" in hi
+        assert performance.week_readout(db, brand_id, date(2026, 9, 28)) is None
+
+
+async def test_post_performance_tool_and_the_hourly_sweep(owner, monkeypatch):
+    from app.agent.context import ToolContext
+    from app.agent.tools import _post_performance
+    from app.db.models import Job
+    from app.db.session import session_scope
+    from app.insights import performance
+    from app.queue import client
+    from app.telemetry.stages import trace
+
+    account_id, brand_id = owner
+    ctx = ToolContext(account_id, brand_id, None, "", trace(account_id=account_id).__enter__())
+    out = await _post_performance(ctx, {})
+    assert out["ok"] is False and out["reason"] == "instagram_not_connected"
+    with session_scope() as db:
+        _connect_instagram(db, brand_id)
+    out = await _post_performance(ctx, {})
+    assert out["ok"] and out["posts"] == 0 and "No numbers yet" in out["hint"]
+
+    pushed = []
+    monkeypatch.setattr(client, "_push", lambda envelope, at=None: pushed.append(envelope) or True)
+    assert performance.sweep() >= 1
+    with session_scope() as db:
+        jobs = db.query(Job).filter(Job.kind == "sync_insights").all()
+        mine = [j for j in jobs if j.payload.get("brand_id") == str(brand_id)]
+        assert len(mine) == 1
+    before = len(pushed)
+    performance.sweep()  # the same day is deduped: no second job for this brand
+    assert not [j for j in pushed[before:] if str(brand_id) in j]
+    with session_scope() as db:
+        jobs = db.query(Job).filter(Job.kind == "sync_insights").all()
+        assert len([j for j in jobs if j.payload.get("brand_id") == str(brand_id)]) == 1
+
+    await performance.sync_brand(brand_id)
+    out = await _post_performance(ctx, {})
+    assert out["ok"] and out["posts"] == 7 and out["enough"]
+    assert out["top"][0]["title"].startswith("3 ways")
+    assert out["best_time"] is None or out["best_time"].endswith("IST")  # weekday-dependent
+    before = len(pushed)
+    performance.sweep()  # synced today: nothing new for this brand
+    assert not [j for j in pushed[before:] if str(brand_id) in j]
