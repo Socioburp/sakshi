@@ -10,9 +10,10 @@ from sqlalchemy import select
 from app.agent.runner import run_turn
 from app.channels.base import MediaRef
 from app.channels.whatsapp.adapters import get_adapter
+from app.config import settings
 from app.creative import logo as logo_analysis
 from app.db import repo
-from app.db.models import Account, Brand, BrandAsset, Message
+from app.db.models import Account, Brand, BrandAsset, Message, WaSession
 from app.db.session import session_scope
 from app.integrations.storage import r2
 from app.integrations.stt import transcribe
@@ -25,7 +26,15 @@ log = get_logger(__name__)
 
 async def handle_message(payload: dict) -> None:
     message_id = uuid.UUID(payload["message_id"])
-    with trace(account_id=uuid.UUID(payload["account_id"])) as t:
+    account_id = uuid.UUID(payload["account_id"])
+    if payload.get("interactive_id"):
+        # The memory half of a tap: a network call to the embedding vendor,
+        # kept off the webhook and out of its transaction.
+        from app.insights import votes
+
+        with session_scope() as db:
+            votes.remember_tap(db, payload["interactive_id"], account_id)
+    with trace(account_id=account_id) as t:
         await run_turn(message_id=message_id, trace=t)
 
 
@@ -149,13 +158,31 @@ async def handle_image(payload: dict) -> None:
         # flagged as the logo candidate; the second one used to overwrite the
         # first -- logo, palette and notes replaced by a photo of a jar.
         is_logo = bool(payload.get("is_logo_candidate", True)) and not already_has_logo
-        kind = "logo" if is_logo else "product"
         # The caption is the label the photo-first lane matches on. "coconut
         # oil 500ml" typed under a picture is worth more than any vision pass.
         with session_scope() as db:
             m = db.get(Message, message_id)
             caption = (m.text or "").strip() if m is not None else ""
         dims = _image_size(image) if not is_logo else None
+        kind, label = "logo", "Logo"
+        if not is_logo:
+            # What IS this photo? The product lane cuts out and re-stages
+            # anything stored as "product"; a shopfront or the owner's face
+            # must never get that treatment, so the kind is decided by vision
+            # when a model is configured, and conservatively when it is not.
+            with t.stage("photo_classify"):
+                try:
+                    seen = await logo_analysis.describe_photo(image, mime or "image/jpeg")
+                except Exception:  # noqa: BLE001
+                    log.warning("photo_vision_failed", message_id=str(message_id))
+                    seen = {}
+            if seen.get("kind"):
+                kind = seen["kind"]
+                if kind == "product" and seen.get("cut_out_ok") is False:
+                    kind = "other"  # a plate, a set, glass: keep the photo whole
+            else:
+                kind = "product" if caption else "other"
+            label = (caption or seen.get("label") or "")[:160] or None
 
         with t.stage("asset_upload"):
             ext = "png" if "png" in (mime or "") else "jpg"
@@ -172,7 +199,7 @@ async def handle_image(payload: dict) -> None:
                 BrandAsset(
                     brand_id=brand_id,
                     kind=kind,
-                    label="Logo" if is_logo else (caption[:160] or None),
+                    label=label,
                     storage_key=key,
                     url=url,
                     mime=mime,
@@ -214,8 +241,8 @@ async def handle_image(payload: dict) -> None:
                     + (f"; {analysis.summary}" if analysis.summary else "")
                     if analysis
                     else (
-                        f"[sent a product photo, saved to their brand assets"
-                        f"{': ' + caption if caption else ''}]"
+                        f"[sent a photo ({kind}), saved to their brand assets"
+                        f"{': ' + label if label else ''}]"
                     )
                 )
 
@@ -256,8 +283,126 @@ async def publish_scheduled(payload: dict) -> None:
         await _publish_to_instagram(ctx, {"creative_id": payload["creative_id"]})
 
 
+async def daily_suggestion(payload: dict) -> None:
+    """Tomorrow's post, offered before they ask. One line, three buttons.
+
+    Sent only inside the 24h window (send.py refuses otherwise), only if the
+    owner has not switched it off, and only if nothing was suggested in the
+    last 20 hours. A nudge that arrives twice is spam; one that arrives when
+    they cannot reply is a template message, which is a later feature.
+    """
+    from app.agent import buttons as btn
+    from app.channels.whatsapp import send
+    from app.insights import suggest as sg
+    from app.insights import votes
+
+    account_id = uuid.UUID(payload["account_id"])
+    brand_id = uuid.UUID(payload["brand_id"])
+    wa_id = payload.get("wa_id", "")
+    if not wa_id:
+        return
+    with session_scope() as db:
+        brand = db.get(Brand, brand_id)
+        if brand is None or (brand.template_prefs or {}).get("daily_nudge") is False:
+            return
+        if votes.nudge_snoozed(brand):
+            log.info("daily_suggestion_snoozed", brand_id=str(brand_id))
+            return
+        if sg.suggested_recently(db, brand_id):
+            return
+        sess = repo.latest_session(db, wa_id, account_id=account_id)
+        if sess is None or not repo.window_is_open(sess):
+            # Outside the 24h window only a template message reaches them,
+            # and that is a later feature. Nothing is recorded: the next
+            # inbound message re-arms the schedule.
+            log.info("daily_suggestion_window_closed", brand_id=str(brand_id))
+            return
+        ideas = sg.suggest(db, brand)
+        if not ideas:
+            return
+        session_id = sess.id
+        best = ideas[0]
+        acct = db.get(Account, account_id)
+        locale = (acct.locale if acct else None) or "en"
+        idea_dicts = [i.as_dict() for i in ideas]
+
+    lang = locale.split("-")[0].lower()
+    line = await _phrase_nudge(best, lang)
+    ok = await send.send_text(
+        account_id=account_id,
+        session_id=session_id,
+        wa_id=wa_id,
+        text=line[:1000],
+        buttons=btn.buttons(["make:1", "next", "skip"], locale),
+    )
+    if ok:
+        # Only a nudge that reached the phone counts as "suggested" -- and only
+        # then does the tap next turn have ideas to point at.
+        with session_scope() as db:
+            sess = db.get(WaSession, session_id)
+            if sess is not None:
+                sess.state = {**(sess.state or {}), "suggestions": idea_dicts}
+            brand = db.get(Brand, brand_id)
+            if brand is not None:
+                sg.record_suggested(db, brand, ideas)
+    log.info(
+        "daily_suggestion_sent" if ok else "daily_suggestion_suppressed", brand_id=str(brand_id)
+    )
+
+
+async def _phrase_nudge(idea, lang: str) -> str:
+    """One warm line in the owner's language.
+
+    The model rewrites the idea and its reason as a friend would say it; when
+    no model is configured, or it fails, the plain frame below is sent. The
+    output is clipped to two short lines -- a nudge is not a pitch.
+    """
+    fallback = _NUDGE.get(lang, _NUDGE["en"]).format(idea=idea.headline_idea, why=idea.why)
+    if not settings.anthropic_api_key or not settings.anthropic_model:
+        return fallback
+    try:
+        from anthropic import AsyncAnthropic
+
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        resp = await client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=120,
+            system=(
+                "You write ONE short WhatsApp line (max 25 words) from a marketing designer "
+                "to a small shop owner in India, in the language of this code: "
+                f"{lang}. Latin script for hi/mr/kn/ta/te/ml (Hinglish-style). Offer the post "
+                "idea and its reason, end by asking if you should make it. No emoji, no lists, "
+                "no greeting, no quotes."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Idea: {idea.headline_idea}\nReason: {idea.why}",
+                }
+            ],
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        text = " ".join(text.split())
+        return text if 10 <= len(text) <= 240 else fallback
+    except Exception:  # noqa: BLE001 - the plain frame is a fine nudge
+        log.warning("nudge_phrasing_failed", lang=lang)
+        return fallback
+
+
+_NUDGE = {
+    "hi": "Aaj ke liye ek idea: {idea} — {why}. Banau?",
+    "en": "An idea for today: {idea} — {why}. Shall I make it?",
+    "kn": "Ivattu ondu idea: {idea} — {why}. Maadla?",
+    "ta": "Innaikku oru idea: {idea} — {why}. Pannattuma?",
+    "te": "Ee roju oka idea: {idea} — {why}. Cheyyamanta?",
+    "mr": "Aaj sathi ek idea: {idea} — {why}. Banavu ka?",
+    "ml": "Innu oru idea: {idea} — {why}. Cheyyatte?",
+}
+
+
 HANDLERS = {
     "handle_message": handle_message,
+    "daily_suggestion": daily_suggestion,
     "handle_image": handle_image,
     "transcribe_and_handle": transcribe_and_handle,
     "publish_scheduled": publish_scheduled,
