@@ -12,6 +12,7 @@ import uuid
 from app.channels.base import InboundMessage
 from app.db import repo
 from app.db.session import session_scope
+from app.insights import votes
 from app.logging import get_logger
 from app.queue.client import add_job, push_job
 
@@ -64,6 +65,15 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
                 db, brief_id=brief_id, via="button", account_id=account.id
             )
             log.info("approval_recorded", brief_id=brief_id, slides=approved)
+            if approved:
+                votes.approve(db, brief_id, remember=False)
+        elif msg.interactive_id and msg.interactive_id.startswith("revise:"):
+            votes.change_words(db, msg.interactive_id[len("revise:") :], account.id)
+        elif msg.interactive_id and msg.interactive_id.startswith("redo:"):
+            votes.change_picture(db, msg.interactive_id[len("redo:") :], account.id, remember=False)
+        elif msg.interactive_id == "skip" and brand is not None:
+            # "Not today" is not "never": three quiet days, then ideas resume.
+            votes.snooze_nudge(db, brand)
 
         if msg.kind in AUDIO_KINDS:
             kind = "transcribe_and_handle"
@@ -84,6 +94,9 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
             "media_mime": msg.media.mime if msg.media else None,
             "provider": msg.provider,
             "is_logo_candidate": is_logo_candidate,
+            # The worker writes the memory for a tap (a network call to the
+            # embedding vendor) so the webhook never waits on it.
+            "interactive_id": msg.interactive_id,
         }
         # The job row commits WITH the message row. A message that exists with
         # no job is unprocessable forever: the provider's retry is (correctly)
