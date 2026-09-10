@@ -15,7 +15,7 @@ Two deliberate schema decisions, both load-bearing:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -23,10 +23,12 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -534,6 +536,34 @@ class CreativeEvent(Base):
             "'regenerate','publish','suggested','suggestion_taken')",
             name="ck_creative_events_kind",
         ),
+    )
+
+
+class ContentPlan(Base):
+    """A month of posts for one brand: goal, pillar mix, cadence, and the slots."""
+
+    __tablename__ = "content_plans"
+
+    id: Mapped[uuid.UUID] = _pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    month: Mapped[date] = mapped_column(Date, nullable=False)
+    goal: Mapped[str] = mapped_column(String(24), default="awareness", nullable=False)
+    cadence: Mapped[int] = mapped_column(SmallInteger, default=4, nullable=False)
+    pillar_mix: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    slots: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "goal in ('footfall','leads','launch','awareness')", name="ck_content_plans_goal"
+        ),
+        CheckConstraint("cadence between 1 and 7", name="ck_content_plans_cadence"),
+        UniqueConstraint("brand_id", "month", name="uq_content_plans_brand_month"),
     )
 
 
