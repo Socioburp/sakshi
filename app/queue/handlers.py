@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 import uuid as _uuid
 
@@ -12,6 +13,7 @@ from app.channels.base import MediaRef
 from app.channels.whatsapp.adapters import get_adapter
 from app.config import settings
 from app.creative import logo as logo_analysis
+from app.creative import photo_quality
 from app.db import repo
 from app.db.models import Account, Brand, BrandAsset, Message, WaSession
 from app.db.session import session_scope
@@ -165,7 +167,13 @@ async def handle_image(payload: dict) -> None:
             caption = (m.text or "").strip() if m is not None else ""
         dims = _image_size(image) if not is_logo else None
         kind, label = "logo", "Logo"
+        quality_note = ""
         if not is_logo:
+            # Measured before anything is built on it: a blurry or dark photo
+            # is named to the owner now, while a retake costs them nothing.
+            quality = await asyncio.to_thread(photo_quality.assess, image)
+            log.info("photo_quality", message_id=str(message_id), **quality.as_dict())
+            quality_note = quality.owner_note()
             # What IS this photo? The product lane cuts out and re-stages
             # anything stored as "product"; a shopfront or the owner's face
             # must never get that treatment, so the kind is decided by vision
@@ -242,7 +250,8 @@ async def handle_image(payload: dict) -> None:
                     if analysis
                     else (
                         f"[sent a photo ({kind}), saved to their brand assets"
-                        f"{': ' + label if label else ''}]"
+                        f"{': ' + label if label else ''}"
+                        f"{'; QUALITY: ' + quality_note if quality_note else ''}]"
                     )
                 )
 
