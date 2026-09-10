@@ -266,6 +266,9 @@ class Creative(Base):
     background_url: Mapped[str | None] = mapped_column(Text)
     composed_key: Mapped[str | None] = mapped_column(Text)
     composed_url: Mapped[str | None] = mapped_column(Text)
+    # A reel: the composed card set in motion, MP4. Only on format.type=reel.
+    video_key: Mapped[str | None] = mapped_column(Text)
+    video_url: Mapped[str | None] = mapped_column(Text)
     imagegen_provider: Mapped[str | None] = mapped_column(String(32))
     imagegen_job_id: Mapped[str | None] = mapped_column(String(120))
     # Was THIS slide charged for? Set at charge time so a reaper that finds the
