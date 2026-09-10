@@ -62,6 +62,11 @@ ingest_mod.push_job = lambda job_id, kind, payload, scheduled_for=None: (
     JOBS.append((str(job_id), kind, payload)),
     True,
 )[1]
+# The daily-idea scheduler pushes to Redis too; here it just records that it would.
+from app.creative import pipeline as pipeline_mod  # noqa: E402
+
+NUDGES: list[str] = []
+pipeline_mod._schedule_daily_nudge = lambda ctx: NUDGES.append(str(ctx.brand_id))
 
 # -- stub 3/3: Anthropic -> a scripted conversation ------------------------ #
 from app.agent import runner  # noqa: E402
