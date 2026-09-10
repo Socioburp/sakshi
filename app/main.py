@@ -10,6 +10,7 @@ from app.billing.router import router as billing_router
 from app.channels.whatsapp.router import router as whatsapp_router
 from app.config import settings
 from app.db.session import engine
+from app.inbox.router import router as ig_webhook_router
 from app.integrations.instagram.oauth import router as instagram_router
 from app.logging import configure_logging, get_logger
 
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Sakshi", version="0.2.0", lifespan=lifespan)
 app.include_router(whatsapp_router)
 app.include_router(instagram_router)
+app.include_router(ig_webhook_router)
 app.include_router(billing_router)
 
 

@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # which App Review grants. Flip this once it is approved; the connect link
     # then asks for it and the sync starts reading numbers.
     ig_insights_enabled: bool = False
+    # Webhook verification (comments and DMs). Falls back to WA_VERIFY_TOKEN.
+    ig_verify_token: str = ""
+    # Replying to comments and DMs needs the manage_comments / manage_messages
+    # permissions from App Review. Flip on once granted; the connect link then
+    # asks for them and the reply loop goes live.
+    ig_engagement_enabled: bool = False
 
     # stt
     stt_provider: Literal["mock", "elevenlabs", "deepgram", "sarvam"] = "mock"
