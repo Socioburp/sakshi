@@ -6,7 +6,7 @@ import asyncio
 import uuid
 import uuid as _uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.agent.runner import run_turn
 from app.channels.base import MediaRef
@@ -326,6 +326,36 @@ async def daily_suggestion(payload: dict) -> None:
             # inbound message re-arms the schedule.
             log.info("daily_suggestion_window_closed", brand_id=str(brand_id))
             return
+        # Photos are the ceiling on every post. Before the first idea, a brand
+        # with fewer than three photos on file gets the photo-day checklist
+        # once, instead of an idea it cannot yet build well.
+        photo_count = db.scalar(
+            select(func.count(BrandAsset.id)).where(
+                BrandAsset.brand_id == brand_id, BrandAsset.kind != "logo"
+            )
+        )
+        checklist_text = None
+        if (photo_count or 0) < 3 and not (brand.template_prefs or {}).get("shotlist_sent"):
+            from app.creative import shotlist
+
+            acct = db.get(Account, account_id)
+            lang = ((acct.locale if acct else None) or "en").split("-")[0].lower()
+            checklist_text = shotlist.checklist(brand.category, "hi" if lang == "hi" else "en")
+            brand.template_prefs = {**(brand.template_prefs or {}), "shotlist_sent": True}
+            session_id = sess.id
+    if checklist_text:
+        # Sent outside the transaction, like every other network call.
+        ok = await send.send_text(
+            account_id=account_id, session_id=session_id, wa_id=wa_id, text=checklist_text
+        )
+        log.info(
+            "photo_checklist_sent" if ok else "photo_checklist_suppressed",
+            brand_id=str(brand_id),
+        )
+        return
+    with session_scope() as db:
+        brand = db.get(Brand, brand_id)
+        sess = repo.latest_session(db, wa_id, account_id=account_id)
         ideas = sg.suggest(db, brand)
         if not ideas:
             return
