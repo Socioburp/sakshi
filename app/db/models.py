@@ -567,6 +567,70 @@ class ContentPlan(Base):
     )
 
 
+class PostMetric(Base):
+    """What one Instagram post did, from the Insights API.
+
+    Ours or the owner's own -- every post on the account teaches something.
+    `facts` is the brief's shape at publish (template, aspect, format, intent,
+    mood, own photo) when the post was made here, empty otherwise.
+    """
+
+    __tablename__ = "post_metrics"
+
+    id: Mapped[uuid.UUID] = _pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    publication_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("publications.id", ondelete="SET NULL")
+    )
+    ig_media_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(24), default="IMAGE", nullable=False)
+    media_product_type: Mapped[str | None] = mapped_column(String(24))
+    permalink: Mapped[str | None] = mapped_column(Text)
+    caption: Mapped[str | None] = mapped_column(Text)
+    posted_at: Mapped[datetime | None] = mapped_column(TS)
+    reach: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    views: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    likes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    comments: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    saved: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    shares: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    follows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    profile_visits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_interactions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    facts: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    raw: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("brand_id", "ig_media_id", name="uq_post_metrics_brand_media"),
+        Index("ix_post_metrics_brand_posted", "brand_id", "posted_at"),
+    )
+
+
+class IgAccountStat(Base):
+    """One day of the account: followers, reach, engaged accounts."""
+
+    __tablename__ = "ig_account_stats"
+
+    id: Mapped[uuid.UUID] = _pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    followers: Mapped[int | None] = mapped_column(Integer)
+    media_count: Mapped[int | None] = mapped_column(Integer)
+    reach: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    accounts_engaged: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_interactions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    raw: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+
+    __table_args__ = (UniqueConstraint("brand_id", "day", name="uq_ig_account_stats_brand_day"),)
+
+
 class Job(Base, TimestampMixin):
     """Durable mirror of the Upstash queue: dedupe, retries, and an audit trail."""
 
