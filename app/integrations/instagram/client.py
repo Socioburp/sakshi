@@ -260,6 +260,41 @@ async def create_media_container(
         return r.json()["id"]
 
 
+async def create_reel_container(
+    *,
+    ig_user_id: str,
+    access_token: str,
+    video_url: str,
+    caption: str = "",
+    cover_url: str | None = None,
+    share_to_feed: bool = True,
+) -> str:
+    """A Reel from a public MP4 (H.264/AAC, moov first, 3s-15min, <=300MB).
+
+    Meta fetches `video_url` and transcodes it, so the container takes longer
+    than an image's to reach FINISHED -- poll with a longer timeout. The
+    cover is the designed still, so the grid shows the card, not a frame
+    chosen by Meta.
+    """
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="create_reel_container", video_url=video_url)
+        return fixtures.MOCK_REEL_CONTAINER_ID
+
+    payload: dict[str, str] = {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": caption[:2200],
+        "share_to_feed": "true" if share_to_feed else "false",
+        "access_token": access_token,
+    }
+    if cover_url:
+        payload["cover_url"] = cover_url
+    async with _client() as c:
+        r = await c.post(f"{GRAPH}/{ig_user_id}/media", data=payload)
+        r.raise_for_status()
+        return r.json()["id"]
+
+
 async def create_carousel_container(
     *, ig_user_id: str, access_token: str, children: list[str], caption: str
 ) -> str:
@@ -282,6 +317,11 @@ async def create_carousel_container(
         )
         r.raise_for_status()
         return r.json()["id"]
+
+
+# Video containers transcode on Meta's side; a 7-second reel has taken over a
+# minute in practice, so they get a longer wait than an image's.
+REEL_CONTAINER_TIMEOUT_S = 300
 
 
 async def wait_for_container(*, container_id: str, access_token: str, timeout_s: int = 60) -> str:
@@ -334,6 +374,7 @@ __all__ = [
     "get_profile",
     "create_media_container",
     "create_carousel_container",
+    "create_reel_container",
     "publish_container",
     "wait_for_container",
     "refresh_long_lived_token",

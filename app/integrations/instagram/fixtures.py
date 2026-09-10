@@ -32,6 +32,7 @@ def mock_child_container_id() -> str:
     return f"1800000000000{_child_seq[0]:04d}"
 
 
+MOCK_REEL_CONTAINER_ID = "18000000000000099"
 MOCK_MEDIA_ID = "17900000000000000"
 MOCK_PERMALINK = "https://www.instagram.com/p/MOCKSHORTCODE/"
 
