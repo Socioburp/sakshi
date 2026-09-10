@@ -15,13 +15,15 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.agent import buttons
 from app.agent.context import ToolContext
 from app.billing import credits
 from app.creative import pipeline
 from app.creative.brief import CreativeBrief, Grounding, check_brand_rules
 from app.db import repo
-from app.db.models import Brand, BrandAsset, Brief, Creative, IgAccount, Publication
+from app.db.models import Brand, BrandAsset, Brief, Creative, IgAccount, Publication, WaSession
 from app.db.session import session_scope
+from app.insights import events
 from app.integrations.instagram import client as ig
 from app.integrations.storage import r2
 from app.logging import get_logger
@@ -57,13 +59,40 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Turn the owner's request into a finished creative and send it to them on "
             "WhatsApp. Costs the owner 1 credit. Call this as soon as you know what is "
-            "being promoted -- do not gather every detail first."
+            "being promoted -- do not gather every detail first. May return "
+            "reason=grid_deviation (nothing charged) when the post would break the look of "
+            "their own grid; then ask them, and call again with grid_override or the "
+            "adjusted_brief."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"brief": BRIEF_SCHEMA},
-            "required": ["brief"],
+            "properties": {
+                "brief": BRIEF_SCHEMA,
+                "grid_choice": {
+                    "type": "string",
+                    "enum": ["adjusted", "original"],
+                    "description": (
+                        "After a grid_deviation, the owner's tap: 'adjusted' builds the "
+                        "grid-matching version, 'original' builds what they first asked for. "
+                        "The briefs are kept server-side; omit `brief` when using this."
+                    ),
+                },
+                "suggestion_rank": {
+                    "type": "integer",
+                    "description": "When building an idea from suggest_post: its rank.",
+                },
+            },
         },
+    },
+    {
+        "name": "suggest_post",
+        "description": (
+            "What should they post today? Returns up to 3 ready ideas, best first, each with "
+            "a reason a shop owner would accept (an upcoming festival, a product photo not "
+            "yet used, a how-to carousel, the day of the week) and a brief sketch. Free. "
+            "Use when they ask what to post, seem stuck, or return after a gap."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "revise_creative",
@@ -162,6 +191,12 @@ TOOLS: list[dict[str, Any]] = [
                 "no_logo": {
                     "type": "boolean",
                     "description": "True when the owner says they have no logo; stops the ask.",
+                },
+                "daily_nudge": {
+                    "type": "boolean",
+                    "description": (
+                        "False when the owner asks to stop the daily post idea; true to resume."
+                    ),
                 },
                 "palette": {
                     "type": "object",
@@ -296,8 +331,25 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> dict[st
 
 
 async def _create_creative(ctx: ToolContext, args: dict) -> dict:
+    from app.creative import grid
+
+    grid_choice = args.get("grid_choice")
+    raw = args.get("brief")
+    if grid_choice:
+        # The two briefs were kept server-side when the choice was offered, so
+        # the model never has to reproduce a carousel from a truncated dump.
+        pending = _get_session_state(ctx, "grid_choice") or {}
+        raw = pending.get(grid_choice) or raw
+        if raw is None:
+            return {
+                "ok": False,
+                "reason": "no_pending_grid_choice",
+                "hint": "Nothing is waiting for a choice; call create_creative with a brief.",
+            }
+    if raw is None:
+        return {"ok": False, "reason": "invalid_brief", "error": "brief is required"}
     try:
-        brief = CreativeBrief.model_validate(args["brief"])
+        brief = CreativeBrief.model_validate(raw)
     except Exception as exc:  # noqa: BLE001
         # Handed straight back to the model, which usually fixes it on the next turn.
         return {"ok": False, "reason": "invalid_brief", "error": str(exc)[:800]}
@@ -307,7 +359,107 @@ async def _create_creative(ctx: ToolContext, args: dict) -> dict:
     # model-authored version records what it believed rather than what it was
     # given -- which is exactly backwards when a creative comes out wrong.
     brief.grounding = Grounding.model_validate(ctx.grounding.as_brief_grounding())
-    return await pipeline.generate(ctx, brief)
+
+    # The grid guard. A ratio or layout that breaks the look of every post they
+    # have approved is offered back as a choice BEFORE a credit is spent. Mood
+    # or headline drift is advice on the finished creative, not a stop.
+    note = None
+    try:
+        with session_scope() as db:
+            note = grid.check(grid.fingerprint(db, ctx.brand_id), brief)
+    except Exception:  # noqa: BLE001 - a guard that fails must not block the creative
+        log.exception("grid_check_failed", brand_id=str(ctx.brand_id))
+    if note and note.severity >= 1 and not grid_choice:
+        original = brief.model_dump(mode="json")
+        adjusted = grid.adjusted_payload(original, note.suggested_changes)
+        _set_session_state(ctx, "grid_choice", {"original": original, "adjusted": adjusted})
+        return {
+            "ok": False,
+            "reason": "grid_deviation",
+            "charged": 0,
+            "grid_note": note.as_dict(),
+            "adjusted_brief": adjusted,
+            "buttons": buttons.as_payload(["grid:adjusted", "grid:original"], _locale(ctx)),
+            "hint": (
+                "Tell them in ONE line what differs and that their grid is built on the other "
+                "choice. The two buttons are attached to your reply automatically. When they "
+                "tap, call create_creative with grid_choice='adjusted' or 'original' and no "
+                "brief."
+            ),
+        }
+    _set_session_state(ctx, "grid_choice", None)
+
+    result = await pipeline.generate(ctx, brief)
+    if result.get("ok"):
+        _set_session_state(ctx, "suggestions", None)
+        if note:
+            result["grid_note"] = note.as_dict()
+        if args.get("suggestion_rank"):
+            with session_scope() as db:
+                events.record(
+                    db,
+                    kind="suggestion_taken",
+                    account_id=ctx.account_id,
+                    brand_id=ctx.brand_id,
+                    brief_id=result.get("brief_id"),
+                    meta={"rank": args["suggestion_rank"]},
+                )
+    return result
+
+
+async def _suggest_post(ctx: ToolContext, args: dict) -> dict:
+    from app.insights import suggest as sg
+
+    with session_scope() as db:
+        brand = db.get(Brand, ctx.brand_id)
+        ideas = sg.suggest(db, brand)
+        sg.record_suggested(db, brand, ideas)
+    payload = [i.as_dict() for i in ideas]
+    _set_session_state(ctx, "suggestions", payload)
+    return {
+        "ok": True,
+        "ideas": payload,
+        "buttons": buttons.as_payload(["make:1", "next", "skip"], _locale(ctx)),
+        "note": (
+            "Send ONE line: idea #1 and its reason, in their language. The three buttons are "
+            "attached to your reply automatically. Do not list all ideas."
+        ),
+    }
+
+
+def _locale(ctx: ToolContext) -> str | None:
+    from app.db.models import Account
+
+    with session_scope() as db:
+        acct = db.get(Account, ctx.account_id)
+        return acct.locale if acct else None
+
+
+def _get_session_state(ctx: ToolContext, key: str):
+    if not ctx.session_id:
+        return None
+    with session_scope() as db:
+        sess = db.get(WaSession, ctx.session_id)
+        return (sess.state or {}).get(key) if sess is not None else None
+
+
+def _set_session_state(ctx: ToolContext, key: str, value) -> None:
+    """Small facts the next turn needs (offered ideas, a pending grid choice)."""
+    if not ctx.session_id:
+        return
+    try:
+        with session_scope() as db:
+            sess = db.get(WaSession, ctx.session_id)
+            if sess is None:
+                return
+            state = dict(sess.state or {})
+            if value is None:
+                state.pop(key, None)
+            else:
+                state[key] = value
+            sess.state = state
+    except Exception:  # noqa: BLE001
+        log.exception("session_state_failed", key=key)
 
 
 async def _revise_creative(ctx: ToolContext, args: dict) -> dict:
@@ -338,6 +490,7 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         "always_say",
         "palette",
         "no_logo",
+        "daily_nudge",
     }
     with session_scope() as db:
         brand = db.get(Brand, ctx.brand_id)
@@ -345,8 +498,8 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         for key, value in args.items():
             if key not in settable or value in (None, "", [], {}):
                 continue
-            if key == "no_logo":
-                brand.template_prefs = {**(brand.template_prefs or {}), "no_logo": bool(value)}
+            if key in ("no_logo", "daily_nudge"):
+                brand.template_prefs = {**(brand.template_prefs or {}), key: bool(value)}
             elif key in ("never_say", "always_say", "languages"):
                 merged = list(dict.fromkeys([*(getattr(brand, key) or []), *value]))
                 setattr(brand, key, merged)
@@ -518,6 +671,7 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         urls = [c.composed_url for c in creatives]
         creative_ids = [c.id for c in creatives]
         composed_keys = [c.composed_key for c in creatives]
+        first_brief_id = creatives[0].brief_id
 
     # Long-lived tokens die at 60 days. Refresh when inside the last week, so a
     # connection made in January still posts in April.
@@ -610,6 +764,9 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
             if cid in promoted:
                 row.composed_key = row.composed_key.replace("drafts/", "published/", 1)
                 row.composed_url = promoted[cid]
+        events.record_for_brief(
+            db, kind="publish", brief_id=first_brief_id, meta={"permalink": result.permalink}
+        )
     return {
         "ok": True,
         "permalink": result.permalink,
@@ -655,6 +812,7 @@ async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
 
 _HANDLERS = {
     "create_creative": _create_creative,
+    "suggest_post": _suggest_post,
     "request_approval": _request_approval,
     "revise_creative": _revise_creative,
     "regenerate_image": _regenerate_image,

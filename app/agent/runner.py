@@ -18,6 +18,7 @@ from app.agent import language as lang
 from app.agent.context import ToolContext
 from app.agent.prompts import ONBOARDING_HINT, WINDOW_CLOSING_HINT, build_system
 from app.agent.tools import SHOWS_MEDIA, TOOLS, dispatch
+from app.channels.base import Button
 from app.channels.whatsapp.session_window import seconds_left
 from app.config import settings
 from app.db import repo
@@ -180,6 +181,8 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
         # or an approval tap gave the model nothing to call revise/publish with,
         # and it either invented an id or made (and charged) a new creative.
         current = _current_brief_block(db, wa_session)
+        taste_block = _taste_block(db, brand_id)
+        pending = _pending_block(wa_session)
 
         system = build_system(
             brand,
@@ -191,6 +194,8 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
                     ONBOARDING_HINT if is_first else "",
                     WINDOW_CLOSING_HINT if 0 < window_left < 3600 else "",
                     current,
+                    taste_block,
+                    pending,
                 )
                 if x
             ),
@@ -248,6 +253,65 @@ def _current_brief_block(db, wa_session: WaSession | None) -> str:
     )
 
 
+def _taste_block(db, brand_id: uuid.UUID) -> str:
+    """What this owner has approved before, when there is enough of it to trust."""
+    try:
+        from app.insights.profile import taste
+
+        return taste(db, brand_id).as_prompt_block()
+    except Exception:  # noqa: BLE001 - advice, never a gate
+        log.exception("taste_block_failed", brand_id=str(brand_id))
+        return ""
+
+
+def _pending_block(wa_session: WaSession | None) -> str:
+    """Suggestions or a grid choice offered last turn, so a tap means something."""
+    if wa_session is None or not wa_session.state:
+        return ""
+    state = wa_session.state
+    lines = []
+    if ideas := state.get("suggestions"):
+        lines.append("## Ideas you offered last turn (their tap or reply refers to these)")
+        for i in ideas:
+            lines.append(
+                f"- #{i.get('rank')}: {i.get('headline_idea')} -- {i.get('format')}, "
+                f"{i.get('template')}, {i.get('aspect_ratio')}; visual: {i.get('visual_direction')}"
+                + (
+                    f"; reference_asset_id={i['reference_asset_id']}"
+                    if i.get("reference_asset_id")
+                    else ""
+                )
+            )
+        lines.append(
+            "Their tap 'Make it' / yes = build #1 with create_creative (set suggestion_rank). "
+            "'Another idea' = offer #2 in one line. 'Not today' = drop it, no follow-up. "
+            "(Button titles appear in their language.)"
+        )
+    if pend := state.get("grid_choice"):
+        orig, adj = pend.get("original") or {}, pend.get("adjusted") or {}
+        o_fmt, a_fmt = orig.get("format") or {}, adj.get("format") or {}
+        o_vd, a_vd = orig.get("visual_direction") or {}, adj.get("visual_direction") or {}
+        diffs = [
+            f"{label}: {a} -> {b}"
+            for label, a, b in (
+                ("ratio", o_fmt.get("aspect_ratio"), a_fmt.get("aspect_ratio")),
+                ("layout", orig.get("template_id"), adj.get("template_id")),
+                ("mood", o_vd.get("mood"), a_vd.get("mood")),
+            )
+            if a != b
+        ]
+        lines.append("## Grid choice you offered last turn (both briefs are kept server-side)")
+        lines.append(
+            f"Headline: {orig.get('headline', '')!r}. "
+            f"Adjusted version changes: {'; '.join(diffs) or 'nothing'}."
+        )
+        lines.append(
+            "Their tap 'Match my grid' = create_creative(grid_choice='adjusted'); "
+            "'As I said' = create_creative(grid_choice='original'). Send no brief."
+        )
+    return "\n".join(lines)
+
+
 def _remember_brief(session_id: uuid.UUID | None, result: dict) -> None:
     brief_id = result.get("brief_id") if isinstance(result, dict) else None
     if not session_id or not brief_id:
@@ -260,6 +324,10 @@ def _remember_brief(session_id: uuid.UUID | None, result: dict) -> None:
 
 async def _loop(ctx, system, messages, used_tools, trace, message_id, profile) -> dict[str, Any]:
     client = get_client()
+    # A tool may attach reply buttons ("Make it / Another idea / Not today").
+    # They ride on the model's final line for this turn; the model cannot
+    # send buttons itself and must not be asked to describe them.
+    pending_buttons: list[Button] = []
     for turn in range(settings.agent_max_turns):
         with trace.stage(f"model:{turn}"):
             resp = await client.messages.create(
@@ -277,7 +345,7 @@ async def _loop(ctx, system, messages, used_tools, trace, message_id, profile) -
         if not tool_uses:
             text = "".join(b.text for b in resp.content if b.type == "text").strip()
             if text:
-                await ctx.say(text)
+                await ctx.say(text, buttons=pending_buttons or None)
             return {
                 "ok": True,
                 "reply": text,
@@ -292,6 +360,12 @@ async def _loop(ctx, system, messages, used_tools, trace, message_id, profile) -
             result = await dispatch(ctx, tu.name, tu.input or {})
             if tu.name in SHOWS_MEDIA and result.get("ok"):
                 _remember_brief(ctx.session_id, result)
+            if isinstance(result.get("buttons"), list):
+                pending_buttons = [
+                    Button(id=str(b["id"]), title=str(b["title"])[:20])
+                    for b in result["buttons"]
+                    if isinstance(b, dict) and b.get("id") and b.get("title")
+                ][:3]
                 result["reminder"] = (
                     "The image is already on the owner's phone. Reply with at most one "
                     "short line -- do not describe the creative."
