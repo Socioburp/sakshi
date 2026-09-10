@@ -116,6 +116,28 @@ the still as its cover. It costs one image credit -- the picture is made once
 -- and a copy revision re-renders the motion for free. The grid guard skips
 reels (a reel is 9:16 by definition and shown in its own tab).
 
+## Comments & DMs (adopted: `app/inbox/`, `integrations/instagram/webhook.py`, client replies)
+
+| Claim | Confidence | Source |
+|---|---|---|
+| Webhook fields for Instagram Login include `comments`, `mentions`, `messages`, `message_echoes`; subscribe on the IG professional account; GET handshake echoes `hub.challenge` when `hub.verify_token` matches | 0.9 | [Meta: Instagram Platform webhooks](https://developers.facebook.com/docs/instagram-platform/webhooks) |
+| POST payloads are signed `X-Hub-Signature-256: sha256=<hmac>` — HMAC-SHA256 of the raw body keyed with the app secret; compare against the header | 0.9 | same webhooks page (Validating payloads) |
+| A comment event is `entry[].changes[]` with `field: "comments"` and a `value` of `id, text, from{id,username}, media{id,media_product_type}, parent_id`; a DM is `entry[].messaging[]` with `sender.id, recipient.id, message.mid, message.text` (and `is_echo` for the account's own) | 0.8 (assembled from the reference + field lists; the exact value keys vary a little by field version) | [Meta comment reference](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-comment), webhooks page |
+| Reply to a comment: `POST /{ig-comment-id}/replies` with `message` (text only); hide: `POST /{ig-comment-id}?hide=true`; delete: `DELETE /{ig-comment-id}` | 0.9 | [Meta: IG Comment node](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-comment) |
+| Send a DM: `POST /{ig-id}/messages` on graph.instagram.com with `{recipient:{id:<IGSID>}, message:{text}}`; a private reply to a public comment uses `recipient:{comment_id}`; 24h window to answer a user message (human_agent tag extends it) | 0.85 | [Meta: IG messaging with Instagram Login](https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/messaging-api) |
+| `instagram_business_manage_comments` and `instagram_business_manage_messages` permissions gate replies and need App Review | 0.85 | [Meta permissions reference](https://developers.facebook.com/docs/permissions/) |
+
+Adopted: one webhook endpoint (`/webhooks/instagram`) verifies the signature
+and flattens both shapes into one `IgInbound`. Each comment or DM becomes an
+`ig_events` row (unique on brand + kind + object id, so a webhook retry is
+idempotent), a reply is drafted in the brand's voice (grounded on remembered
+product facts, a plain fallback with no model), and the owner gets it on
+WhatsApp with Send / Edit / Skip. Nothing is posted without their tap; the
+tap ids carry the event id so ingest posts exactly the reply they approved,
+and an Edit arms the session so the next line they type becomes the reply.
+The comment/message manage scopes join the connect link only once
+IG_ENGAGEMENT_ENABLED is set, the same pattern as insights.
+
 ## Considered, not adopted (yet)
 
 - **IC-Light / FLUX.2 image-to-image relighting** (lllyasviel/IC-Light, Apache-2.0;
