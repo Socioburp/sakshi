@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     ig_app_id: str = ""
     ig_app_secret: str = ""
     ig_redirect_uri: str = ""
+    # Insights (reach, saves, shares per post) need instagram_business_manage_insights,
+    # which App Review grants. Flip this once it is approved; the connect link
+    # then asks for it and the sync starts reading numbers.
+    ig_insights_enabled: bool = False
 
     # stt
     stt_provider: Literal["mock", "elevenlabs", "deepgram", "sarvam"] = "mock"
@@ -81,6 +85,10 @@ class Settings(BaseSettings):
     # Vendor price per image in micro-dollars, for the ledger only. Unset (0)
     # means the per-vendor list price in providers.DEFAULT_COST_MICROS.
     imagegen_cost_micros: int = 0
+
+    # compositor. Empty = the Chromium `playwright install` fetched; set it to
+    # use a Chromium the host already ships (a path to the `chrome` binary).
+    chromium_executable: str = ""
 
     # product lane: the owner's photo, product kept, background replaced
     cutout_enabled: bool = True
