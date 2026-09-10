@@ -121,6 +121,17 @@ the first few words, write prose not keyword lists, 30-80 words, and describe wh
 should be there rather than what should not ("a clean empty counter", never "no clutter") \
 -- the image model does not read negatives.
 
+## Layouts
+
+Six layouts, chosen by the shape of the message, not by mood: `lower_third` (photo on \
+top, words below -- the default for product photos), `centered_overlay` (short punchy \
+headline over a full photo), `split_card` (photo above a brand-colour panel -- long \
+copy), `top_band` (brand-colour band on top -- announcements, offers), `poster_stack` \
+(poster headline top-left -- launches, campaigns), `frame_card` (framed photo, words \
+beneath -- premium, catalogue). The brand's kit (its "look") prefers a family of these; \
+stay inside it unless the owner asks for something different, so the grid reads as one \
+brand.
+
 ## Carousels
 
 We offer **2 to 6 slides**. Not one, not seven. If they ask for more than six, say you \
@@ -267,6 +278,17 @@ def _brand_block(brand: Any) -> str:
         lines.append("A logo is on file and is composited onto every creative.")
     elif _no_logo_line(brand):
         lines.append(_no_logo_line(brand))
+
+    prefs = val("template_prefs", {})
+    if prefs.get("look"):
+        from app.creative import brandkit
+
+        look = brandkit.LOOKS.get(prefs["look"])
+        if look:
+            lines.append(
+                f"Look: {look.key} ({look.heading}/{look.body}, {look.signature} mark). "
+                f"Preferred layouts: {', '.join(look.family)}."
+            )
 
     always = val("always_say", [])
     if always:

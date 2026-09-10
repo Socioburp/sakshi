@@ -18,7 +18,7 @@ from sqlalchemy import select
 from app.agent import buttons
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import pipeline
+from app.creative import brandkit, pipeline
 from app.creative.brief import CreativeBrief, Grounding, check_brand_rules
 from app.db import repo
 from app.db.models import (
@@ -172,7 +172,14 @@ TOOLS: list[dict[str, Any]] = [
                         },
                         "template_id": {
                             "type": "string",
-                            "enum": ["centered_overlay", "lower_third", "split_card"],
+                            "enum": [
+                                "centered_overlay",
+                                "lower_third",
+                                "split_card",
+                                "top_band",
+                                "poster_stack",
+                                "frame_card",
+                            ],
                         },
                         "slides": {
                             "type": "array",
@@ -255,6 +262,15 @@ TOOLS: list[dict[str, Any]] = [
                 "locality": {
                     "type": "string",
                     "description": "The area/neighbourhood the shop serves, e.g. 'Indiranagar'.",
+                },
+                "look": {
+                    "type": "string",
+                    "enum": ["clean", "editorial", "warm", "bold"],
+                    "description": (
+                        "The brand kit (type pairing + signature mark + layout family). "
+                        "Chosen from the category automatically; set only when the owner asks "
+                        "for a different feel."
+                    ),
                 },
                 "palette": {
                     "type": "object",
@@ -627,6 +643,7 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         "daily_nudge",
         "substantiated",
         "locality",
+        "look",
     }
     with session_scope() as db:
         brand = db.get(Brand, ctx.brand_id)
@@ -642,6 +659,8 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
                 brand.template_prefs = {**(brand.template_prefs or {}), key: merged}
             elif key == "locality":
                 brand.template_prefs = {**(brand.template_prefs or {}), key: str(value)[:80]}
+            elif key == "look":
+                brandkit.apply(brand, str(value))
             elif key in ("never_say", "always_say", "languages"):
                 merged = list(dict.fromkeys([*(getattr(brand, key) or []), *value]))
                 setattr(brand, key, merged)
@@ -650,6 +669,11 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
             else:
                 setattr(brand, key, value)
             changed.append(key)
+        # The category decides the brand kit the first time it is known: a
+        # bakery and a jeweller must not share a typeface by default.
+        if "category" in changed and not (brand.template_prefs or {}).get("look"):
+            look = brandkit.apply(brand)
+            changed.append(f"look={look.key}")
     return {"ok": True, "updated": changed}
 
 
