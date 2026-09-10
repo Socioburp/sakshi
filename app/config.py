@@ -69,10 +69,18 @@ class Settings(BaseSettings):
     deepgram_api_key: str = ""
     sarvam_api_key: str = ""
 
-    # imagegen
-    imagegen_provider: Literal["mock", "provider_a", "provider_b"] = "mock"
-    imagegen_a_api_key: str = ""
-    imagegen_b_api_key: str = ""
+    # imagegen -- three vendors for the same open-weight FLUX family, one
+    # interface. Model ids are per vendor; the price is what the ledger records.
+    imagegen_provider: Literal["mock", "fal", "replicate", "bfl"] = "mock"
+    fal_key: str = ""
+    imagegen_fal_model: str = "fal-ai/flux/schnell"  # or fal-ai/flux-2/klein/4b
+    replicate_api_token: str = ""
+    imagegen_replicate_model: str = "black-forest-labs/flux-schnell"
+    bfl_api_key: str = ""
+    imagegen_bfl_model: str = "flux-2-klein-4b"  # or flux-2-pro
+    # Vendor price per image in micro-dollars, for the ledger only. Unset (0)
+    # means the per-vendor list price in providers.DEFAULT_COST_MICROS.
+    imagegen_cost_micros: int = 0
 
     # product lane: the owner's photo, product kept, background replaced
     cutout_enabled: bool = True
