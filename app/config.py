@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     imagegen_a_api_key: str = ""
     imagegen_b_api_key: str = ""
 
+    # product lane: the owner's photo, product kept, background replaced
+    cutout_enabled: bool = True
+    # rembg model. isnet-general-use is MIT-licensed, ~1.2GB RSS at 1024px and
+    # ~2s on a small CPU. birefnet-general-lite is sharper but needs >4GB.
+    # bria-rmbg (rembg's default) is NOT licensed for commercial use.
+    cutout_model: str = "isnet-general-use"
+
     # billing
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
