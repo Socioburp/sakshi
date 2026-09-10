@@ -510,6 +510,33 @@ class CreditLedger(Base):
     created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
 
 
+class CreativeEvent(Base):
+    """One vote: what the owner did with a creative, and what it was at the time."""
+
+    __tablename__ = "creative_events"
+
+    id: Mapped[uuid.UUID] = _pk()
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    brief_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    creative_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('created','approve','change_words','change_picture','revise',"
+            "'regenerate','publish','suggested','suggestion_taken')",
+            name="ck_creative_events_kind",
+        ),
+    )
+
+
 class Job(Base, TimestampMixin):
     """Durable mirror of the Upstash queue: dedupe, retries, and an audit trail."""
 
