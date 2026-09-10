@@ -36,6 +36,17 @@ SCOPES = [
     "instagram_business_basic",
     "instagram_business_content_publish",
 ]
+# Insights need their own permission, granted by App Review. Asking for it
+# before it is approved fails the whole login dialog, so the connect link
+# adds it only once IG_INSIGHTS_ENABLED says it can be granted.
+INSIGHTS_SCOPE = "instagram_business_manage_insights"
+
+
+def requested_scopes() -> list[str]:
+    scopes = list(SCOPES)
+    if settings.instagram_mock or settings.ig_insights_enabled:
+        scopes.append(INSIGHTS_SCOPE)
+    return scopes
 
 
 @dataclass(slots=True)
@@ -69,7 +80,7 @@ def authorize_url(state: str) -> str:
         {
             "client_id": settings.ig_app_id,
             "redirect_uri": settings.ig_redirect_uri,
-            "scope": ",".join(SCOPES),
+            "scope": ",".join(requested_scopes()),
             "response_type": "code",
             "state": state,
         }
@@ -332,4 +343,6 @@ __all__ = [
     "IgProfile",
     "IgPublishResult",
     "SCOPES",
+    "INSIGHTS_SCOPE",
+    "requested_scopes",
 ]

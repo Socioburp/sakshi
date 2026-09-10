@@ -118,7 +118,7 @@ async def callback(request: Request) -> HTMLResponse:
         row.username = profile.username
         row.access_token = token.access_token
         row.token_expires_at = token.expires_at
-        row.scopes = ig.SCOPES
+        row.scopes = ig.requested_scopes()
         row.status = "connected"
 
     log.info("ig_connected", account_id=str(account_id), username=profile.username)
