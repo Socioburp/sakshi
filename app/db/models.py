@@ -140,6 +140,54 @@ class IgAccount(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("brand_id", "ig_user_id", name="uq_ig_brand_user"),)
 
 
+class IgEvent(Base):
+    """A comment or DM from Instagram, and the reply the owner approved.
+
+    One row per Instagram object (a comment id, a message id). The unique key
+    makes a webhook retry idempotent: the same comment never becomes two rows
+    and never nudges the owner twice.
+    """
+
+    __tablename__ = "ig_events"
+
+    id: Mapped[uuid.UUID] = _pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ig_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ig_accounts.id", ondelete="SET NULL")
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # comment|mention|message
+    ig_object_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(String(255))
+    media_id: Mapped[str | None] = mapped_column(String(64))
+    permalink: Mapped[str | None] = mapped_column(Text)
+    from_id: Mapped[str | None] = mapped_column(String(64))
+    from_username: Mapped[str | None] = mapped_column(String(120))
+    text: Mapped[str | None] = mapped_column(Text)
+    draft_reply: Mapped[str | None] = mapped_column(Text)
+    reply_text: Mapped[str | None] = mapped_column(Text)
+    reply_ig_id: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(16), default="new", nullable=False)
+    notify_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind in ('comment','mention','message')", name="ck_ig_events_kind"),
+        CheckConstraint(
+            "status in ('new','drafted','approved','sent','skipped','failed','ignored')",
+            name="ck_ig_events_status",
+        ),
+        UniqueConstraint("brand_id", "kind", "ig_object_id", name="uq_ig_events_brand_object"),
+        Index("ix_ig_events_brand_status", "brand_id", "status"),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # conversation
 # --------------------------------------------------------------------------- #
