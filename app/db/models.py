@@ -15,7 +15,7 @@ Two deliberate schema decisions, both load-bearing:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -23,10 +23,12 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -67,6 +69,9 @@ class Account(Base, TimestampMixin):
     wa_phone: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(120))
     locale: Mapped[str] = mapped_column(String(16), default="en-IN", nullable=False)
+    # The script they TYPE in (latin / devanagari / ...). Locked only from typed
+    # messages: a transcript's script is the vendor's, not the owner's.
+    script: Mapped[str | None] = mapped_column(String(16))
     plan: Mapped[str] = mapped_column(String(32), default="trial", nullable=False)
     credits_balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     onboarded_at: Mapped[datetime | None] = mapped_column(TS)
@@ -135,6 +140,54 @@ class IgAccount(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("brand_id", "ig_user_id", name="uq_ig_brand_user"),)
 
 
+class IgEvent(Base):
+    """A comment or DM from Instagram, and the reply the owner approved.
+
+    One row per Instagram object (a comment id, a message id). The unique key
+    makes a webhook retry idempotent: the same comment never becomes two rows
+    and never nudges the owner twice.
+    """
+
+    __tablename__ = "ig_events"
+
+    id: Mapped[uuid.UUID] = _pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ig_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ig_accounts.id", ondelete="SET NULL")
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # comment|mention|message
+    ig_object_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(String(255))
+    media_id: Mapped[str | None] = mapped_column(String(64))
+    permalink: Mapped[str | None] = mapped_column(Text)
+    from_id: Mapped[str | None] = mapped_column(String(64))
+    from_username: Mapped[str | None] = mapped_column(String(120))
+    text: Mapped[str | None] = mapped_column(Text)
+    draft_reply: Mapped[str | None] = mapped_column(Text)
+    reply_text: Mapped[str | None] = mapped_column(Text)
+    reply_ig_id: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(16), default="new", nullable=False)
+    notify_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind in ('comment','mention','message')", name="ck_ig_events_kind"),
+        CheckConstraint(
+            "status in ('new','drafted','approved','sent','skipped','failed','ignored')",
+            name="ck_ig_events_status",
+        ),
+        UniqueConstraint("brand_id", "kind", "ig_object_id", name="uq_ig_events_brand_object"),
+        Index("ix_ig_events_brand_status", "brand_id", "status"),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # conversation
 # --------------------------------------------------------------------------- #
@@ -191,6 +244,9 @@ class Message(Base):
     transcript_provider: Mapped[str | None] = mapped_column(String(32))
     transcript_lang: Mapped[str | None] = mapped_column(String(16))
     transcript_confidence: Mapped[float | None] = mapped_column()
+    # Stamped by the agent turn that folded this inbound message into its
+    # reply. NULL means no turn has answered it yet.
+    answered_at: Mapped[datetime | None] = mapped_column(TS)
     raw: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
 
@@ -258,8 +314,14 @@ class Creative(Base):
     background_url: Mapped[str | None] = mapped_column(Text)
     composed_key: Mapped[str | None] = mapped_column(Text)
     composed_url: Mapped[str | None] = mapped_column(Text)
+    # A reel: the composed card set in motion, MP4. Only on format.type=reel.
+    video_key: Mapped[str | None] = mapped_column(Text)
+    video_url: Mapped[str | None] = mapped_column(Text)
     imagegen_provider: Mapped[str | None] = mapped_column(String(32))
     imagegen_job_id: Mapped[str | None] = mapped_column(String(120))
+    # Was THIS slide charged for? Set at charge time so a reaper that finds the
+    # row stuck after a crash can refund exactly what was paid, once.
+    billed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     cost_micros: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
@@ -499,6 +561,125 @@ class CreditLedger(Base):
     ref_id: Mapped[str | None] = mapped_column(String(64))
     idempotency_key: Mapped[str | None] = mapped_column(String(120), unique=True)
     created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+
+
+class CreativeEvent(Base):
+    """One vote: what the owner did with a creative, and what it was at the time."""
+
+    __tablename__ = "creative_events"
+
+    id: Mapped[uuid.UUID] = _pk()
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    brief_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    creative_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('created','approve','change_words','change_picture','revise',"
+            "'regenerate','publish','suggested','suggestion_taken')",
+            name="ck_creative_events_kind",
+        ),
+    )
+
+
+class ContentPlan(Base):
+    """A month of posts for one brand: goal, pillar mix, cadence, and the slots."""
+
+    __tablename__ = "content_plans"
+
+    id: Mapped[uuid.UUID] = _pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    month: Mapped[date] = mapped_column(Date, nullable=False)
+    goal: Mapped[str] = mapped_column(String(24), default="awareness", nullable=False)
+    cadence: Mapped[int] = mapped_column(SmallInteger, default=4, nullable=False)
+    pillar_mix: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    slots: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TS, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "goal in ('footfall','leads','launch','awareness')", name="ck_content_plans_goal"
+        ),
+        CheckConstraint("cadence between 1 and 7", name="ck_content_plans_cadence"),
+        UniqueConstraint("brand_id", "month", name="uq_content_plans_brand_month"),
+    )
+
+
+class PostMetric(Base):
+    """What one Instagram post did, from the Insights API.
+
+    Ours or the owner's own -- every post on the account teaches something.
+    `facts` is the brief's shape at publish (template, aspect, format, intent,
+    mood, own photo) when the post was made here, empty otherwise.
+    """
+
+    __tablename__ = "post_metrics"
+
+    id: Mapped[uuid.UUID] = _pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    publication_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("publications.id", ondelete="SET NULL")
+    )
+    ig_media_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(24), default="IMAGE", nullable=False)
+    media_product_type: Mapped[str | None] = mapped_column(String(24))
+    permalink: Mapped[str | None] = mapped_column(Text)
+    caption: Mapped[str | None] = mapped_column(Text)
+    posted_at: Mapped[datetime | None] = mapped_column(TS)
+    reach: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    views: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    likes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    comments: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    saved: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    shares: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    follows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    profile_visits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_interactions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    facts: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    raw: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    synced_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("brand_id", "ig_media_id", name="uq_post_metrics_brand_media"),
+        Index("ix_post_metrics_brand_posted", "brand_id", "posted_at"),
+    )
+
+
+class IgAccountStat(Base):
+    """One day of the account: followers, reach, engaged accounts."""
+
+    __tablename__ = "ig_account_stats"
+
+    id: Mapped[uuid.UUID] = _pk()
+    brand_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("brands.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    followers: Mapped[int | None] = mapped_column(Integer)
+    media_count: Mapped[int | None] = mapped_column(Integer)
+    reach: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    accounts_engaged: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_interactions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    raw: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TS, server_default=func.now(), nullable=False)
+
+    __table_args__ = (UniqueConstraint("brand_id", "day", name="uq_ig_account_stats_brand_day"),)
 
 
 class Job(Base, TimestampMixin):

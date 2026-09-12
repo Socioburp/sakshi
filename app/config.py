@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     ig_app_id: str = ""
     ig_app_secret: str = ""
     ig_redirect_uri: str = ""
+    # Insights (reach, saves, shares per post) need instagram_business_manage_insights,
+    # which App Review grants. Flip this once it is approved; the connect link
+    # then asks for it and the sync starts reading numbers.
+    ig_insights_enabled: bool = False
+    # Webhook verification (comments and DMs). Falls back to WA_VERIFY_TOKEN.
+    ig_verify_token: str = ""
+    # Replying to comments and DMs needs the manage_comments / manage_messages
+    # permissions from App Review. Flip on once granted; the connect link then
+    # asks for them and the reply loop goes live.
+    ig_engagement_enabled: bool = False
 
     # stt
     stt_provider: Literal["mock", "elevenlabs", "deepgram", "sarvam"] = "mock"
@@ -69,10 +79,32 @@ class Settings(BaseSettings):
     deepgram_api_key: str = ""
     sarvam_api_key: str = ""
 
-    # imagegen
-    imagegen_provider: Literal["mock", "provider_a", "provider_b"] = "mock"
-    imagegen_a_api_key: str = ""
-    imagegen_b_api_key: str = ""
+    # imagegen -- the FLUX family (fal/replicate/bfl) plus OpenAI's gpt-image-1,
+    # one interface. Model ids are per vendor; the price is what the ledger records.
+    imagegen_provider: Literal["mock", "fal", "replicate", "bfl", "openai"] = "mock"
+    fal_key: str = ""
+    imagegen_fal_model: str = "fal-ai/flux/schnell"  # or fal-ai/flux-2/klein/4b
+    replicate_api_token: str = ""
+    imagegen_replicate_model: str = "black-forest-labs/flux-schnell"
+    bfl_api_key: str = ""
+    imagegen_bfl_model: str = "flux-2-klein-4b"  # or flux-2-pro
+    openai_api_key: str = ""
+    imagegen_openai_model: str = "gpt-image-1"  # or dall-e-3
+    imagegen_openai_quality: str = "medium"  # gpt-image-1: low | medium | high | auto
+    # Vendor price per image in micro-dollars, for the ledger only. Unset (0)
+    # means the per-vendor list price in providers.DEFAULT_COST_MICROS.
+    imagegen_cost_micros: int = 0
+
+    # compositor. Empty = the Chromium `playwright install` fetched; set it to
+    # use a Chromium the host already ships (a path to the `chrome` binary).
+    chromium_executable: str = ""
+
+    # product lane: the owner's photo, product kept, background replaced
+    cutout_enabled: bool = True
+    # rembg model. isnet-general-use is MIT-licensed, ~1.2GB RSS at 1024px and
+    # ~2s on a small CPU. birefnet-general-lite is sharper but needs >4GB.
+    # bria-rmbg (rembg's default) is NOT licensed for commercial use.
+    cutout_model: str = "isnet-general-use"
 
     # billing
     razorpay_key_id: str = ""

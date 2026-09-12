@@ -1,0 +1,52 @@
+{% extends "_base.html.j2" %}
+{# A solid brand-colour band across the top carries the words; the photograph
+   runs full-bleed beneath it, untouched. Built for announcements and offers
+   with a short headline, and for product photos that need the whole lower
+   two thirds. The band grows with the copy (to a limit) and the photo takes
+   the rest, so nothing ever overflows upward out of the band. #}
+{% set hl = slide.headline|length %}
+{% set hf = 0.086 if hl < 18 else (0.076 if hl < 30 else 0.064) %}
+{% block styles %}
+  {# The base's full-bleed layers are replaced by a column: band, then photo. #}
+  .bg, .scrim, .grain { display: none; }
+  .col { position: absolute; inset: 0; display: flex; flex-direction: column; }
+  .band { flex: 0 0 auto; min-height: {{ (height*0.30)|round|int }}px;
+          max-height: {{ (height*0.58)|round|int }}px; overflow: hidden;
+          background: {{ brand.primary }}; display: flex; flex-direction: column;
+          justify-content: flex-end;
+          padding: {{ pad_top }}px {{ pad_x }}px {{ (width*0.055)|round|int }}px; }
+  .photo { flex: 1 1 auto; position: relative; overflow: hidden; }
+  .photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+               object-position: center; filter: saturate(1.04) contrast(1.03); }
+  .photo .veil { position: absolute; inset: 0;
+                 background: linear-gradient(180deg, rgba(0,0,0,.18) 0%, rgba(0,0,0,0) 30%,
+                                             rgba(0,0,0,0) 74%, rgba(0,0,0,.34) 100%); }
+  .photo .film { position: absolute; inset: 0; pointer-events: none; opacity: .028;
+                 mix-blend-mode: soft-light;
+                 background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>");
+                 background-size: 150px 150px; }
+  .headline { font-size: {{ (width * hf)|round|int }}px; text-shadow: none; max-width: 92%; }
+  .subhead { font-size: {{ (width*0.034)|round|int }}px; text-shadow: none; max-width: 86%;
+             margin-top: {{ (width*0.018)|round|int }}px; }
+  .foot { position: absolute; left: {{ pad_x }}px; right: {{ pad_x }}px;
+          bottom: {{ pad_bottom }}px; display: flex; align-items: center;
+          justify-content: space-between; gap: {{ (width*0.03)|round|int }}px; }
+{% endblock %}
+{% block body %}
+  <div class="col">
+    <div class="band">
+      <h1 class="headline">{{ slide.headline }}</h1>
+      {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
+    </div>
+    <div class="photo">
+      <img src="{{ background }}" alt="">
+      <div class="veil"></div>
+      <div class="film"></div>
+    </div>
+  </div>
+  <div class="foot">
+    {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
+    {% else %}<span class="brandline">{{ brand.name }}</span>{% endif %}
+    {% if show_cta %}<span class="cta">{{ brief.cta }}</span>{% endif %}
+  </div>
+{% endblock %}

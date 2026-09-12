@@ -37,7 +37,9 @@ async def receive(request: Request, background: BackgroundTasks) -> Response:
         form = await request.form()
         body = {k: v for k, v in form.items()}
         # Twilio signs url + sorted params; hand the adapter the signing base.
-        headers["x-sakshi-signing-base"] = str(request.url) + "".join(
+        # The URL must be the one Twilio called -- the PUBLIC https one -- not
+        # what uvicorn sees behind Render's proxy (http://<internal>/...).
+        headers["x-sakshi-signing-base"] = _public_url(request) + "".join(
             f"{k}{body[k]}" for k in sorted(body)
         )
     else:
@@ -59,9 +61,31 @@ async def receive(request: Request, background: BackgroundTasks) -> Response:
         return Response(status_code=status.HTTP_200_OK)
 
     for msg in messages:
-        background.add_task(ingest, msg)
+        # Starlette stops running background tasks after the first one raises,
+        # and the 200 has already gone out, so the provider will not retry. Each
+        # message gets its own guard; a bad one is logged, the rest still run.
+        background.add_task(_ingest_guarded, msg)
 
     return Response(status_code=status.HTTP_200_OK)
+
+
+def _ingest_guarded(msg) -> None:
+    try:
+        ingest(msg)
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "wa_ingest_failed",
+            provider=getattr(msg, "provider", None),
+            provider_message_id=getattr(msg, "provider_message_id", None),
+        )
+
+
+def _public_url(request: Request) -> str:
+    base = settings.public_base_url.rstrip("/")
+    if not base or "localhost" in base:
+        return str(request.url)
+    path = request.url.path
+    return f"{base}{path}" + (f"?{request.url.query}" if request.url.query else "")
 
 
 @router.get("/debug/verify-url", include_in_schema=False)

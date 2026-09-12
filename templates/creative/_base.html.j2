@@ -1,41 +1,119 @@
-{# Shared shell. Every template is exactly width x height with no scrollbars. #}
+{# Shared shell. Every template is exactly width x height with no scrollbars.
+
+   Everything here is the finishing an art director does last and a template
+   usually skips: an eased scrim instead of a two-stop band, type that tightens
+   as it gets bigger, a logo sized by what the mark actually is, and a film
+   grain that stops a generated background reading as plastic. #}
 <!DOCTYPE html>
 <html lang="{{ brief.caption.language }}">
 <head>
 <meta charset="utf-8">
+{# The brand faces plus a Noto face for every script the copy uses (see
+   app/creative/fonts.py). display=block: wait for real glyphs, never paint a
+   stand-in. A brand-supplied stylesheet is loaded as well, after it. #}
+<link rel="stylesheet" href="{{ brand.fonts_href }}">
+{% if brand.script_fonts_href %}<link rel="stylesheet" href="{{ brand.script_fonts_href }}">{% endif %}
 {% if brand.google_fonts %}<link rel="stylesheet" href="{{ brand.google_fonts }}">{% endif %}
 <style>
   *, *::before, *::after { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; width: {{ width }}px; height: {{ height }}px;
                overflow: hidden; background: {{ brand.primary }}; }
-  .stage { position: relative; width: {{ width }}px; height: {{ height }}px; }
-  .bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .stage { position: relative; width: {{ width }}px; height: {{ height }}px;
+           isolation: isolate; }
+
+  {# A photograph, treated like one. The tiny saturation/contrast lift is the
+     difference between a flat model output and something that came off a card. #}
+  .bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+        object-position: center; filter: saturate(1.04) contrast(1.03); }
+
+  {# Multi-stop scrim. A 2-stop linear gradient bands visibly across a large
+     canvas -- these stops approximate an ease-out so the darkening is felt but
+     not seen, which keeps the photograph looking bright and real. #}
   .scrim { position: absolute; inset: 0; }
+
+  {# Real film grain over everything. Generated backgrounds are too clean, and
+     "too clean" is most of what people mean when they say an image looks AI.
+     Rendered once as an inline SVG so it costs no network fetch. #}
+  {# Real film grain over everything. Generated backgrounds are too clean, and
+     "too clean" is most of what people mean when they say an image looks AI.
+     Rendered as an inline SVG so it costs no network fetch, and drawn at 240px
+     but displayed at 96px: downsampling the noise keeps it fine, where tiling
+     it near 1:1 shows the turbulence pattern as a visible weave. #}
+  .grain { position: absolute; inset: 0; pointer-events: none; opacity: .028;
+           mix-blend-mode: soft-light;
+           background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>");
+           background-size: 150px 150px; }
+
+  {# Padding respects the profile grid: Instagram shows the centre 3:4 of a
+     post in the grid, so a 1:1 post loses 12.5% on each side and a 9:16
+     post loses a band top and bottom. pad_* are computed in compose.py from
+     the aspect ratio; nothing a reader must see sits in the trimmed strip. #}
   .content { position: absolute; inset: 0; display: flex; flex-direction: column;
-             padding: {{ (width * 0.075) | round | int }}px; }
-  .headline { font-family: '{{ brand.heading_font }}', system-ui, sans-serif;
-              font-weight: 800; line-height: 1.02; letter-spacing: -0.02em;
-              color: {{ brand.ink }}; margin: 0; text-wrap: balance; }
-  .subhead { font-family: '{{ brand.body_font }}', system-ui, sans-serif;
-             font-weight: 400; line-height: 1.3; color: {{ brand.ink }};
-             opacity: .92; margin: {{ (width*0.022)|round|int }}px 0 0; }
+             padding: {{ pad_top }}px {{ pad_x }}px {{ pad_bottom }}px; }
+
+  {# The brand's one repeated mark, chosen with its look (app/creative/brandkit.py).
+     Small, in the accent colour, always in the same place: what makes a grid
+     read as one brand across twenty posts. #}
+  .sig-corner { position: absolute; top: 0; right: 0;
+                width: {{ (width*0.16)|round|int }}px; height: {{ (width*0.16)|round|int }}px;
+                background: linear-gradient(225deg, {{ brand.accent }} 50%, transparent 50%);
+                opacity: .92; }
+  .sig-bar { position: absolute; left: 0; right: 0; bottom: 0;
+             height: {{ (width*0.014)|round|int }}px; background: {{ brand.accent }}; }
+
+  {# Display type tightens as it grows: leading below 1 and negative tracking are
+     what separate a headline from a paragraph set large. #}
+  {# Indic scripts carry marks above and below the line and their conjuncts
+     do not survive negative tracking: the display leading opens up and the
+     tracking is dropped whenever the copy uses one. #}
+  .headline { font-family: '{{ brand.heading_font }}', {{ brand.font_stack|safe }};
+              font-weight: 800;
+              line-height: {{ '1.14' if brand.indic else '.98' }};
+              letter-spacing: {{ '0' if brand.indic else '-0.028em' }};
+              color: {{ brand.ink }}; margin: 0; text-wrap: balance;
+              text-shadow: 0 {{ (width*0.002)|round|int }}px
+                           {{ (width*0.006)|round|int }}px rgba(0,0,0,.34); }
+  .subhead { font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }};
+             font-weight: 400;
+             line-height: {{ '1.5' if brand.indic else '1.34' }};
+             letter-spacing: {{ '0' if brand.indic else '-0.004em' }};
+             color: {{ brand.ink }}; opacity: .90; text-wrap: pretty;
+             margin: {{ (width*0.026)|round|int }}px 0 0;
+             text-shadow: 0 {{ (width*0.0015)|round|int }}px
+                          {{ (width*0.005)|round|int }}px rgba(0,0,0,.30); }
+
   .cta { display: inline-flex; align-items: center; align-self: flex-start;
-         font-family: '{{ brand.body_font }}', system-ui, sans-serif; font-weight: 700;
+         font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }}; font-weight: 700;
          background: {{ brand.accent }}; color: {{ brand.secondary }};
-         padding: {{ (width*0.026)|round|int }}px {{ (width*0.045)|round|int }}px;
-         border-radius: 999px; font-size: {{ (width*0.036)|round|int }}px;
-         letter-spacing: .01em; }
-  .logo { height: {{ (width*0.07)|round|int }}px; object-fit: contain; }
-  .brandline { font-family: '{{ brand.body_font }}', system-ui, sans-serif;
-               font-weight: 600; font-size: {{ (width*0.028)|round|int }}px;
-               color: {{ brand.ink }}; opacity: .85; letter-spacing: .06em;
+         padding: {{ (width*0.024)|round|int }}px {{ (width*0.048)|round|int }}px;
+         border-radius: 999px; font-size: {{ (width*0.033)|round|int }}px;
+         letter-spacing: .005em; white-space: nowrap;
+         box-shadow: 0 {{ (width*0.004)|round|int }}px
+                     {{ (width*0.016)|round|int }}px rgba(0,0,0,.28); }
+
+  {# Sized by what the mark IS. A wordmark is wide and reads at a smaller height;
+     an emblem is compact and needs the height to be legible at feed scale. The
+     drop shadow separates it from a busy photograph without a plate. #}
+  .logo { display: block; object-fit: contain;
+  {% if brand.logo_wordmark %}
+          height: {{ (width*0.050)|round|int }}px; max-width: {{ (width*0.40)|round|int }}px;
+  {% else %}
+          height: {{ (width*0.098)|round|int }}px; max-width: {{ (width*0.26)|round|int }}px;
+  {% endif %}
+          width: auto;
+          filter: drop-shadow(0 {{ (width*0.002)|round|int }}px
+                              {{ (width*0.008)|round|int }}px rgba(0,0,0,.42)); }
+  .brandline { font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }};
+               font-weight: 600; font-size: {{ (width*0.026)|round|int }}px;
+               color: {{ brand.ink }}; opacity: .88; letter-spacing: .14em;
                text-transform: uppercase; }
+
   {# Carousel affordance: tells the reader there is more to swipe to. #}
-  .pips { position: absolute; top: {{ (width*0.06)|round|int }}px;
-          right: {{ (width*0.06)|round|int }}px; display: flex;
-          gap: {{ (width*0.012)|round|int }}px; }
-  .pip { width: {{ (width*0.016)|round|int }}px; height: {{ (width*0.016)|round|int }}px;
-         border-radius: 50%; background: {{ brand.ink }}; opacity: .35; }
+  .pips { position: absolute; top: {{ [pad_top - (width*0.02)|round|int, (width*0.03)|round|int]|max }}px;
+          left: 50%; transform: translateX(-50%); display: flex;
+          gap: {{ (width*0.013)|round|int }}px; }
+  .pip { width: {{ (width*0.015)|round|int }}px; height: {{ (width*0.015)|round|int }}px;
+         border-radius: 50%; background: {{ brand.ink }}; opacity: .38; }
   .pip.on { opacity: 1; background: {{ brand.accent }}; }
   .spacer { flex: 1 1 auto; }
   {% block styles %}{% endblock %}
@@ -44,6 +122,10 @@
 <body>
   <div class="stage">
     <img class="bg" src="{{ background }}" alt="">
+    <div class="scrim"></div>
+    <div class="grain"></div>
+    {% if brand.signature == 'corner' %}<div class="sig-corner"></div>{% endif %}
+    {% if brand.signature == 'bar' %}<div class="sig-bar"></div>{% endif %}
     {% if slide_count > 1 %}
     <div class="pips">
       {% for i in range(1, slide_count + 1) %}

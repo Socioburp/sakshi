@@ -20,8 +20,17 @@ def test_brief_schema_has_no_refs():
 def test_brief_schema_covers_the_contract():
     props = BRIEF_SCHEMA["properties"]
     for field in (
-        "intent", "format", "headline", "subhead", "cta", "visual_direction",
-        "template_id", "caption", "alt_text", "grounding", "slides",
+        "intent",
+        "format",
+        "headline",
+        "subhead",
+        "cta",
+        "visual_direction",
+        "template_id",
+        "caption",
+        "alt_text",
+        "grounding",
+        "slides",
     ):
         assert field in props, f"missing {field}"
     assert "prompt" in props["visual_direction"]["properties"]
@@ -44,6 +53,6 @@ def test_revise_is_advertised_as_free():
 def test_carousel_is_reachable_from_the_tool_surface():
     create = next(t for t in TOOLS if t["name"] == "create_creative")
     fmt = create["input_schema"]["properties"]["brief"]["properties"]["format"]
-    assert set(fmt["properties"]["type"]["enum"]) == {"single", "carousel"}
+    assert set(fmt["properties"]["type"]["enum"]) == {"single", "carousel", "reel"}
     regen = next(t for t in TOOLS if t["name"] == "regenerate_image")
     assert "slide_position" in regen["input_schema"]["properties"]

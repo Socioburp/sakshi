@@ -53,12 +53,16 @@ app/
     brief.py               the contract + the no-text-in-prompt validator
     logo.py                palette measured from pixels; character read by vision
     pipeline.py            generate | recompose | regenerate_image; slides in parallel
-    imagegen/              provider interface + two candidates + mock
+    imagegen/              provider interface: fal | replicate | bfl (FLUX) + mock
     compose.py             headless Chromium, one long-lived browser
+    reel.py                photo -> 7s vertical reel (Ken Burns + card), MP4 via ffmpeg
   memory/
     embed.py               Voyage embeddings, brand_memory only
     retrieve.py            cosine search, optional precomputed vector
     grounding.py           the three lanes the brief contract names
+  inbox/
+    router.py              /webhooks/instagram: verify, persist, enqueue
+    service.py             comment/DM -> drafted reply -> owner taps Send/Edit/Skip
   integrations/
     instagram/             STUBBED behind INSTAGRAM_MOCK; four real signatures
     stt/                   elevenlabs | deepgram | sarvam | mock
@@ -72,7 +76,8 @@ templates/creative/        centered_overlay | lower_third | split_card
 docs/brief_schema.json     the canonical brief contract
 scripts/
   stt_bakeoff.py           scores product-name recall, not WER
-  milestone1_smoke.py      the whole path, every vendor stubbed
+  journey_smoke.py         the whole path, every vendor stubbed
+  creative_preview.py      every template over a busy background, for design QA
 ```
 
 ## Run it
@@ -86,7 +91,9 @@ make worker                  # in another shell
 ```
 
 With `WA_PROVIDER=mock`, `STT_PROVIDER=mock` and `IMAGEGEN_PROVIDER=mock` the
-whole product runs with no vendor accounts at all:
+whole product runs with no vendor accounts at all. It still needs a Postgres
+with the `vector` extension -- `DATABASE_URL` defaults to a local one -- and
+`alembic upgrade head` run against it first. Redis is optional for the smoke:
 
 ```bash
 make smoke     # the full client journey; writes out/journey_*.png
@@ -120,9 +127,11 @@ decision most likely to be wrong if you choose on vendor benchmarks.
 
 - `ANTHROPIC_MODEL` — copy the exact id from the console; the app refuses to
   start the agent without it rather than guessing.
-- `ProviderA.ENDPOINT` / `ProviderB.ENDPOINT` in `creative/imagegen/providers.py`
-  — fill in for your two candidates. A wrong payload shape here fails silently
-  as a blank background, so it is left explicit rather than guessed.
+- Which image vendor to pay. `IMAGEGEN_PROVIDER` defaults to `mock`; set it
+  to `fal`, `replicate` or `bfl` together with that vendor's key. All three
+  serve FLUX; the adapters in `creative/imagegen/providers.py` follow each
+  vendor's published contract, retry only the submit, and refuse a blank or
+  unreadable picture rather than compositing over it.
 - The HNSW index on `brand_memory.embedding`. On an empty table a sequential
   scan is faster. The exact statement is in `migrations/versions/0001_initial.py`;
   run it once you have a few thousand rows.

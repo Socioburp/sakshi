@@ -36,6 +36,22 @@ SCOPES = [
     "instagram_business_basic",
     "instagram_business_content_publish",
 ]
+# Insights need their own permission, granted by App Review. Asking for it
+# before it is approved fails the whole login dialog, so the connect link
+# adds it only once IG_INSIGHTS_ENABLED says it can be granted.
+INSIGHTS_SCOPE = "instagram_business_manage_insights"
+# Replying to comments and DMs. Both need App Review, so they join the connect
+# link only once IG_ENGAGEMENT_ENABLED says they are granted.
+ENGAGEMENT_SCOPES = ("instagram_business_manage_comments", "instagram_business_manage_messages")
+
+
+def requested_scopes() -> list[str]:
+    scopes = list(SCOPES)
+    if settings.instagram_mock or settings.ig_insights_enabled:
+        scopes.append(INSIGHTS_SCOPE)
+    if settings.instagram_mock or settings.ig_engagement_enabled:
+        scopes.extend(ENGAGEMENT_SCOPES)
+    return scopes
 
 
 @dataclass(slots=True)
@@ -69,7 +85,7 @@ def authorize_url(state: str) -> str:
         {
             "client_id": settings.ig_app_id,
             "redirect_uri": settings.ig_redirect_uri,
-            "scope": ",".join(SCOPES),
+            "scope": ",".join(requested_scopes()),
             "response_type": "code",
             "state": state,
         }
@@ -120,6 +136,51 @@ async def exchange_code_for_token(code: str) -> IgToken:
         )
 
 
+async def refresh_long_lived_token(access_token: str) -> IgToken:
+    """Long-lived tokens last 60 days and can be refreshed once past 24h old.
+
+    Nothing refreshed them before, so every connection silently died on day
+    60 and the publish tool kept retrying a dead token.
+    """
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="refresh_long_lived_token")
+        t = fixtures.MOCK_TOKEN
+        return IgToken(t["access_token"], t["user_id"], fixtures.mock_token_expiry())
+
+    async with _client() as c:
+        r = await c.get(
+            f"{GRAPH}/refresh_access_token",
+            params={"grant_type": "ig_refresh_token", "access_token": access_token},
+        )
+        r.raise_for_status()
+        j = r.json()
+        return IgToken(
+            access_token=j["access_token"],
+            user_id="",
+            expires_at=datetime.now(UTC) + timedelta(seconds=j.get("expires_in", 5184000)),
+        )
+
+
+# Meta labels most Graph errors "OAuthException" -- invalid parameter, rate
+# limit, bad aspect ratio -- so the type alone would disconnect an account
+# over a rejected image. Only these codes mean the token itself is dead.
+_DEAD_TOKEN_CODES = {190, 102}
+
+
+def is_auth_error(exc: BaseException) -> bool:
+    """True when Meta says the token is invalid or expired (error code 190/102)."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    if exc.response.status_code not in (400, 401):
+        return False
+    try:
+        body = exc.response.json()
+    except ValueError:
+        return False
+    err = body.get("error") if isinstance(body, dict) else None
+    return isinstance(err, dict) and err.get("code") in _DEAD_TOKEN_CODES
+
+
 # --------------------------------------------------------------------------- #
 # 2/4
 # --------------------------------------------------------------------------- #
@@ -128,8 +189,12 @@ async def get_profile(access_token: str) -> IgProfile:
         log.info("ig_mock", fn="get_profile")
         p = fixtures.MOCK_PROFILE
         return IgProfile(
-            p["user_id"], p["username"], p["name"], p["account_type"],
-            p["followers_count"], p["media_count"],
+            p["user_id"],
+            p["username"],
+            p["name"],
+            p["account_type"],
+            p["followers_count"],
+            p["media_count"],
         )
 
     async with _client() as c:
@@ -172,8 +237,12 @@ async def create_media_container(
     ignored, which is worse than an error because the post ships captionless.
     """
     if settings.instagram_mock:
-        log.info("ig_mock", fn="create_media_container", image_url=image_url,
-                 is_carousel_item=is_carousel_item)
+        log.info(
+            "ig_mock",
+            fn="create_media_container",
+            image_url=image_url,
+            is_carousel_item=is_carousel_item,
+        )
         if is_carousel_item:
             return fixtures.mock_child_container_id()
         return fixtures.MOCK_CONTAINER_ID
@@ -190,6 +259,41 @@ async def create_media_container(
     if alt_text:
         payload["alt_text"] = alt_text[:300]
 
+    async with _client() as c:
+        r = await c.post(f"{GRAPH}/{ig_user_id}/media", data=payload)
+        r.raise_for_status()
+        return r.json()["id"]
+
+
+async def create_reel_container(
+    *,
+    ig_user_id: str,
+    access_token: str,
+    video_url: str,
+    caption: str = "",
+    cover_url: str | None = None,
+    share_to_feed: bool = True,
+) -> str:
+    """A Reel from a public MP4 (H.264/AAC, moov first, 3s-15min, <=300MB).
+
+    Meta fetches `video_url` and transcodes it, so the container takes longer
+    than an image's to reach FINISHED -- poll with a longer timeout. The
+    cover is the designed still, so the grid shows the card, not a frame
+    chosen by Meta.
+    """
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="create_reel_container", video_url=video_url)
+        return fixtures.MOCK_REEL_CONTAINER_ID
+
+    payload: dict[str, str] = {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": caption[:2200],
+        "share_to_feed": "true" if share_to_feed else "false",
+        "access_token": access_token,
+    }
+    if cover_url:
+        payload["cover_url"] = cover_url
     async with _client() as c:
         r = await c.post(f"{GRAPH}/{ig_user_id}/media", data=payload)
         r.raise_for_status()
@@ -220,9 +324,12 @@ async def create_carousel_container(
         return r.json()["id"]
 
 
-async def wait_for_container(
-    *, container_id: str, access_token: str, timeout_s: int = 60
-) -> str:
+# Video containers transcode on Meta's side; a 7-second reel has taken over a
+# minute in practice, so they get a longer wait than an image's.
+REEL_CONTAINER_TIMEOUT_S = 300
+
+
+async def wait_for_container(*, container_id: str, access_token: str, timeout_s: int = 60) -> str:
     """Poll status_code until FINISHED. Meta rejects publish on IN_PROGRESS."""
     if settings.instagram_mock:
         return "FINISHED"
@@ -267,16 +374,91 @@ async def publish_container(
         return IgPublishResult(media_id=media_id, permalink=permalink)
 
 
+# --------------------------------------------------------------------------- #
+# comments and messages (Track A, replies)
+# --------------------------------------------------------------------------- #
+async def reply_to_comment(*, comment_id: str, access_token: str, message: str) -> str:
+    """Public reply under a comment. `POST /{ig-comment-id}/replies`. Text only.
+
+    Returns the new comment's id.
+    """
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="reply_to_comment", comment_id=comment_id)
+        return fixtures.mock_reply_id()
+    async with _client() as c:
+        r = await c.post(
+            f"{GRAPH}/{comment_id}/replies",
+            data={"message": message[:2200], "access_token": access_token},
+        )
+        r.raise_for_status()
+        return str(r.json()["id"])
+
+
+async def hide_comment(*, comment_id: str, access_token: str, hidden: bool = True) -> None:
+    """Hide (or unhide) a comment. `POST /{ig-comment-id}?hide=true`."""
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="hide_comment", comment_id=comment_id, hidden=hidden)
+        return
+    async with _client() as c:
+        r = await c.post(
+            f"{GRAPH}/{comment_id}",
+            data={"hide": "true" if hidden else "false", "access_token": access_token},
+        )
+        r.raise_for_status()
+
+
+async def send_dm(
+    *,
+    ig_user_id: str,
+    access_token: str,
+    recipient_id: str | None = None,
+    comment_id: str | None = None,
+    text: str,
+) -> str:
+    """Send a direct message. `POST /{ig-id}/messages`.
+
+    `recipient_id` replies inside an existing DM thread (the 24h window rules
+    apply). `comment_id` sends a private reply to a public comment, which
+    opens a thread even if the person has never messaged the account. Exactly
+    one of the two is required. Returns the message id.
+    """
+    if not (recipient_id or comment_id) or (recipient_id and comment_id):
+        raise ValueError("send_dm needs exactly one of recipient_id or comment_id")
+    if settings.instagram_mock:
+        log.info("ig_mock", fn="send_dm", recipient_id=recipient_id, comment_id=comment_id)
+        return fixtures.mock_message_id()
+    recipient = {"id": recipient_id} if recipient_id else {"comment_id": comment_id}
+    async with _client() as c:
+        r = await c.post(
+            f"{GRAPH}/{ig_user_id}/messages",
+            json={
+                "recipient": recipient,
+                "message": {"text": text[:1000]},
+                "access_token": access_token,
+            },
+        )
+        r.raise_for_status()
+        return str(r.json().get("message_id") or r.json().get("id") or "")
+
+
 __all__ = [
     "exchange_code_for_token",
     "get_profile",
     "create_media_container",
     "create_carousel_container",
+    "create_reel_container",
     "publish_container",
+    "reply_to_comment",
+    "hide_comment",
+    "send_dm",
     "wait_for_container",
+    "refresh_long_lived_token",
+    "is_auth_error",
     "authorize_url",
     "IgToken",
     "IgProfile",
     "IgPublishResult",
     "SCOPES",
+    "INSIGHTS_SCOPE",
+    "requested_scopes",
 ]

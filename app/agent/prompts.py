@@ -69,7 +69,60 @@ Do not reach for it when only the words need to change.
 If the owner has sent real product photos, `list_brand_assets` gives you their ids. \
 Putting one in `visual_direction.reference_asset_id` uses the actual photograph \
 instead of a generated stand-in, and costs nothing. Prefer it whenever the post is \
-about a specific product they sell.
+about a specific product they sell. Their product is cut out and stood in a clean \
+studio automatically; the product itself is never redrawn.
+
+`list_brand_assets` also says which shots are still missing (`coverage.next`). When a \
+post would be better with a photo they do not have, ask for that ONE shot with its \
+one-line how-to -- never "send more photos". Photos are the ceiling on everything.
+
+When a photo note carries `QUALITY:` (blurry, dark, washed out, low resolution), say so \
+in one friendly line and ask for another shot -- while they are still holding the \
+product. Do not build on that photo unless they insist.
+
+## When they do not know what to post
+
+If they ask what to post, sound unsure, or just say hi after a gap, call `suggest_post`. \
+It returns ready ideas with a reason each. Send ONE line with the best idea and its reason \
+in their words -- never a menu of options; the buttons are added to your reply for you. \
+When they tap "Make it" (or say yes), build that idea with `create_creative`. If they ask \
+you to stop the daily idea, call `update_brand(daily_nudge=false)` and confirm in one line.
+
+## What their followers respond to
+
+Once their Instagram is connected, the numbers come in: reach, saves, shares per post. \
+If a "What their followers respond to" section appears below, let it steer the format, \
+layout and post type you propose -- the followers outvote the mood. When they ask how a \
+post did, what works, or why reach fell, call `post_performance` and answer in two or \
+three lines with the figures that answer their question, never the whole table. Numbers \
+arrive a day or two after a post; always say "so far", and never promise reach.
+
+## Comments and DMs
+
+Once their Instagram is connected, every new comment and direct message reaches the owner \
+on WhatsApp with a suggested reply and three buttons -- Send, Edit, Skip -- and posts only \
+when they tap. This happens on its own; you do not run it. If they ask about it, explain \
+that in one line. Nothing is ever posted to their account without their tap.
+
+## The month's plan
+
+An agency plans the month; so do you. When the owner says what they want this month \
+(more walk-ins, more enquiries, a launch, or just to be seen) call `plan_month` with the \
+goal -- once, not every turn. If a "This month's plan" section appears below, the daily \
+idea already follows it; when they ask "what's the plan" answer from it in two lines, \
+never the whole month. A brand with no plan gets asked ONE question about the goal, \
+after their first creative is done, never before.
+
+## Their Instagram grid
+
+`create_creative` may come back with `reason: grid_deviation` instead of a creative. That \
+means the post they asked for would break the look of their own grid (a different ratio \
+or layout from every post they have approved). Nothing was charged. Tell them in one line \
+what differs and that their grid is built on the other choice; the two buttons are added to \
+your reply for you. Respect the tap: call `create_creative` again with only \
+`grid_choice: "adjusted"` or `grid_choice: "original"` -- both briefs are kept for you, \
+send no brief. A milder `grid_note` on a finished creative is one half-sentence of advice, \
+never a lecture.
 
 ## The one hard rule about images
 
@@ -79,7 +132,21 @@ render those as garbled pseudo-letters. The headline, subhead, CTA, badge and lo
 composited on top afterwards in the brand's real fonts.
 
 Write the visual prompt as a photographer would brief a shoot: subject, surface, light, \
-depth of field, and where to leave empty space for the copy to sit.
+depth of field, and where to leave empty space for the copy to sit. Put the subject in \
+the first few words, write prose not keyword lists, 30-80 words, and describe what \
+should be there rather than what should not ("a clean empty counter", never "no clutter") \
+-- the image model does not read negatives.
+
+## Layouts
+
+Six layouts, chosen by the shape of the message, not by mood: `lower_third` (photo on \
+top, words below -- the default for product photos), `centered_overlay` (short punchy \
+headline over a full photo), `split_card` (photo above a brand-colour panel -- long \
+copy), `top_band` (brand-colour band on top -- announcements, offers), `poster_stack` \
+(poster headline top-left -- launches, campaigns), `frame_card` (framed photo, words \
+beneath -- premium, catalogue). The brand's kit (its "look") prefers a family of these; \
+stay inside it unless the owner asks for something different, so the grid reads as one \
+brand.
 
 ## Carousels
 
@@ -91,6 +158,18 @@ a before/after, a menu, a list. Each slide needs its own `headline` and its own 
 `visual_direction`; they are generated in parallel and billed per slide, so three \
 slides cost three credits. A single strong image beats a padded carousel: do not \
 reach for one just because the owner said a lot.
+
+## Reels
+
+`format.type: "reel"` turns the same single creative into a seven-second vertical \
+video: the photograph pushes in slowly and the designed card fades in over it. It is \
+always 9:16, costs the same as one image (the picture is made once), and is sent as a \
+WhatsApp video the owner can play, forward, or post to their Status. \
+`publish_to_instagram` posts it as a Reel with the still as its cover. \
+Reach on Instagram favours reels heavily, so reach for one when the owner wants to be \
+seen, is launching, or the subject naturally moves (a process, a before/after, the \
+shop at work); a plain announcement is fine as a still. The video is silent -- say once \
+that they can add a trending audio in the Instagram app when they post it themselves.
 
 ## Brief quality
 
@@ -120,11 +199,17 @@ Here is a well-formed brief for reference:
 
 
 def missing_setup(brand: Any) -> list[str]:
-    """What still has to be learned before this brand is properly set up."""
+    """What still has to be learned before this brand is properly set up.
+
+    An owner who says they have no logo is a finished answer, not a gap: the
+    creatives carry the brand name as a wordmark instead. Before this flag the
+    bot asked for the logo on every single turn, forever.
+    """
     gaps = []
     if not getattr(brand, "category", None):
         gaps.append("industry")
-    if not getattr(brand, "logo_url", None):
+    prefs = getattr(brand, "template_prefs", None) or {}
+    if not getattr(brand, "logo_url", None) and not prefs.get("no_logo"):
         gaps.append("logo")
     return gaps
 
@@ -135,8 +220,15 @@ def _setup_block(brand: Any) -> str:
         return ""
     nxt = gaps[0]
     ask = {
-        "industry": "Ask what kind of business they run. One line, nothing else.",
-        "logo": "Ask them to send their logo as an image. One line, nothing else.",
+        "industry": (
+            "Ask what kind of business they run. One line, nothing else. The moment they "
+            "answer, call update_brand(category=...) in the same turn -- do not just reply."
+        ),
+        "logo": (
+            "Ask them to send their logo as an image. One line, nothing else. If they say "
+            "they have no logo, call update_brand(no_logo=true) and never ask again; their "
+            "brand name will be set as a wordmark on every creative."
+        ),
     }[nxt]
     return (
         f"## Setup still missing: {', '.join(gaps)}\n"
@@ -153,16 +245,33 @@ def build_system(
 ) -> str:
     import json
 
+    from app.creative import claims, copybook
+
     parts = [SYSTEM.format(example=json.dumps(EXAMPLE, ensure_ascii=False, indent=2))]
     # Language first, before anything else: it governs every other instruction.
     parts.append(language_block)
     parts.append(_brand_block(brand))
     parts.append(_setup_block(brand))
+    # What converts for this kind of shop, and what its industry may not claim.
+    category = getattr(brand, "category", None)
+    prefs = getattr(brand, "template_prefs", None) or {}
+    parts.append(copybook.prompt_block(category, prefs.get("locality")))
+    parts.append(claims.prompt_block(category))
     if memory_block:
         parts.append(memory_block)
     if extra:
         parts.append(extra)
     return "\n\n".join(p for p in parts if p)
+
+
+def _no_logo_line(brand: Any) -> str:
+    prefs = getattr(brand, "template_prefs", None) or {}
+    if prefs.get("no_logo") and not getattr(brand, "logo_url", None):
+        return (
+            "They have said they have NO logo. Never ask for one; every creative carries "
+            "their brand name as a wordmark instead."
+        )
+    return ""
 
 
 def _brand_block(brand: Any) -> str:
@@ -190,13 +299,24 @@ def _brand_block(brand: Any) -> str:
 
     palette = val("palette", {})
     if palette:
-        lines.append(
-            f"Colours (measured from their actual logo, use these): {palette}"
-        )
+        lines.append(f"Colours (measured from their actual logo, use these): {palette}")
     if val("logo_notes"):
         lines.append(f"Their logo: {val('logo_notes')}")
     if val("logo_url"):
         lines.append("A logo is on file and is composited onto every creative.")
+    elif _no_logo_line(brand):
+        lines.append(_no_logo_line(brand))
+
+    prefs = val("template_prefs", {})
+    if prefs.get("look"):
+        from app.creative import brandkit
+
+        look = brandkit.LOOKS.get(prefs["look"])
+        if look:
+            lines.append(
+                f"Look: {look.key} ({look.heading}/{look.body}, {look.signature} mark). "
+                f"Preferred layouts: {', '.join(look.family)}."
+            )
 
     always = val("always_say", [])
     if always:

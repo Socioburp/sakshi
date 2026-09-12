@@ -10,19 +10,31 @@ from __future__ import annotations
 import asyncio
 import copy
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 
+from app.agent import buttons
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import pipeline
-from app.creative.brief import CreativeBrief, Grounding
+from app.creative import brandkit, pipeline
+from app.creative.brief import CreativeBrief, Grounding, check_brand_rules
 from app.db import repo
-from app.db.models import Brand, BrandAsset, Brief, Creative, IgAccount, Publication
+from app.db.models import (
+    Brand,
+    BrandAsset,
+    Brief,
+    ContentPlan,
+    Creative,
+    IgAccount,
+    Publication,
+    WaSession,
+)
 from app.db.session import session_scope
+from app.insights import events
 from app.integrations.instagram import client as ig
+from app.integrations.storage import r2
 from app.logging import get_logger
 from app.memory import embed as memory_embed
 from app.memory import retrieve as memory_retrieve
@@ -56,13 +68,88 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Turn the owner's request into a finished creative and send it to them on "
             "WhatsApp. Costs the owner 1 credit. Call this as soon as you know what is "
-            "being promoted -- do not gather every detail first."
+            "being promoted -- do not gather every detail first. May return "
+            "reason=grid_deviation (nothing charged) when the post would break the look of "
+            "their own grid; then ask them, and call again with grid_override or the "
+            "adjusted_brief."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"brief": BRIEF_SCHEMA},
-            "required": ["brief"],
+            "properties": {
+                "brief": BRIEF_SCHEMA,
+                "grid_choice": {
+                    "type": "string",
+                    "enum": ["adjusted", "original"],
+                    "description": (
+                        "After a grid_deviation, the owner's tap: 'adjusted' builds the "
+                        "grid-matching version, 'original' builds what they first asked for. "
+                        "The briefs are kept server-side; omit `brief` when using this."
+                    ),
+                },
+                "suggestion_rank": {
+                    "type": "integer",
+                    "description": "When building an idea from suggest_post: its rank.",
+                },
+            },
         },
+    },
+    {
+        "name": "plan_month",
+        "description": (
+            "Plan (or replan) this month's posts around a goal, or show the current plan. "
+            "Call it when the owner says what they want this month -- more walk-ins, more "
+            "enquiries, a launch, or just to be seen -- or asks what the plan is. Free. "
+            "The plan feeds the daily idea and the Monday line-up automatically."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "enum": ["footfall", "leads", "launch", "awareness"],
+                    "description": (
+                        "footfall = more walk-ins/orders (offer-heavy); leads = enquiries "
+                        "(proof + education); launch = a new product (teaser -> launch -> "
+                        "proof); awareness = be seen (balanced). Omit to just show the plan."
+                    ),
+                },
+                "cadence": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 7,
+                    "description": "Posts per week the owner will actually approve. Default 4.",
+                },
+                "launch": {
+                    "type": "string",
+                    "description": "The product being launched, when goal is launch.",
+                },
+                "next_month": {
+                    "type": "boolean",
+                    "description": "Plan next month instead of this one.",
+                },
+            },
+        },
+    },
+    {
+        "name": "suggest_post",
+        "description": (
+            "What should they post today? Returns up to 3 ready ideas, best first, each with "
+            "a reason a shop owner would accept (an upcoming festival, a product photo not "
+            "yet used, a how-to carousel, the day of the week) and a brief sketch. Free. "
+            "Use when they ask what to post, seem stuck, or return after a gap."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "post_performance",
+        "description": (
+            "How their posts did on Instagram (from Insights): reach, saves and shares per "
+            "post, which format, layout and post type perform, the best time so far, and "
+            "last week's numbers. Free, read-only. Use when they ask how a post did, what "
+            "works, why reach fell, or which post to repeat. Numbers arrive a day or two "
+            "after a post; say 'so far' and never promise reach."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "revise_creative",
@@ -96,7 +183,14 @@ TOOLS: list[dict[str, Any]] = [
                         },
                         "template_id": {
                             "type": "string",
-                            "enum": ["centered_overlay", "lower_third", "split_card"],
+                            "enum": [
+                                "centered_overlay",
+                                "lower_third",
+                                "split_card",
+                                "top_band",
+                                "poster_stack",
+                                "frame_card",
+                            ],
                         },
                         "slides": {
                             "type": "array",
@@ -132,8 +226,7 @@ TOOLS: list[dict[str, Any]] = [
                 "slide_position": {
                     "type": "integer",
                     "description": (
-                        "Carousel only: which slide's picture to redo. "
-                        "Omit for a single post."
+                        "Carousel only: which slide's picture to redo. Omit for a single post."
                     ),
                 },
             },
@@ -159,6 +252,37 @@ TOOLS: list[dict[str, Any]] = [
                 "languages": {"type": "array", "items": {"type": "string"}},
                 "never_say": {"type": "array", "items": {"type": "string"}},
                 "always_say": {"type": "array", "items": {"type": "string"}},
+                "no_logo": {
+                    "type": "boolean",
+                    "description": "True when the owner says they have no logo; stops the ask.",
+                },
+                "daily_nudge": {
+                    "type": "boolean",
+                    "description": (
+                        "False when the owner asks to stop the daily post idea; true to resume."
+                    ),
+                },
+                "substantiated": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Claims the owner can prove (a certificate, a study): e.g. "
+                        "['FSSAI licensed', 'ISO 9001']. Exempt from the industry claim guard."
+                    ),
+                },
+                "locality": {
+                    "type": "string",
+                    "description": "The area/neighbourhood the shop serves, e.g. 'Indiranagar'.",
+                },
+                "look": {
+                    "type": "string",
+                    "enum": ["clean", "editorial", "warm", "bold"],
+                    "description": (
+                        "The brand kit (type pairing + signature mark + layout family). "
+                        "Chosen from the category automatically; set only when the owner asks "
+                        "for a different feel."
+                    ),
+                },
                 "palette": {
                     "type": "object",
                     "properties": {
@@ -186,8 +310,14 @@ TOOLS: list[dict[str, Any]] = [
                 "kind": {
                     "type": "string",
                     "enum": [
-                        "product", "style_anchor", "rejection", "past_creative",
-                        "feedback", "campaign", "fact", "note",
+                        "product",
+                        "style_anchor",
+                        "rejection",
+                        "past_creative",
+                        "feedback",
+                        "campaign",
+                        "fact",
+                        "note",
                     ],
                 },
                 "content": {"type": "string"},
@@ -211,7 +341,9 @@ TOOLS: list[dict[str, Any]] = [
         "name": "connect_instagram",
         "description": (
             "Get the link the owner taps to connect their Instagram account. Send them "
-            "the link; they finish it in the browser."
+            "the link; they finish it in the browser. Connecting also lets Sakshi publish "
+            "for them, read their post numbers, and draft replies to new comments and DMs "
+            "for them to approve."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -286,8 +418,25 @@ async def dispatch(ctx: ToolContext, name: str, args: dict[str, Any]) -> dict[st
 
 
 async def _create_creative(ctx: ToolContext, args: dict) -> dict:
+    from app.creative import grid
+
+    grid_choice = args.get("grid_choice")
+    raw = args.get("brief")
+    if grid_choice:
+        # The two briefs were kept server-side when the choice was offered, so
+        # the model never has to reproduce a carousel from a truncated dump.
+        pending = _get_session_state(ctx, "grid_choice") or {}
+        raw = pending.get(grid_choice) or raw
+        if raw is None:
+            return {
+                "ok": False,
+                "reason": "no_pending_grid_choice",
+                "hint": "Nothing is waiting for a choice; call create_creative with a brief.",
+            }
+    if raw is None:
+        return {"ok": False, "reason": "invalid_brief", "error": "brief is required"}
     try:
-        brief = CreativeBrief.model_validate(args["brief"])
+        brief = CreativeBrief.model_validate(raw)
     except Exception as exc:  # noqa: BLE001
         # Handed straight back to the model, which usually fixes it on the next turn.
         return {"ok": False, "reason": "invalid_brief", "error": str(exc)[:800]}
@@ -297,7 +446,239 @@ async def _create_creative(ctx: ToolContext, args: dict) -> dict:
     # model-authored version records what it believed rather than what it was
     # given -- which is exactly backwards when a creative comes out wrong.
     brief.grounding = Grounding.model_validate(ctx.grounding.as_brief_grounding())
-    return await pipeline.generate(ctx, brief)
+
+    # The grid guard. A ratio or layout that breaks the look of every post they
+    # have approved is offered back as a choice BEFORE a credit is spent. Mood
+    # or headline drift is advice on the finished creative, not a stop.
+    note = None
+    try:
+        with session_scope() as db:
+            note = grid.check(grid.fingerprint(db, ctx.brand_id), brief)
+    except Exception:  # noqa: BLE001 - a guard that fails must not block the creative
+        log.exception("grid_check_failed", brand_id=str(ctx.brand_id))
+    if note and note.severity >= 1 and not grid_choice:
+        original = brief.model_dump(mode="json")
+        adjusted = grid.adjusted_payload(original, note.suggested_changes)
+        _set_session_state(ctx, "grid_choice", {"original": original, "adjusted": adjusted})
+        return {
+            "ok": False,
+            "reason": "grid_deviation",
+            "charged": 0,
+            "grid_note": note.as_dict(),
+            "adjusted_brief": adjusted,
+            "buttons": buttons.as_payload(["grid:adjusted", "grid:original"], _locale(ctx)),
+            "hint": (
+                "Tell them in ONE line what differs and that their grid is built on the other "
+                "choice. The two buttons are attached to your reply automatically. When they "
+                "tap, call create_creative with grid_choice='adjusted' or 'original' and no "
+                "brief."
+            ),
+        }
+    _set_session_state(ctx, "grid_choice", None)
+
+    # Read before generate clears them: the idea that was built may close a
+    # slot in the month's plan.
+    offered = _get_session_state(ctx, "suggestions") or [] if args.get("suggestion_rank") else []
+    result = await pipeline.generate(ctx, brief)
+    if result.get("ok"):
+        _set_session_state(ctx, "suggestions", None)
+        if note:
+            result["grid_note"] = note.as_dict()
+        if args.get("suggestion_rank"):
+            with session_scope() as db:
+                events.record(
+                    db,
+                    kind="suggestion_taken",
+                    account_id=ctx.account_id,
+                    brand_id=ctx.brand_id,
+                    brief_id=result.get("brief_id"),
+                    meta={"rank": args["suggestion_rank"]},
+                )
+                # A built idea that came from the month's plan closes its slot.
+                try:
+                    idea = offered[int(args["suggestion_rank"]) - 1]
+                except (IndexError, ValueError, TypeError):
+                    idea = None
+                if isinstance(idea, dict) and idea.get("plan_slot"):
+                    from app.insights import plan as planning
+
+                    planning.mark(
+                        db,
+                        ctx.brand_id,
+                        idea["plan_slot"],
+                        status="made",
+                        brief_id=result.get("brief_id"),
+                    )
+    return result
+
+
+async def _plan_month(ctx: ToolContext, args: dict) -> dict:
+    from zoneinfo import ZoneInfo
+
+    from app.insights import plan as planning
+
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    month = planning.month_start(today)
+    if args.get("next_month"):
+        month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+    with session_scope() as db:
+        brand = db.get(Brand, ctx.brand_id)
+        if brand is None:
+            return {"ok": False, "reason": "unknown_brand"}
+        goal = args.get("goal")
+        if goal:
+            row = planning.build(
+                db,
+                brand,
+                month,
+                goal=goal,
+                cadence=int(args.get("cadence") or 4),
+                launch=(args.get("launch") or None),
+            )
+            built = True
+        else:
+            row = db.scalar(
+                select(ContentPlan).where(
+                    ContentPlan.brand_id == brand.id, ContentPlan.month == month
+                )
+            )
+            built = False
+        if row is None:
+            return {
+                "ok": True,
+                "plan": None,
+                "hint": (
+                    "No plan yet. Ask ONE question: what do they want this month -- more "
+                    "walk-ins, more enquiries, a launch, or to be seen -- then call plan_month "
+                    "with the goal."
+                ),
+            }
+        summary = planning.describe(row)
+        week = planning.week_of(row, today)
+    return {
+        "ok": True,
+        "built": built,
+        "plan": summary,
+        "this_week": [
+            {"date": s["date"], "idea": s["headline_idea"], "status": s["status"]} for s in week
+        ],
+        "hint": (
+            "Tell them in one or two lines: the goal, how many posts a week, and the next "
+            "post. Never list the whole month. Each planned day becomes the daily idea "
+            "automatically; when they tap Make it, build it with create_creative."
+        ),
+    }
+
+
+async def _suggest_post(ctx: ToolContext, args: dict) -> dict:
+    from app.insights import suggest as sg
+
+    with session_scope() as db:
+        brand = db.get(Brand, ctx.brand_id)
+        ideas = sg.suggest(db, brand)
+        sg.record_suggested(db, brand, ideas)
+    payload = [i.as_dict() for i in ideas]
+    _set_session_state(ctx, "suggestions", payload)
+    return {
+        "ok": True,
+        "ideas": payload,
+        "buttons": buttons.as_payload(["make:1", "next", "skip"], _locale(ctx)),
+        "note": (
+            "Send ONE line: idea #1 and its reason, in their language. The three buttons are "
+            "attached to your reply automatically. Do not list all ideas."
+        ),
+    }
+
+
+async def _post_performance(ctx: ToolContext, args: dict) -> dict:
+    from app.insights import performance
+    from app.integrations.instagram import insights
+
+    with session_scope() as db:
+        connected = db.scalar(
+            select(IgAccount)
+            .where(IgAccount.brand_id == ctx.brand_id, IgAccount.status == "connected")
+            .limit(1)
+        )
+        if connected is None:
+            return {
+                "ok": False,
+                "reason": "instagram_not_connected",
+                "hint": "Numbers come from their Instagram account; offer connect_instagram.",
+            }
+        if not insights.can_read_insights(connected.scopes):
+            if ig.settings.ig_insights_enabled:
+                return {
+                    "ok": False,
+                    "reason": "insights_permission_missing",
+                    "hint": (
+                        "Their Instagram was connected before numbers could be read. Offer "
+                        "connect_instagram once more, in one line, so the numbers start."
+                    ),
+                }
+            return {
+                "ok": False,
+                "reason": "insights_not_enabled",
+                "hint": "Post numbers are not switched on yet. Say they are coming; no figures.",
+            }
+        data = performance.summary(db, ctx.brand_id)
+    if data["posts"] == 0:
+        return {
+            "ok": True,
+            **data,
+            "hint": (
+                "No numbers yet. Say so in one line: they arrive a day or two after a post "
+                "goes up. Do not invent figures."
+            ),
+        }
+    early = (
+        f"Fewer than {performance.MIN_POSTS} posts have numbers: call it early days."
+        if not data["enough"]
+        else ""
+    )
+    return {
+        "ok": True,
+        **data,
+        "hint": (
+            "Answer in two or three lines with the numbers that answer THEIR question -- the "
+            "best post and why, or the format/layout that works -- not the whole table. " + early
+        ).strip(),
+    }
+
+
+def _locale(ctx: ToolContext) -> str | None:
+    from app.db.models import Account
+
+    with session_scope() as db:
+        acct = db.get(Account, ctx.account_id)
+        return acct.locale if acct else None
+
+
+def _get_session_state(ctx: ToolContext, key: str):
+    if not ctx.session_id:
+        return None
+    with session_scope() as db:
+        sess = db.get(WaSession, ctx.session_id)
+        return (sess.state or {}).get(key) if sess is not None else None
+
+
+def _set_session_state(ctx: ToolContext, key: str, value) -> None:
+    """Small facts the next turn needs (offered ideas, a pending grid choice)."""
+    if not ctx.session_id:
+        return
+    try:
+        with session_scope() as db:
+            sess = db.get(WaSession, ctx.session_id)
+            if sess is None:
+                return
+            state = dict(sess.state or {})
+            if value is None:
+                state.pop(key, None)
+            else:
+                state[key] = value
+            sess.state = state
+    except Exception:  # noqa: BLE001
+        log.exception("session_state_failed", key=key)
 
 
 async def _revise_creative(ctx: ToolContext, args: dict) -> dict:
@@ -317,8 +698,21 @@ async def _regenerate_image(ctx: ToolContext, args: dict) -> dict:
 
 async def _update_brand(ctx: ToolContext, args: dict) -> dict:
     settable = {
-        "name", "category", "tagline", "description", "target_audience", "tone",
-        "languages", "never_say", "always_say", "palette",
+        "name",
+        "category",
+        "tagline",
+        "description",
+        "target_audience",
+        "tone",
+        "languages",
+        "never_say",
+        "always_say",
+        "palette",
+        "no_logo",
+        "daily_nudge",
+        "substantiated",
+        "locality",
+        "look",
     }
     with session_scope() as db:
         brand = db.get(Brand, ctx.brand_id)
@@ -326,7 +720,17 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         for key, value in args.items():
             if key not in settable or value in (None, "", [], {}):
                 continue
-            if key in ("never_say", "always_say", "languages"):
+            if key in ("no_logo", "daily_nudge"):
+                brand.template_prefs = {**(brand.template_prefs or {}), key: bool(value)}
+            elif key == "substantiated":
+                have = list((brand.template_prefs or {}).get("substantiated") or [])
+                merged = list(dict.fromkeys([*have, *[str(v)[:80] for v in value]]))[:20]
+                brand.template_prefs = {**(brand.template_prefs or {}), key: merged}
+            elif key == "locality":
+                brand.template_prefs = {**(brand.template_prefs or {}), key: str(value)[:80]}
+            elif key == "look":
+                brandkit.apply(brand, str(value))
+            elif key in ("never_say", "always_say", "languages"):
                 merged = list(dict.fromkeys([*(getattr(brand, key) or []), *value]))
                 setattr(brand, key, merged)
             elif key == "palette":
@@ -334,14 +738,17 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
             else:
                 setattr(brand, key, value)
             changed.append(key)
+        # The category decides the brand kit the first time it is known: a
+        # bakery and a jeweller must not share a typeface by default.
+        if "category" in changed and not (brand.template_prefs or {}).get("look"):
+            look = brandkit.apply(brand)
+            changed.append(f"look={look.key}")
     return {"ok": True, "updated": changed}
 
 
 async def _remember(ctx: ToolContext, args: dict) -> dict:
     with session_scope() as db:
-        memory_embed.remember(
-            db, brand_id=ctx.brand_id, kind=args["kind"], content=args["content"]
-        )
+        memory_embed.remember(db, brand_id=ctx.brand_id, kind=args["kind"], content=args["content"])
     return {"ok": True, "stored": args["content"][:120]}
 
 
@@ -353,14 +760,15 @@ async def _recall(ctx: ToolContext, args: dict) -> dict:
         return {
             "ok": True,
             "results": [
-                {"kind": m.kind, "content": m.content, "similarity": round(s, 3)}
-                for m, s in hits
+                {"kind": m.kind, "content": m.content, "similarity": round(s, 3)} for m, s in hits
             ],
         }
 
 
 async def _connect_instagram(ctx: ToolContext, args: dict) -> dict:
-    url = ig.authorize_url(state=str(ctx.account_id))
+    from app.integrations.instagram.oauth import sign_state
+
+    url = ig.authorize_url(state=sign_state(ctx.account_id))
     return {
         "ok": True,
         "connect_url": url,
@@ -387,7 +795,8 @@ async def _request_approval(ctx: ToolContext, args: dict) -> dict:
         text,
         buttons=[
             Button(id=f"approve:{brief_id}", title="Post to Instagram"),
-            Button(id=f"revise:{brief_id}", title="Change something"),
+            Button(id=f"revise:{brief_id}", title="Change the words"),
+            Button(id=f"redo:{brief_id}", title="Change the picture"),
         ],
     )
     return {
@@ -395,7 +804,9 @@ async def _request_approval(ctx: ToolContext, args: dict) -> dict:
         "awaiting": "client_tap",
         "note": (
             "Buttons sent. Stop here and wait -- do not call publish_to_instagram until "
-            "they have actually tapped. Say nothing further this turn."
+            "they have actually tapped. Say nothing further this turn. When they tap "
+            "'Change the words' use revise_creative (free); 'Change the picture' means "
+            "regenerate_image (1 credit) -- confirm the cost in one line first."
         ),
     }
 
@@ -413,11 +824,26 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
 
     with session_scope() as db:
         if brief_id:
-            creatives = repo.creatives_for_brief(db, uuid.UUID(brief_id))
+            all_rows = repo.creatives_for_brief(db, uuid.UUID(brief_id))
         else:
             one = db.get(Creative, uuid.UUID(creative_id))
-            creatives = repo.creatives_for_brief(db, one.brief_id) if one else []
-        creatives = [c for c in creatives if c.status in ("ready", "approved")]
+            all_rows = repo.creatives_for_brief(db, one.brief_id) if one else []
+        # A carousel with a failed slide must not ship with the survivors: the
+        # pips say six, the post has five, and the CTA may be on the missing
+        # one. The failed slide can be redone alone now, for one credit.
+        broken = [c.slide_position for c in all_rows if c.status == "failed"]
+        if broken and len(all_rows) > 1:
+            return {
+                "ok": False,
+                "reason": "carousel_has_failed_slides",
+                "failed_slides": broken,
+                "hint": (
+                    "Call regenerate_image ONCE with slide_position set to any failed slide: "
+                    "every failed slide is redone in that one call (1 credit each) and the "
+                    "good slides keep their pictures. Then request_approval again."
+                ),
+            }
+        creatives = [c for c in all_rows if c.status in ("ready", "approved")]
         if not creatives:
             return {"ok": False, "reason": "creative_not_ready"}
 
@@ -451,11 +877,28 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
             }
 
         caption = args.get("caption") or brief.caption.rendered() or brief.headline
+        if args.get("caption"):
+            # The model's own caption goes to Instagram too; the never_say gate
+            # covered the brief's caption but not this override.
+            override = CreativeBrief.model_validate(
+                {
+                    **brief.model_dump(mode="json"),
+                    "caption": {**brief.caption.model_dump(), "body": args["caption"]},
+                }
+            )
+            brand_row = db.get(Brand, ctx.brand_id)
+            violations = check_brand_rules(override, brand_row)
+            if violations:
+                return {"ok": False, "reason": "never_say_violation", "violations": violations}
+            blocked = pipeline.claim_gate(override, brand_row)
+            if blocked:
+                return blocked
         is_carousel = len(creatives) > 1
+        is_reel = bool(creatives[0].video_url) and not is_carousel
         pub = Publication(
             creative_id=creatives[0].id,
             ig_account_id=ig_row.id,
-            media_type="CAROUSEL" if is_carousel else "IMAGE",
+            media_type="CAROUSEL" if is_carousel else "REELS" if is_reel else "IMAGE",
             caption=caption,
             hashtags=brief.caption.hashtags,
             alt_text=brief.alt_text,
@@ -464,8 +907,25 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         db.add(pub)
         db.flush()
         pub_id, token, ig_user_id = pub.id, ig_row.access_token, ig_row.ig_user_id
+        ig_row_id, token_expires_at = ig_row.id, ig_row.token_expires_at
         urls = [c.composed_url for c in creatives]
+        video_url, video_key = creatives[0].video_url, creatives[0].video_key
         creative_ids = [c.id for c in creatives]
+        composed_keys = [c.composed_key for c in creatives]
+        first_brief_id = creatives[0].brief_id
+
+    # Long-lived tokens die at 60 days. Refresh when inside the last week, so a
+    # connection made in January still posts in April.
+    if token_expires_at and token_expires_at - datetime.now(UTC) < timedelta(days=7):
+        try:
+            fresh = await ig.refresh_long_lived_token(token)
+            with session_scope() as db:
+                row = db.get(IgAccount, ig_row_id)
+                row.access_token, row.token_expires_at = fresh.access_token, fresh.expires_at
+            token = fresh.access_token
+            log.info("ig_token_refreshed", ig_account_id=str(ig_row_id))
+        except Exception:  # noqa: BLE001 - try the publish anyway; a dead token is caught below
+            log.exception("ig_token_refresh_failed", ig_account_id=str(ig_row_id))
 
     try:
         if is_carousel:
@@ -490,6 +950,14 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
                 children=list(children),
                 caption=caption,
             )
+        elif is_reel:
+            container_id = await ig.create_reel_container(
+                ig_user_id=ig_user_id,
+                access_token=token,
+                video_url=video_url,
+                caption=caption,
+                cover_url=urls[0],
+            )
         else:
             container_id = await ig.create_media_container(
                 ig_user_id=ig_user_id,
@@ -498,7 +966,11 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
                 caption=caption,
                 alt_text=brief.alt_text,
             )
-        await ig.wait_for_container(container_id=container_id, access_token=token)
+        await ig.wait_for_container(
+            container_id=container_id,
+            access_token=token,
+            timeout_s=ig.REEL_CONTAINER_TIMEOUT_S if is_reel else 60,
+        )
         result = await ig.publish_container(
             ig_user_id=ig_user_id, access_token=token, container_id=container_id
         )
@@ -506,7 +978,37 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         with session_scope() as db:
             p = db.get(Publication, pub_id)
             p.status, p.error = "failed", str(exc)[:2000]
+            if ig.is_auth_error(exc):
+                # Stop retrying a dead token; tell the owner to reconnect once.
+                db.get(IgAccount, ig_row_id).status = "disconnected"
+        if ig.is_auth_error(exc):
+            return {
+                "ok": False,
+                "reason": "instagram_reconnect_required",
+                "hint": (
+                    "Instagram no longer accepts this account's login. Call "
+                    "connect_instagram and send the owner the link, in one line."
+                ),
+            }
         return {"ok": False, "reason": "publish_failed", "error": str(exc)[:200]}
+
+    # Out of the expiring prefix. Drafts are swept after DRAFT_TTL_DAYS; a
+    # published post's image must keep resolving for as long as the post
+    # exists -- Instagram has its own copy, but our permalink records do not.
+    promoted: dict[uuid.UUID, str] = {}
+    for cid, key in zip(creative_ids, composed_keys, strict=True):
+        if key and key.startswith("drafts/"):
+            try:
+                # boto3 is sync; a six-slide carousel must not stall the loop.
+                promoted[cid] = await asyncio.to_thread(r2.promote, key)
+            except Exception:  # noqa: BLE001 - the post is live; log and move on
+                log.exception("r2_promote_failed", creative_id=str(cid), key=key)
+    promoted_video: str | None = None
+    if is_reel and video_key and video_key.startswith("drafts/"):
+        try:
+            promoted_video = await asyncio.to_thread(r2.promote, video_key)
+        except Exception:  # noqa: BLE001
+            log.exception("r2_promote_failed", creative_id=str(creative_ids[0]), key=video_key)
 
     with session_scope() as db:
         p = db.get(Publication, pub_id)
@@ -516,12 +1018,27 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         p.status = "published"
         p.published_at = datetime.now(UTC)
         for cid in creative_ids:
-            db.get(Creative, cid).status = "published"
+            row = db.get(Creative, cid)
+            row.status = "published"
+            if cid in promoted:
+                row.composed_key = row.composed_key.replace("drafts/", "published/", 1)
+                row.composed_url = promoted[cid]
+            if promoted_video and cid == creative_ids[0]:
+                row.video_key = row.video_key.replace("drafts/", "published/", 1)
+                row.video_url = promoted_video
+        events.record_for_brief(
+            db, kind="publish", brief_id=first_brief_id, meta={"permalink": result.permalink}
+        )
+    # Its numbers, once Meta has them (up to 48h): reach, saves, shares.
+    from app.insights import performance
+
+    performance.schedule_after_publish(ctx.brand_id, result.media_id)
     return {
         "ok": True,
         "permalink": result.permalink,
         "media_id": result.media_id,
         "slides": len(urls),
+        "media_type": "REELS" if is_reel else "CAROUSEL" if is_carousel else "IMAGE",
     }
 
 
@@ -534,6 +1051,8 @@ async def _check_credits(ctx: ToolContext, args: dict) -> dict:
 
 
 async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
+    from app.creative import shotlist
+
     with session_scope() as db:
         rows = db.scalars(
             select(BrandAsset)
@@ -541,16 +1060,34 @@ async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
             .order_by(BrandAsset.created_at.desc())
             .limit(25)
         ).all()
+        brand = db.get(Brand, ctx.brand_id)
+        cov = shotlist.coverage(rows, brand.category if brand else None)
         return {
             "ok": True,
             "assets": [
-                {"id": str(a.id), "kind": a.kind, "label": a.label} for a in rows
+                {
+                    "id": str(a.id),
+                    "kind": a.kind,
+                    "label": a.label,
+                    "size": f"{a.width}x{a.height}" if a.width and a.height else None,
+                }
+                for a in rows
             ],
+            "coverage": cov,
+            "note": (
+                "A photo with no label was sent without a caption. When a post is about "
+                "a product they have a photo of, put that id in "
+                "visual_direction.reference_asset_id -- the real photograph is used, free. "
+                "coverage.next is the one photo to ask for next, with how to take it."
+            ),
         }
 
 
 _HANDLERS = {
     "create_creative": _create_creative,
+    "plan_month": _plan_month,
+    "suggest_post": _suggest_post,
+    "post_performance": _post_performance,
     "request_approval": _request_approval,
     "revise_creative": _revise_creative,
     "regenerate_image": _regenerate_image,

@@ -1,0 +1,33 @@
+{% extends "_base.html.j2" %}
+{# An editorial poster: the headline stacked large at the top-left over a
+   left-weighted scrim, the CTA and the mark at the bottom. The photograph
+   keeps its right and lower two thirds. For launches and campaign posts
+   where the words are the picture. #}
+{% set hl = slide.headline|length %}
+{% set hf = 0.118 if hl < 14 else (0.100 if hl < 22 else (0.086 if hl < 32 else 0.072)) %}
+{% block styles %}
+  .scrim { background:
+      linear-gradient(90deg, rgba(0,0,0,.62) 0%, rgba(0,0,0,.34) 46%, rgba(0,0,0,.08) 100%),
+      linear-gradient(180deg, rgba(0,0,0,.30) 0%, rgba(0,0,0,0) 40%,
+                      rgba(0,0,0,0) 70%, rgba(0,0,0,.42) 100%); }
+  .content { justify-content: space-between; text-align: left; }
+  .headline { font-size: {{ (width * hf)|round|int }}px; max-width: 80%;
+              margin-top: {{ (width*0.02)|round|int }}px; }
+  .subhead { font-size: {{ (width*0.036)|round|int }}px; max-width: 64%; }
+  .bottom { display: flex; align-items: flex-end; justify-content: space-between;
+            gap: {{ (width*0.03)|round|int }}px; }
+  .cta { margin: 0; }
+{% endblock %}
+{% block body %}
+  <div class="content">
+    <div>
+      <h1 class="headline">{{ slide.headline }}</h1>
+      {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
+    </div>
+    <div class="bottom">
+      {% if show_cta %}<div class="cta">{{ brief.cta }}</div>{% else %}<span></span>{% endif %}
+      {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
+      {% else %}<span class="brandline">{{ brand.name }}</span>{% endif %}
+    </div>
+  </div>
+{% endblock %}

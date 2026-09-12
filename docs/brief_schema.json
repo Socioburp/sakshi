@@ -72,13 +72,17 @@
       "properties": {
         "prompt": {
           "type": "string",
-          "description": "Background/hero image prompt ONLY. Must NOT request any text, logos, or watermarks \u2014 those are composited separately with the brand's real fonts."
+          "description": "Background/hero image prompt ONLY. Must NOT request any text, logos, or watermarks — those are composited separately with the brand's real fonts.",
+          "minLength": 10,
+          "maxLength": 900
         },
         "negative_prompt": {
           "type": "string"
         },
         "mood": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 80,
+          "description": "Atmosphere only (e.g. \"warm, homely\"). Appended to the image prompt, so it must not ask for text, logos or lettering."
         },
         "reference_asset_id": {
           "type": [
@@ -86,6 +90,13 @@
             "null"
           ],
           "description": "brand_assets.id when the post features a real product photo"
+        },
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Optional image-model seed. Cleared by regenerate_image so a redo gives a different picture."
         }
       }
     },
@@ -151,7 +162,7 @@
     },
     "slides": {
       "type": "array",
-      "description": "Carousel only, 2-6 items. Each slide gets its own image call \u2014 dispatched IN PARALLEL.",
+      "description": "Carousel only, 2-6 items. Each slide gets its own image call — dispatched IN PARALLEL.",
       "items": {
         "type": "object",
         "required": [

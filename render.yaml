@@ -1,35 +1,49 @@
 # Render blueprint. Put the web service and the worker in the SAME region as
 # your Neon project -- every agent turn makes several round trips to Postgres,
 # and cross-region adds ~150ms to each of them.
+#
+# Both services build from the repo's Dockerfile. Render's native Python
+# builder has no root and no apt, so `playwright install --with-deps chromium`
+# cannot install the system libraries Chromium needs and the build fails. The
+# Dockerfile runs that step as root, so the compositor's browser is present.
 services:
   - type: web
     name: sakshi-api
-    runtime: python
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     region: singapore
     plan: starter
-    buildCommand: pip install -e . && playwright install --with-deps chromium
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    # Runs once per deploy, before the new version takes traffic. Alembic is
+    # idempotent, so re-running is safe; a schema that is already at head is a
+    # no-op. Only the web service migrates -- the worker must not race it.
+    preDeployCommand: alembic upgrade head
+    dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11"
       - fromGroup: sakshi-secrets
 
   - type: worker
     name: sakshi-worker
-    runtime: python
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     region: singapore
-    plan: starter
-    buildCommand: pip install -e . && playwright install --with-deps chromium
-    startCommand: python -m app.queue.worker
+    # The product lane (background replacement on the owner's photos) runs a
+    # 1.2GB CPU model on this service; "starter" (512MB) is OOM-killed by the
+    # first product creative. Keep "standard" (2GB) or set CUTOUT_ENABLED=false.
+    plan: standard
+    dockerCommand: python -m app.queue.worker
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11"
+      - key: CUTOUT_ENABLED
+        value: "true"
       - fromGroup: sakshi-secrets
 
 envVarGroups:
   - name: sakshi-secrets
     envVars:
+      - key: ENV
+        value: prod
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL
@@ -62,5 +76,30 @@ envVarGroups:
         sync: false
       - key: INSTAGRAM_MOCK
         value: "true"
+      - key: IG_APP_ID
+        sync: false
+      - key: IG_APP_SECRET
+        sync: false
+      - key: IG_REDIRECT_URI
+        sync: false
+      # Webhook handshake token for /webhooks/instagram. If left unset the code
+      # falls back to WA_VERIFY_TOKEN, so setting it is optional -- but keep the
+      # two the same value in Meta either way.
+      - key: IG_VERIFY_TOKEN
+        sync: false
+      # Flip to "true" only once App Review grants the matching permission.
+      - key: IG_INSIGHTS_ENABLED
+        value: "false"
+      - key: IG_ENGAGEMENT_ENABLED
+        value: "false"
       - key: PUBLIC_BASE_URL
+        sync: false
+      # Image generation: set to fal | replicate | bfl with its key.
+      - key: IMAGEGEN_PROVIDER
+        sync: false
+      - key: FAL_KEY
+        sync: false
+      - key: REPLICATE_API_TOKEN
+        sync: false
+      - key: BFL_API_KEY
         sync: false

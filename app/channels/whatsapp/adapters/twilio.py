@@ -60,9 +60,12 @@ class TwilioAdapter:
             mime = body.get("MediaContentType0", "")
             media = MediaRef(url=body.get("MediaUrl0"), mime=mime)
             kind = (
-                "audio" if mime.startswith("audio")
-                else "image" if mime.startswith("image")
-                else "video" if mime.startswith("video")
+                "audio"
+                if mime.startswith("audio")
+                else "image"
+                if mime.startswith("image")
+                else "video"
+                if mime.startswith("video")
                 else "document"
             )
         return [
@@ -88,17 +91,15 @@ class TwilioAdapter:
 
     async def send(self, msg: OutboundMessage) -> SendResult:
         data = {"From": settings.twilio_from, "To": f"whatsapp:{msg.to}"}
-        if msg.kind == "image":
-            data["MediaUrl"] = msg.image_url
+        if msg.kind in ("image", "video"):
+            data["MediaUrl"] = msg.image_url if msg.kind == "image" else msg.video_url
             data["Body"] = msg.caption or ""
         else:
             # Twilio has no native reply buttons on the basic API; degrade to
             # a numbered list so the agent's affordances still work.
             body = msg.text or ""
             if msg.buttons:
-                body += "\n\n" + "\n".join(
-                    f"{i+1}. {b.title}" for i, b in enumerate(msg.buttons)
-                )
+                body += "\n\n" + "\n".join(f"{i + 1}. {b.title}" for i, b in enumerate(msg.buttons))
             data["Body"] = body
         try:
             resp = await self.client.post(
