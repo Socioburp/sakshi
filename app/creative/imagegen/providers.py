@@ -169,6 +169,7 @@ DEFAULT_COST_MICROS = {
     "fal": 4400,  # FLUX.1 [schnell] $0.003/MP, a 1080x1350 post is 1.46MP
     "replicate": 3000,  # flux-schnell "$3.00 / thousand output images"
     "bfl": 14000,  # FLUX.2 [klein] 4B, 1.4c for the first megapixel
+    "openai": 40000,  # gpt-image-1 medium, ~4c for a 1024-edge image
 }
 
 
@@ -615,11 +616,115 @@ class BflProvider(HttpImageProvider):
                 raise ImageGenError(f"bfl: {job.get('id')} still {status} after timeout")
 
 
+# --------------------------------------------------------------------------- #
+# OpenAI (gpt-image-1 / dall-e-3)
+# --------------------------------------------------------------------------- #
+# gpt-image-1 renders only a fixed set of sizes, so the nearest one to the
+# brief's aspect is chosen and the compositor's object-fit covers the rest
+# (the same approach as Replicate's aspect ratios). OpenAI takes no negative
+# prompt, so flux_prompt() folds the brief's negative into positive phrasing.
+OPENAI_SIZES = {
+    "1024x1024": 1.0,  # square
+    "1024x1536": 1024 / 1536,  # portrait 2:3
+    "1536x1024": 1536 / 1024,  # landscape 3:2
+}
+
+
+def nearest_openai_size(width: int, height: int) -> str:
+    target = width / max(1, height)
+    return min(OPENAI_SIZES, key=lambda k: abs(OPENAI_SIZES[k] - target))
+
+
+class OpenAIProvider(HttpImageProvider):
+    """OpenAI Images API, synchronous.
+
+    Contract (platform.openai.com/docs/api-reference/images/create):
+      POST https://api.openai.com/v1/images/generations
+           Authorization: Bearer $OPENAI_API_KEY
+      body   {model, prompt, size, n, output_format, quality}
+      reply  {data: [{b64_json}]}   -- gpt-image-1 always returns base64;
+             dall-e-3 returns {data: [{url}]} unless b64 is requested.
+    gpt-image-1 renders a fixed set of sizes; the nearest to the brief's aspect
+    is used and the compositor covers the remainder. It has no negative prompt.
+    """
+
+    name = "openai"
+    BASE = "https://api.openai.com/v1"
+    # gpt-image-1 holds the request open while it renders, which is slower than
+    # FLUX; give the read more room but stay inside the shared BUDGET_S cap.
+    TIMEOUT = httpx.Timeout(connect=10.0, read=150.0, write=30.0, pool=10.0)
+
+    def __init__(self) -> None:
+        self.model = settings.imagegen_openai_model or "gpt-image-1"
+        self.cost_micros_per_image = _cost_for(self.name)
+
+    def _check_key(self) -> None:
+        if not settings.openai_api_key:
+            raise ImageGenError("OPENAI_API_KEY is unset")
+
+    def _payload(self, req: ImageRequest) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "prompt": flux_prompt(req.prompt, req.negative),
+            "size": nearest_openai_size(req.width, req.height),
+            "n": 1,
+        }
+        # gpt-image-1 accepts output_format + quality; dall-e-3 does not, and
+        # returns a URL rather than base64 unless asked.
+        if "gpt-image" in self.model:
+            body["output_format"] = "jpeg"
+            body["quality"] = settings.imagegen_openai_quality or "medium"
+        else:
+            body["response_format"] = "b64_json"
+        return body
+
+    async def _submit(self, client: httpx.AsyncClient, req: ImageRequest) -> dict[str, Any]:
+        r = await client.post(
+            f"{self.BASE}/images/generations",
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=self._payload(req),
+        )
+        r.raise_for_status()
+        return self._json(r, "openai")
+
+    async def _wait(
+        self, client: httpx.AsyncClient, job: dict[str, Any], req: ImageRequest
+    ) -> dict[str, Any]:
+        # The endpoint is synchronous; the "job" is already the reply.
+        data = job.get("data") or []
+        if not data or not isinstance(data[0], dict):
+            raise ImageGenError(f"openai: no image in response: {str(job)[:200]}")
+        first = data[0]
+        b64 = first.get("b64_json")
+        if b64:
+            return {
+                "data": base64.b64decode(b64),
+                "mime": "image/jpeg" if "gpt-image" in self.model else "image/png",
+                "job_id": None,
+                "seed": req.seed,
+                "raw": {"model": self.model},
+            }
+        url = first.get("url")
+        if url:  # dall-e-3 default shape
+            return {
+                "url": url,
+                "mime": "image/png",
+                "job_id": None,
+                "seed": req.seed,
+                "raw": {"model": self.model},
+            }
+        raise ImageGenError(f"openai: no b64_json or url in response: {str(first)[:200]}")
+
+
 REGISTRY = {
     "mock": MockImageProvider,
     "fal": FalProvider,
     "replicate": ReplicateProvider,
     "bfl": BflProvider,
+    "openai": OpenAIProvider,
 }
 
 
