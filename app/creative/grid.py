@@ -143,15 +143,9 @@ def check(fp: Fingerprint, brief: Any) -> GridNote | None:
     changes: dict[str, Any] = {}
     severity = 0
 
-    aspect = brief.format.aspect_ratio
-    usual_aspect = fp.dominant(fp.aspects)
-    if usual_aspect and aspect != usual_aspect:
-        deviations.append(
-            f"this is {aspect}; their last {fp.posts} approved posts are {usual_aspect}, and mixed "
-            "ratios make the profile grid look uneven"
-        )
-        changes["format.aspect_ratio"] = usual_aspect
-        severity += 1
+    # The ratio is no longer judged: every still is 4:5 (brief.POST_SIZE), so a
+    # brand whose history is square would otherwise be advised, on every post,
+    # into a ratio the brief will not produce.
 
     template = brief.template_id
     usual_template = fp.dominant(fp.templates)

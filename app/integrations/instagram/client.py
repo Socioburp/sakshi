@@ -93,6 +93,42 @@ def authorize_url(state: str) -> str:
     return f"https://www.instagram.com/oauth/authorize?{q}"
 
 
+class PublishSpecError(ValueError):
+    """The image(s) would be rejected, cropped or letterboxed by Instagram."""
+
+
+# Image Specifications, IG User Media reference: "Format: JPEG", "Aspect
+# ratio: Must be within a 4:5 to 1.91:1 range". 3:4 publishes by hand in the
+# app but is refused here. A hair of tolerance for integer pixel rounding.
+IG_MIN_RATIO = 4 / 5
+IG_MAX_RATIO = 1.91
+_RATIO_EPS = 0.002
+
+
+def assert_publishable(images: list[tuple[str, int, int]]) -> None:
+    """Fail loudly BEFORE any container is created.
+
+    `images` is one (format, width, height) per slide, read from the actual
+    bytes about to be fetched by Meta -- not from what a row claims. Meta
+    reports a bad ratio as a generic OAuthException at publish time, and locks
+    a carousel to its first slide's ratio, silently cropping the rest.
+    """
+    if not images:
+        raise PublishSpecError("nothing to publish")
+    for i, (fmt, w, h) in enumerate(images, start=1):
+        if (fmt or "").upper() != "JPEG":
+            raise PublishSpecError(f"slide {i} is {fmt}; Instagram takes JPEG only")
+        ratio = w / max(1, h)
+        if not IG_MIN_RATIO - _RATIO_EPS <= ratio <= IG_MAX_RATIO + _RATIO_EPS:
+            raise PublishSpecError(
+                f"slide {i} is {w}x{h} (ratio {ratio:.3f}); the publishing API accepts "
+                f"4:5 ({IG_MIN_RATIO}) to 1.91:1 only"
+            )
+    sizes = {(w, h) for _, w, h in images}
+    if len(sizes) > 1:
+        raise PublishSpecError(f"carousel slides differ in size: {sorted(sizes)}")
+
+
 def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=30.0)
 
@@ -455,6 +491,8 @@ __all__ = [
     "refresh_long_lived_token",
     "is_auth_error",
     "authorize_url",
+    "assert_publishable",
+    "PublishSpecError",
     "IgToken",
     "IgProfile",
     "IgPublishResult",

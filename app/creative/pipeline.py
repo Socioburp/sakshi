@@ -725,6 +725,9 @@ async def _build_one(
 
     with ctx.trace.stage(f"{stage}:compose"):
         png = await compose.compose(brief, slide, brand_snapshot, image, mime)
+        # PNG all the way to here; this is the single lossy encode. It also
+        # refuses any frame that is not exactly the post size.
+        final = await asyncio.to_thread(compose.export_jpeg, png, (w, h))
 
     with ctx.trace.stage(f"{stage}:upload"):
         if provider_name == "reused":
@@ -735,8 +738,8 @@ async def _build_one(
             ext = "jpg" if "jpeg" in mime else "png"
             bg_key = r2.key_for(str(ctx.brand_id), str(creative_id), f"bg.{ext}")
             r2.put(bg_key, image, mime)
-        composed_key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.png")
-        composed_url = r2.put(composed_key, png, "image/png")
+        composed_key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.jpg")
+        composed_url = r2.put(composed_key, final, "image/jpeg")
 
     video_key = video_url = None
     if brief.is_reel():
@@ -776,11 +779,13 @@ async def _recompose_one(ctx, brief, slide, creative_id, background_key, brand_s
     stage = f"slide{slide.position}"
     with ctx.trace.stage(f"{stage}:bg_fetch"):
         image = r2.get(background_key)
+    mime = "image/jpeg" if background_key.endswith(".jpg") else "image/png"
     with ctx.trace.stage(f"{stage}:compose"):
-        png = await compose.compose(brief, slide, brand_snapshot, image, "image/jpeg")
+        png = await compose.compose(brief, slide, brand_snapshot, image, mime)
+        final = await asyncio.to_thread(compose.export_jpeg, png, brief.pixel_size())
     with ctx.trace.stage(f"{stage}:upload"):
-        key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.png")
-        url = r2.put(key, png, "image/png")
+        key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.jpg")
+        url = r2.put(key, final, "image/jpeg")
     video_key = video_url = None
     if brief.is_reel():
         # A revision of a reel -- or a still turned into one -- re-renders the

@@ -64,6 +64,16 @@ DEFAULT_TEMPLATE = "centered_overlay"
 GRID_RATIO = 3 / 4
 GRID_MARGIN = 0.03  # of width, inside the safe zone
 
+# The safe zone, in pixels of the 1080-wide canvas. The grid trims ~34px from
+# each side of a 4:5 post; 90 clears that with room to spare. No text, logo or
+# face may sit outside it -- FIT_JS asserts this on every render, and a breach
+# fails the render rather than shipping.
+SAFE_PAD = 90
+
+# The one lossy encode in the whole path. The vendor returns PNG, Chromium
+# screenshots PNG, and this is where it becomes the JPEG Instagram requires.
+EXPORT_JPEG_QUALITY = 93
+
 
 def grid_insets(width: int, height: int) -> tuple[int, int]:
     """(x, y) pixels trimmed on each side when the grid shows a 3:4 centre crop."""
@@ -78,9 +88,9 @@ def padding_for(width: int, height: int) -> dict[str, int]:
     x_in, y_in = grid_insets(width, height)
     margin = int(round(width * GRID_MARGIN))
     return {
-        "pad_x": max(int(round(width * 0.078)), x_in + margin),
-        "pad_top": max(int(round(width * 0.075)), y_in + margin),
-        "pad_bottom": max(int(round(width * 0.085)), y_in + margin),
+        "pad_x": max(SAFE_PAD, x_in + margin),
+        "pad_top": max(SAFE_PAD, y_in + margin),
+        "pad_bottom": max(SAFE_PAD, int(round(width * 0.085)), y_in + margin),
     }
 
 
@@ -319,6 +329,28 @@ def _resample(png: bytes, width: int, height: int) -> bytes:
             out, format="PNG", optimize=True
         )
         return out.getvalue()
+
+
+def export_jpeg(png: bytes, size: tuple[int, int]) -> bytes:
+    """The finished frame as the JPEG that is delivered and published.
+
+    Refuses anything that is not exactly `size`: a creative of the wrong
+    dimensions is cropped or letterboxed by Instagram, and inside a carousel
+    it drags every other slide with it.
+    """
+    with Image.open(BytesIO(png)) as im:
+        if im.size != tuple(size):
+            raise ValueError(f"export is {im.size}, must be exactly {tuple(size)}")
+        out = BytesIO()
+        im.convert("RGB").save(
+            out, format="JPEG", quality=EXPORT_JPEG_QUALITY, subsampling=0, optimize=True
+        )
+        return out.getvalue()
+
+
+def image_size(data: bytes) -> tuple[int, int]:
+    with Image.open(BytesIO(data)) as im:
+        return im.size
 
 
 async def compose(

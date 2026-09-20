@@ -42,6 +42,21 @@ from app.memory import retrieve as memory_retrieve
 log = get_logger(__name__)
 
 
+def _image_facts(keys: list[str | None]) -> list[tuple[str, int, int]]:
+    """(format, width, height) of each stored composite, from its bytes."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    facts = []
+    for key in keys:
+        if not key:
+            raise ValueError("a slide has no composed image")
+        with Image.open(BytesIO(r2.get(key))) as im:
+            facts.append((im.format or "", im.width, im.height))
+    return facts
+
+
 def _inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
     defs = schema.pop("$defs", {})
 
@@ -913,6 +928,28 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
         creative_ids = [c.id for c in creatives]
         composed_keys = [c.composed_key for c in creatives]
         first_brief_id = creatives[0].brief_id
+
+    # Read the bytes Meta is about to fetch and check them against the
+    # publishing spec: JPEG, 4:5 to 1.91:1, every carousel slide the same size.
+    # A reel's still is only its cover, and the video container has its own rules.
+    if not is_reel:
+        try:
+            ig.assert_publishable(await asyncio.to_thread(_image_facts, composed_keys))
+        except Exception as exc:  # noqa: BLE001 - unreadable bytes are as unpublishable as bad ones
+            log.error("ig_publish_spec_violation", publication_id=str(pub_id), error=str(exc))
+            with session_scope() as db:
+                p = db.get(Publication, pub_id)
+                p.status, p.error = "failed", f"publish spec: {exc}"[:2000]
+            return {
+                "ok": False,
+                "reason": "not_publishable",
+                "error": str(exc)[:300],
+                "hint": (
+                    "Nothing was sent to Instagram. Re-export it with revise_creative (free, "
+                    "same pictures) and publish that; tell the owner in one line it needs a "
+                    "moment."
+                ),
+            }
 
     # Long-lived tokens die at 60 days. Refresh when inside the last week, so a
     # connection made in January still posts in April.

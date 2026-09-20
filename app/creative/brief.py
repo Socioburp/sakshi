@@ -31,10 +31,24 @@ Intent = Literal[
     "behind_the_scenes",
 ]
 
+# THE Instagram post size. Every still this product ships -- a single post and
+# every slide of a carousel -- is exactly this, nothing else. 4:5 is the tallest
+# ratio Instagram's publishing API accepts (it takes 4:5 to 1.91:1; 3:4 posts by
+# hand but is rejected through the API), and Instagram downsizes anything wider
+# than 1080, so exporting larger only hands the final resample to them.
+POST_SIZE: tuple[int, int] = (1080, 1350)
+POST_ASPECT = "4:5"
+# A reel is video, published through a different container with its own rules.
+REEL_SIZE: tuple[int, int] = (1080, 1920)
+
+# The ratios the publishing API takes for an image, as width / height.
+IG_MIN_RATIO = 4 / 5
+IG_MAX_RATIO = 1.91
+
 PIXELS: dict[str, tuple[int, int]] = {
-    "1:1": (1080, 1080),
-    "4:5": (1080, 1350),
-    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),  # legacy briefs only; nothing new is made square
+    "4:5": POST_SIZE,
+    "9:16": REEL_SIZE,
 }
 
 # Phrases that mean "render letterforms", which the image model must not do.
@@ -75,14 +89,20 @@ class Format(BaseModel):
     # always 9:16 -- a seven-second push-in over the photo with the card
     # fading in, published as a Reel (or forwarded to WhatsApp Status).
     type: Literal["single", "carousel", "reel"] = "single"
-    aspect_ratio: AspectRatio = "1:1"
+    # Still accepted as input so stored and model-authored briefs validate, but
+    # it is not a choice: a still is 4:5 and a reel is 9:16 (see the validator).
+    aspect_ratio: AspectRatio = "4:5"
     slide_count: int | None = Field(default=None, ge=1, le=CAROUSEL_MAX)
 
     @model_validator(mode="after")
     def slide_count_matches_type(self) -> Format:
+        # One ratio per kind of output, decided here and nowhere else. Instagram
+        # locks a carousel to its first slide's ratio and crops or letterboxes
+        # the rest, so the ratio lives on the brief -- never on a slide -- and
+        # every slide inherits it by construction.
+        self.aspect_ratio = "9:16" if self.type == "reel" else POST_ASPECT
         if self.type == "reel":
             self.slide_count = 1
-            self.aspect_ratio = "9:16"
         elif self.type == "single":
             self.slide_count = 1
         elif not self.slide_count:
@@ -218,7 +238,7 @@ class CreativeBrief(BaseModel):
 
     # -- helpers used downstream -------------------------------------------- #
     def pixel_size(self) -> tuple[int, int]:
-        return PIXELS[self.format.aspect_ratio]
+        return REEL_SIZE if self.is_reel() else POST_SIZE
 
     def is_carousel(self) -> bool:
         return self.format.type == "carousel"
@@ -306,7 +326,7 @@ EXAMPLE = {
 
 EXAMPLE_CAROUSEL = {
     "intent": "educational",
-    "format": {"type": "carousel", "aspect_ratio": "1:1", "slide_count": 3},
+    "format": {"type": "carousel", "aspect_ratio": "4:5", "slide_count": 3},
     "headline": "3 ways to use cold-pressed oil",
     "cta": "Save this post",
     "visual_direction": {

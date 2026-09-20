@@ -116,8 +116,11 @@ def test_grid_flags_a_ratio_and_layout_break_and_offers_the_fix():
         }
     )
     note = grid.check(_fp(), brief)
-    assert note is not None and note.severity == 2
-    assert note.suggested_changes == {"format.aspect_ratio": "4:5", "template_id": "split_card"}
+    # The ratio is not a deviation any more: a still is always 4:5, whatever
+    # the brief asked for, so only the layout break is flagged.
+    assert brief.format.aspect_ratio == "4:5"
+    assert note is not None and note.severity == 1
+    assert note.suggested_changes == {"template_id": "split_card"}
     fixed = grid.adjusted_payload(brief.model_dump(mode="json"), note.suggested_changes)
     fixed_brief = CreativeBrief.model_validate(fixed)
     assert fixed_brief.format.aspect_ratio == "4:5" and fixed_brief.template_id == "split_card"

@@ -8,7 +8,7 @@ import types
 import pytest
 
 from app.creative import brandkit, compose
-from app.creative.brief import EXAMPLE, CreativeBrief
+from app.creative.brief import EXAMPLE, POST_SIZE, CreativeBrief
 from app.creative.imagegen.base import ImageRequest
 from app.creative.imagegen.providers import MockImageProvider
 
@@ -21,7 +21,10 @@ def test_grid_insets_follow_the_3_4_profile_grid():
     assert compose.grid_insets(1080, 1080) == (135, 0)  # 1:1 loses 12.5% each side
     assert compose.grid_insets(1080, 1920) == (0, 240)  # 9:16 loses a band top and bottom
     pad = compose.padding_for(1080, 1080)
-    assert pad["pad_x"] >= 135 + 32 and pad["pad_top"] == 81
+    assert pad["pad_x"] >= 135 + 32 and pad["pad_top"] == compose.SAFE_PAD
+    # The post size: the 34px grid trim is cleared by the 90px safe zone.
+    post = compose.padding_for(*POST_SIZE)
+    assert compose.SAFE_PAD == 90 and min(post.values()) >= compose.SAFE_PAD
     tall = compose.padding_for(1080, 1920)
     assert tall["pad_top"] >= 240 + 32 and tall["pad_bottom"] >= 240 + 32
 
