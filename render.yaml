@@ -94,8 +94,14 @@ envVarGroups:
         value: "false"
       - key: PUBLIC_BASE_URL
         sync: false
-      # Image generation: set to fal | replicate | bfl with its key.
+      # Image generation. Production is `openai` (gpt-image-2, quality high,
+      # native 1600x2000). The model id is an env var so it can be moved to a
+      # newer snapshot without a code deploy; leave it unset for the pinned one.
       - key: IMAGEGEN_PROVIDER
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: IMAGEGEN_OPENAI_MODEL
         sync: false
       - key: FAL_KEY
         sync: false

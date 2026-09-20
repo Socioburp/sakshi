@@ -29,6 +29,7 @@ from app.billing import credits
 from app.creative import claims, compose, dedupe, photoreal, photoref, product, shotplan
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
+from app.creative.imagegen.base import generation_size
 from app.db import repo
 from app.db.models import Account, Brand, BrandAsset, Brief, Creative
 from app.db.session import session_scope
@@ -758,15 +759,21 @@ async def _build_one(
             # whole carousel shared one lens, one distance and one angle.
             position=slide.position,
             slide_count=len(brief.slides) if brief.is_carousel() else 1,
+            # The brand's exact hex values, so the picture harmonises with
+            # the type and the mark that will be laid over it.
+            palette=dict(getattr(brand_snapshot, "palette", {}) or {}),
         )
+        # Generated natively at 4:5 ABOVE the delivery size and resampled down
+        # by the compositor. Never generated at a preset and cropped.
+        gw, gh = generation_size((w, h))
         seed = slide.visual_direction.seed
         with ctx.trace.stage(f"{stage}:imagegen", provider=provider.name):
             res = await provider.generate(
                 ImageRequest(
                     prompt=prompt,
                     negative=negative,
-                    width=w,
-                    height=h,
+                    width=gw,
+                    height=gh,
                     seed=seed,
                     style=slide.visual_direction.mood,
                 )
@@ -790,8 +797,8 @@ async def _build_one(
                     ImageRequest(
                         prompt=prompt,
                         negative=negative,
-                        width=w,
-                        height=h,
+                        width=gw,
+                        height=gh,
                         seed=salt_seed,
                         style=slide.visual_direction.mood,
                     )

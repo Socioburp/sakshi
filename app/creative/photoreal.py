@@ -32,7 +32,10 @@ from app.creative.brief import MOOD_MAX
 # The brief validator caps the model-authored prompt at 900 characters and the
 # mood at MOOD_MAX. The enrichment adds a bounded amount on top, so the total on
 # the wire is known: 900 + ENRICHMENT_MAX. Enforced below, not just documented.
-ENRICHMENT_MAX = 720
+# (Raised from 720 for the palette clause. gpt-image-2 has no 256-token window;
+# for FLUX the palette sits BEFORE the camera clause, so the trim in
+# providers.flux_prompt still takes the tail and not the brand's colours.)
+ENRICHMENT_MAX = 800
 
 # Present in every enriched prompt; also the idempotency marker.
 _MARKER = "shot on a full-frame camera"
@@ -54,6 +57,40 @@ PHOTOREAL_NEGATIVE = (
     "oversaturated, hdr, unrealistic lighting, neon glow, surreal, "
     "perfectly symmetrical, duplicated objects, mangled anatomy, extra limbs"
 )
+
+# The OTHER way a generated background gives itself away: it comes back looking
+# like a screenshot of the app it is headed for -- a row of pagination dots, a
+# "1/6", a phone bezel, a border. Named here so every vendor hears it, in the
+# form that vendor listens to (OpenAI as a prohibition, FLUX folded into a
+# positive; see providers.py). The words "carousel", "slide", "post" and
+# "Instagram" are never sent to an image model: naming the destination is what
+# invites its chrome.
+UI_NEGATIVE = (
+    "user interface, pagination dots, slide numbers, page indicators, buttons, icons, "
+    "border, picture frame, phone frame, device mockup, collage"
+)
+
+PALETTE_MAX = 100
+_HEX = re.compile(r"#[0-9A-Fa-f]{6}")
+
+
+def palette_clause(palette: dict | None) -> str:
+    """The brand's exact hex values, so the picture harmonises with the type and
+    the mark laid over it. As accents -- a flat block of brand colour is a
+    graphic, and this is a photograph. Phrased as what to do, not what to
+    avoid, because FLUX reads a prohibition as a request."""
+    hexes: list[str] = []
+    for key in ("primary", "accent"):
+        v = str((palette or {}).get(key) or "").strip().upper()
+        if _HEX.fullmatch(v) and v not in hexes:
+            hexes.append(v)
+    if not hexes:
+        return ""
+    clause = (
+        f"Small natural accents in the props and the light harmonise with {' and '.join(hexes)}"
+    )
+    assert len(clause) <= PALETTE_MAX
+    return clause
 
 
 # --------------------------------------------------------------------------- #
@@ -181,7 +218,7 @@ _LONGEST_CAMERA = max(
     len(CAMERA_DIRECTION),
     max(len(_shotplan.camera_clause(i, 6)) for i in range(1, 7)),
 )
-assert _LONGEST_CAMERA + _LONGEST_PLAY + MOOD_MAX + 12 <= ENRICHMENT_MAX, (
+assert _LONGEST_CAMERA + _LONGEST_PLAY + MOOD_MAX + PALETTE_MAX + 14 <= ENRICHMENT_MAX, (
     "enrichment exceeds its budget"
 )
 
@@ -210,6 +247,7 @@ def photographic(
     category: str | None = None,
     position: int | None = None,
     slide_count: int | None = None,
+    palette: dict | None = None,
 ) -> tuple[str, str]:
     """Return (prompt, negative) tuned for a photograph, safely re-runnable.
 
@@ -226,11 +264,13 @@ def photographic(
         camera = CAMERA_DIRECTION
         if position and slide_count and slide_count > 1:
             camera = _shotplan.camera_clause(position, slide_count)
-        p = f"{p.rstrip('.,; ')}{mood_clause}.{play_clause} {camera}."
+        tint = palette_clause(palette)
+        tint_clause = f" {tint}." if tint else ""
+        p = f"{p.rstrip('.,; ')}{mood_clause}.{play_clause}{tint_clause} {camera}."
 
     parts = [s.strip() for s in (negative or "").split(",") if s.strip()]
     seen = {s.lower() for s in parts}
-    for extra in PHOTOREAL_NEGATIVE.split(","):
+    for extra in f"{PHOTOREAL_NEGATIVE}, {UI_NEGATIVE}".split(","):
         e = extra.strip()
         if e and e.lower() not in seen:
             parts.append(e)

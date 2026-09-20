@@ -56,6 +56,7 @@ class BlankImageError(ImageGenError):
 class MockImageProvider:
     name = "mock"
     cost_micros_per_image = 0
+    exact_size = True
 
     async def generate(self, req: ImageRequest) -> ImageResult:
         # A deterministic gradient, so compositing and layout can be developed
@@ -86,6 +87,19 @@ _NEGATIVE_TO_POSITIVE: list[tuple[tuple[str, ...], str]] = [
     (
         ("text", "letters", "words", "caption", "typography", "signature", "watermark", "logo"),
         "clean unmarked surfaces",
+    ),
+    (
+        (
+            "user interface",
+            "pagination dots",
+            "slide numbers",
+            "page indicators",
+            "phone frame",
+            "device mockup",
+            "picture frame",
+            "collage",
+        ),
+        "one continuous full-bleed photograph running edge to edge",
     ),
     (
         ("3d render", "cgi", "digital art", "illustration", "painting", "concept art"),
@@ -187,11 +201,10 @@ DEFAULT_COST_MICROS = {
     "fal": 50000,  # FLUX.1 [dev] $0.025/MP, 1.46MP rounds up to 2MP
     "replicate": 30000,  # flux-dev, $0.030 per image flat
     "bfl": 44000,  # FLUX.2 [pro] $0.030/MP x 1.46MP
-    # gpt-image-1 at quality="high", portrait. The least certain number here:
-    # OpenAI is not the configured provider, so it is set high on purpose --
-    # over-charging a path nobody uses is safer than under-charging it.
-    # Verify against your own invoice before making OpenAI the default.
-    "openai": 190000,
+    # gpt-image-2, quality "high", 1600x2000: 9,610 image output tokens at
+    # $30/M = $0.2883 (OpenAI's own calculator, 2026-09-20). Only a fallback:
+    # the ledger records the cost computed from each reply's `usage` block.
+    "openai": 288300,
 }
 
 
@@ -205,9 +218,14 @@ class HttpImageProvider:
 
     name = "http"
     cost_micros_per_image = 0
+    # True when the vendor returns exactly the pixels asked for. The pipeline
+    # holds those vendors to it; Replicate picks its own size from a ratio.
+    exact_size = False
     # connect / read / write / pool. Read covers a synchronous vendor holding
     # the request open while it generates.
     TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=30.0, pool=10.0)
+    # A stall guard against a hung vendor connection -- NOT a latency target.
+    # Nothing is downgraded, skipped or retried cheaper to get under it.
     BUDGET_S = 170.0  # everything: submit, wait, download, gate
     SUBMIT_ATTEMPTS = 3
     BACKOFF = (1.0, 4.0)  # seconds before submit attempt 2 and 3
@@ -243,7 +261,8 @@ class HttpImageProvider:
             mime=out["mime"],
             provider=self.name,
             job_id=out.get("job_id"),
-            cost_micros=self.cost_micros_per_image,
+            # Measured when the vendor reports usage; the list price otherwise.
+            cost_micros=out.get("cost_micros") or self.cost_micros_per_image,
             latency_ms=ms,
             seed=out.get("seed", req.seed),
             raw=out.get("raw") or {},
@@ -433,6 +452,7 @@ class FalProvider(HttpImageProvider):
     """
 
     name = "fal"
+    exact_size = True
     BASE = "https://fal.run"
 
     def __init__(self) -> None:
@@ -700,45 +720,119 @@ class BflProvider(HttpImageProvider):
 
 
 # --------------------------------------------------------------------------- #
-# OpenAI (gpt-image-1 / dall-e-3)
+# OpenAI (gpt-image-2)
 # --------------------------------------------------------------------------- #
-# gpt-image-1 renders only a fixed set of sizes, so the nearest one to the
-# brief's aspect is chosen and the compositor's object-fit covers the rest
-# (the same approach as Replicate's aspect ratios). OpenAI takes no negative
-# prompt, so flux_prompt() folds the brief's negative into positive phrasing.
-OPENAI_SIZES = {
-    "1024x1024": 1.0,  # square
-    "1024x1536": 1024 / 1536,  # portrait 2:3
-    "1536x1024": 1536 / 1024,  # landscape 3:2
-}
+# One setting, always. Not a default, not a tier, not something a slow job or
+# a big carousel steps down from.
+OPENAI_QUALITY = "high"
+
+# gpt-image-2 size rules (OpenAI image-generation guide, "GPT Image 2 settings",
+# checked 2026-09-20): both edges multiples of 16, neither above 3840, long:short
+# no more than 3:1, and 655,360 to 8,294,400 pixels in total.
+OPENAI_EDGE_MULTIPLE = 16
+OPENAI_MAX_EDGE = 3840
+OPENAI_MAX_RATIO = 3.0
+OPENAI_MIN_PIXELS = 655_360
+OPENAI_MAX_PIXELS = 8_294_400
+# "Resolutions above 2560x1440 are experimental."
+OPENAI_EXPERIMENTAL_PIXELS = 2560 * 1440
+
+# USD per million tokens, which is micro-dollars per token. Image output is the
+# figure OpenAI's calculator states for gpt-image-2; the two input rates are the
+# ones published beside it. The ledger records what `usage` says was consumed.
+OPENAI_MICROS_PER_IMAGE_OUTPUT_TOKEN = 30
+OPENAI_MICROS_PER_TEXT_INPUT_TOKEN = 5
+OPENAI_MICROS_PER_IMAGE_INPUT_TOKEN = 8
+
+# The prohibitions, said plainly. Unlike FLUX (see flux_prompt) the GPT image
+# models follow a negative instruction, so it is given as one. "Carousel",
+# "slide", "post" and "Instagram" are deliberately absent from everything sent:
+# naming the destination is what makes a model draw the destination's chrome.
+OPENAI_NEVER = (
+    "This is a photograph only, used as a full-bleed background. It must contain no text, "
+    "lettering, numerals, captions, labels, signage, logos or watermarks of any kind; no "
+    "user-interface elements, buttons, icons, pagination dots, progress indicators or page "
+    "numbers; no borders, frames, vignette boxes, phone or device frames, mock-ups or "
+    "collage panels. The photograph runs edge to edge, and the main subject sits fully "
+    "inside the frame with clear margin on every side."
+)
 
 
-def nearest_openai_size(width: int, height: int) -> str:
-    target = width / max(1, height)
-    return min(OPENAI_SIZES, key=lambda k: abs(OPENAI_SIZES[k] - target))
+def openai_size(width: int, height: int) -> str:
+    """`WIDTHxHEIGHT`, or an error. Never the nearest preset and a crop."""
+    w, h = int(width), int(height)
+    if w % OPENAI_EDGE_MULTIPLE or h % OPENAI_EDGE_MULTIPLE:
+        raise ImageGenError(
+            f"openai: {w}x{h} is not a legal size -- both edges must be multiples of "
+            f"{OPENAI_EDGE_MULTIPLE} (1080x1350 is an EXPORT size, not a generation size)"
+        )
+    if max(w, h) > OPENAI_MAX_EDGE or max(w, h) / min(w, h) > OPENAI_MAX_RATIO:
+        raise ImageGenError(f"openai: {w}x{h} is outside the edge/ratio limits")
+    if not OPENAI_MIN_PIXELS <= w * h <= OPENAI_MAX_PIXELS:
+        raise ImageGenError(f"openai: {w}x{h} is outside the total-pixel limits")
+    if w * h > OPENAI_EXPERIMENTAL_PIXELS:
+        log.warning("openai_experimental_size", size=f"{w}x{h}")
+    return f"{w}x{h}"
+
+
+def openai_prompt(prompt: str, negative: str | None) -> str:
+    """The scene, then the prohibitions. Not trimmed: there is no 256-token window."""
+    p = " ".join((prompt or "").split()).rstrip(".,; ")
+    avoid = ", ".join(s.strip() for s in (negative or "").split(",") if s.strip())
+    tail = f" Avoid: {avoid}." if avoid else ""
+    return f"{p}. {OPENAI_NEVER}{tail}"
+
+
+def openai_cost_micros(usage: dict[str, Any] | None) -> int | None:
+    """What this one call cost, from the tokens OpenAI says it used."""
+    if not isinstance(usage, dict) or not usage.get("output_tokens"):
+        return None
+    details = usage.get("input_tokens_details") or {}
+    text_in = int(details.get("text_tokens") or 0)
+    image_in = int(details.get("image_tokens") or 0)
+    if not details:
+        text_in = int(usage.get("input_tokens") or 0)
+    return (
+        int(usage["output_tokens"]) * OPENAI_MICROS_PER_IMAGE_OUTPUT_TOKEN
+        + text_in * OPENAI_MICROS_PER_TEXT_INPUT_TOKEN
+        + image_in * OPENAI_MICROS_PER_IMAGE_INPUT_TOKEN
+    )
 
 
 class OpenAIProvider(HttpImageProvider):
-    """OpenAI Images API, synchronous.
+    """OpenAI Images API, synchronous, gpt-image-2.
 
-    Contract (platform.openai.com/docs/api-reference/images/create):
+    Contract (developers.openai.com image-generation guide + images/create):
       POST https://api.openai.com/v1/images/generations
            Authorization: Bearer $OPENAI_API_KEY
-      body   {model, prompt, size, n, output_format, quality}
-      reply  {data: [{b64_json}]}   -- gpt-image-1 always returns base64;
-             dall-e-3 returns {data: [{url}]} unless b64 is requested.
-    gpt-image-1 renders a fixed set of sizes; the nearest to the brief's aspect
-    is used and the compositor covers the remainder. It has no negative prompt.
+      body   {model, prompt, size: "WxH", quality, output_format, n}
+      reply  {data: [{b64_json}], usage: {input_tokens, output_tokens,
+              input_tokens_details: {text_tokens, image_tokens}}}
+
+    Deliberately NOT sent:
+      background        never "transparent" -- transparency is the compositor's
+                        job; the default (opaque/auto) is what a photograph is.
+      input_fidelity    gpt-image-2 processes image inputs at high fidelity
+                        itself and the API does not allow changing it.
+      output_compression  PNG has none; the one lossy encode is the final export.
+      seed              the endpoint takes none. shotplan's seeds still separate
+                        the slides' PROMPTS; they cannot pin this vendor's noise.
+
+    The picture is generated natively at the requested 4:5 size. It is never
+    generated at a preset and cropped.
     """
 
     name = "openai"
+    exact_size = True
     BASE = "https://api.openai.com/v1"
-    # gpt-image-1 holds the request open while it renders, which is slower than
-    # FLUX; give the read more room but stay inside the shared BUDGET_S cap.
-    TIMEOUT = httpx.Timeout(connect=10.0, read=150.0, write=30.0, pool=10.0)
+    # OpenAI: "complex prompts may take up to 2 minutes". These are stall
+    # guards against a hung connection, sized well clear of that. They do not
+    # and must not change what is asked for.
+    TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+    BUDGET_S = 330.0
 
     def __init__(self) -> None:
-        self.model = settings.imagegen_openai_model or "gpt-image-1"
+        self.model = settings.imagegen_openai_model or "gpt-image-2-2026-04-21"
         self.cost_micros_per_image = _cost_for(self.name)
 
     def _check_key(self) -> None:
@@ -746,21 +840,14 @@ class OpenAIProvider(HttpImageProvider):
             raise ImageGenError("OPENAI_API_KEY is unset")
 
     def _payload(self, req: ImageRequest) -> dict[str, Any]:
-        body: dict[str, Any] = {
+        return {
             "model": self.model,
-            "prompt": flux_prompt(req.prompt, req.negative),
-            "size": nearest_openai_size(req.width, req.height),
+            "prompt": openai_prompt(req.prompt, req.negative),
+            "size": openai_size(req.width, req.height),
+            "quality": OPENAI_QUALITY,
+            "output_format": "png",
             "n": 1,
         }
-        # gpt-image-1 accepts output_format + quality; dall-e-3 does not, and
-        # returns a URL rather than base64 unless asked.
-        if "gpt-image" in self.model:
-            fmt, _ = source_format()
-            body["output_format"] = fmt
-            body["quality"] = settings.imagegen_openai_quality or "high"
-        else:
-            body["response_format"] = "b64_json"
-        return body
 
     async def _submit(self, client: httpx.AsyncClient, req: ImageRequest) -> dict[str, Any]:
         r = await client.post(
@@ -772,35 +859,32 @@ class OpenAIProvider(HttpImageProvider):
             json=self._payload(req),
         )
         r.raise_for_status()
-        return self._json(r, "openai")
+        body = self._json(r, "openai")
+        body["_request_id"] = r.headers.get("x-request-id")
+        return body
 
     async def _wait(
         self, client: httpx.AsyncClient, job: dict[str, Any], req: ImageRequest
     ) -> dict[str, Any]:
         # The endpoint is synchronous; the "job" is already the reply.
         data = job.get("data") or []
-        if not data or not isinstance(data[0], dict):
-            raise ImageGenError(f"openai: no image in response: {str(job)[:200]}")
-        first = data[0]
-        b64 = first.get("b64_json")
-        if b64:
-            return {
-                "data": base64.b64decode(b64),
-                "mime": source_format()[1] if "gpt-image" in self.model else "image/png",
-                "job_id": None,
-                "seed": req.seed,
-                "raw": {"model": self.model},
-            }
-        url = first.get("url")
-        if url:  # dall-e-3 default shape
-            return {
-                "url": url,
-                "mime": "image/png",
-                "job_id": None,
-                "seed": req.seed,
-                "raw": {"model": self.model},
-            }
-        raise ImageGenError(f"openai: no b64_json or url in response: {str(first)[:200]}")
+        b64 = data[0].get("b64_json") if data and isinstance(data[0], dict) else None
+        if not b64:
+            raise ImageGenError(f"openai: no b64_json in response: {str(job)[:200]}")
+        usage = job.get("usage")
+        return {
+            "data": base64.b64decode(b64),
+            "mime": "image/png",
+            "job_id": job.get("_request_id"),
+            "seed": None,
+            "cost_micros": openai_cost_micros(usage),
+            "raw": {
+                "model": self.model,
+                "size": openai_size(req.width, req.height),
+                "quality": OPENAI_QUALITY,
+                "usage": usage,
+            },
+        }
 
 
 REGISTRY = {

@@ -43,7 +43,8 @@ def test_quality_defaults_are_not_the_cheap_tier():
     assert "schnell" not in settings.imagegen_fal_model
     assert "schnell" not in settings.imagegen_replicate_model
     assert "klein" not in settings.imagegen_bfl_model
-    assert settings.imagegen_openai_quality == "high"
+    # OpenAI has no quality setting left to turn down: see test_openai_image.py.
+    assert P.OPENAI_QUALITY == "high"
 
 
 def test_steps_follow_the_model_family():

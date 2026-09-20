@@ -97,8 +97,32 @@ class Settings(BaseSettings):
     bfl_api_key: str = ""
     imagegen_bfl_model: str = "flux-2-pro"  # klein-4b is the cheap tier
     openai_api_key: str = ""
-    imagegen_openai_model: str = "gpt-image-1"  # or dall-e-3
-    imagegen_openai_quality: str = "high"  # gpt-image-1: low | medium | high | auto
+    # The dated snapshot, not the floating alias: the alias moves under you and
+    # the look of every brand's grid moves with it. Change it here or with
+    # IMAGEGEN_OPENAI_MODEL, deliberately, never by surprise.
+    imagegen_openai_model: str = "gpt-image-2-2026-04-21"
+    # There is no quality setting. It is "high", always, for a single post and
+    # for every slide of a carousel (providers.OPENAI_QUALITY). Quality is never
+    # traded for speed or cost; a slow job says so in the chat instead.
+    #
+    # The size the picture is GENERATED at: native 4:5, both edges multiples of
+    # 16, above the 1080x1350 it is delivered at and below the pixel count
+    # (2560x1440) past which OpenAI marks resolutions experimental. 1728x2160 is
+    # the next step up and sits just past that line -- verify before using it.
+    # 1080x1350 is not a legal generation size: 1080 is not a multiple of 16.
+    imagegen_size: str = "1600x2000"
+    # Slides of a carousel are generated in parallel, this many at a time.
+    # OpenAI tier 1 is 5 images/minute for gpt-image-2; a 429 is retried with
+    # the vendor's retry-after, never answered with a cheaper call.
+    imagegen_concurrency: int = 4
+    # The background gate: every generated picture is inspected and a rejected
+    # one is regenerated with a corrected prompt, up to this many attempts per
+    # slide. On exhaustion the slide FAILS and is refunded; a rejected picture
+    # is never delivered. Each attempt is a paid vendor call.
+    imagegen_gate_attempts: int = 6
+    # Seconds of silence after which the owner is told the job is still going.
+    # A metric to watch and a message to send -- never a limit on the output.
+    slow_notice_s: int = 60
     # Denoising steps for the step-taking FLUX models. schnell is distilled to
     # 4 and ignores more; dev is trained for ~28 and visibly improves up to it.
     # 0 means "the right number for the model", resolved in providers.py.
