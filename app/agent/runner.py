@@ -383,7 +383,7 @@ async def _loop(ctx, system, messages, used_tools, trace, message_id, profile) -
         if not tool_uses:
             text = "".join(b.text for b in resp.content if b.type == "text").strip()
             if text:
-                await ctx.say(text, buttons=pending_buttons or None)
+                await ctx.say(text, buttons=pending_buttons or None, final=True)
             return {
                 "ok": True,
                 "reply": text,
@@ -419,5 +419,5 @@ async def _loop(ctx, system, messages, used_tools, trace, message_id, profile) -
         messages.append({"role": "user", "content": results})
 
     log.warning("agent_max_turns", message_id=str(message_id), tools=used_tools)
-    await ctx.say(lang.sorry_line(profile))
+    await ctx.say(lang.sorry_line(profile), final=True)
     return {"ok": False, "reason": "max_turns", "tools": used_tools}

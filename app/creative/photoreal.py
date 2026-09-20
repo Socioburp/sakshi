@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 
+from app.creative import shotplan as _shotplan
 from app.creative.brief import MOOD_MAX
 
 # The brief validator caps the model-authored prompt at 900 characters and the
@@ -171,7 +172,16 @@ PLAYBOOK: list[tuple[tuple[str, ...], str]] = [
 # The camera clause, the longest playbook clause and the longest mood, plus
 # punctuation, must fit the budget.
 _LONGEST_PLAY = max(len(c) for _, c in PLAYBOOK)
-assert len(CAMERA_DIRECTION) + _LONGEST_PLAY + MOOD_MAX + 12 <= ENRICHMENT_MAX, (
+# The per-slide camera clauses are longer than the fixed one (they name a
+# framing and a copy-space as well as a lens), so the budget is checked
+# against the WORST rung of the ladder, not against CAMERA_DIRECTION. If a new
+# shot is added and this trips, shorten the shot -- do not raise the budget:
+# past ~1000 characters FLUX silently drops the tail, which is the camera.
+_LONGEST_CAMERA = max(
+    len(CAMERA_DIRECTION),
+    max(len(_shotplan.camera_clause(i, 6)) for i in range(1, 7)),
+)
+assert _LONGEST_CAMERA + _LONGEST_PLAY + MOOD_MAX + 12 <= ENRICHMENT_MAX, (
     "enrichment exceeds its budget"
 )
 
@@ -198,14 +208,25 @@ def photographic(
     *,
     mood: str | None = None,
     category: str | None = None,
+    position: int | None = None,
+    slide_count: int | None = None,
 ) -> tuple[str, str]:
-    """Return (prompt, negative) tuned for a photograph, safely re-runnable."""
+    """Return (prompt, negative) tuned for a photograph, safely re-runnable.
+
+    `position` / `slide_count` pick the per-slide camera from shotplan. Without
+    them the fixed CAMERA_DIRECTION is used, which is correct for a single
+    post; passing them is what stops a carousel's slides being six versions of
+    the same photograph.
+    """
     p = (prompt or "").strip()
     if _MARKER not in p:
         mood_clause = f", {mood.strip()[:MOOD_MAX]}" if mood and mood.strip() else ""
         play = category_direction(category)
         play_clause = f" {play}." if play else ""
-        p = f"{p.rstrip('.,; ')}{mood_clause}.{play_clause} {CAMERA_DIRECTION}."
+        camera = CAMERA_DIRECTION
+        if position and slide_count and slide_count > 1:
+            camera = _shotplan.camera_clause(position, slide_count)
+        p = f"{p.rstrip('.,; ')}{mood_clause}.{play_clause} {camera}."
 
     parts = [s.strip() for s in (negative or "").split(",") if s.strip()]
     seen = {s.lower() for s in parts}

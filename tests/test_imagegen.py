@@ -20,6 +20,22 @@ from app.creative.imagegen import providers as P
 from app.creative.imagegen.base import ImageRequest
 
 
+@pytest.fixture(autouse=True)
+def _pin_models(monkeypatch):
+    """Pin every vendor's model id for the duration of a test.
+
+    The mocked URLs contain the model id, so a test that leaned on the config
+    default broke the moment the default moved off the cheap tier -- a
+    confusing failure, because the thing under test had not changed. Pinning
+    here keeps the contract tests about the WIRE SHAPE, which is what they are
+    for; the defaults themselves are asserted separately, in
+    test_quality_defaults.
+    """
+    monkeypatch.setattr(P.settings, "imagegen_fal_model", "fal-ai/flux/schnell")
+    monkeypatch.setattr(P.settings, "imagegen_replicate_model", "black-forest-labs/flux-schnell")
+    monkeypatch.setattr(P.settings, "imagegen_bfl_model", "flux-2-klein-4b")
+
+
 def _jpeg(w=1080, h=1350, *, blank=False) -> bytes:
     im = Image.new("RGB", (w, h), (120, 90, 60))
     if not blank:
@@ -133,7 +149,6 @@ def test_gate_converts_webp_to_jpeg():
 @respx.mock
 async def test_fal_sends_the_documented_shape_and_downloads(monkeypatch):
     monkeypatch.setattr(P.settings, "fal_key", "k")
-    monkeypatch.setattr(P.settings, "imagegen_fal_model", "fal-ai/flux/schnell")
     seen = {}
 
     def submit(request):
@@ -165,7 +180,9 @@ async def test_fal_sends_the_documented_shape_and_downloads(monkeypatch):
     assert seen["auth"] == "Key k"
     b = seen["body"]
     assert b["image_size"] == {"width": 1080, "height": 1350}
-    assert b["num_inference_steps"] == 4 and b["seed"] == 7 and b["output_format"] == "jpeg"
+    # schnell is distilled to 4 steps; the source is PNG so the compositor
+    # never sees a lossy encode.
+    assert b["num_inference_steps"] == 4 and b["seed"] == 7 and b["output_format"] == "png"
     assert "negative" not in b and "negative_prompt" not in b
     assert "unmarked surfaces" in b["prompt"]
     assert res.provider == "fal" and res.mime == "image/jpeg" and res.seed == 7
@@ -301,8 +318,10 @@ async def test_replicate_sync_prefer_wait_and_input_shape(monkeypatch):
     assert seen["headers"]["authorization"] == "Bearer t"
     assert seen["headers"]["prefer"] == "wait=60"
     inp = seen["body"]["input"]
-    assert inp["aspect_ratio"] == "4:5" and inp["megapixels"] == "1"
-    assert inp["output_format"] == "jpg" and inp["go_fast"] is True and inp["seed"] == 7
+    # 1080x1350 is 1.46MP, so "1" would generate below the delivery size and
+    # upscale. go_fast is the quantised path and is off for a final creative.
+    assert inp["aspect_ratio"] == "4:5" and inp["megapixels"] == "2"
+    assert inp["output_format"] == "png" and inp["go_fast"] is False and inp["seed"] == 7
     assert res.job_id == "p1" and res.provider == "replicate"
 
 
@@ -429,7 +448,7 @@ async def test_bfl_submits_then_polls_to_ready(monkeypatch):
     b = seen["body"]
     assert b["width"] % 16 == 0 and b["height"] % 16 == 0
     assert abs(b["width"] - 1080) <= 8 and abs(b["height"] - 1350) <= 8
-    assert b["safety_tolerance"] == 2 and b["output_format"] == "jpeg" and b["seed"] == 7
+    assert b["safety_tolerance"] == 2 and b["output_format"] == "png" and b["seed"] == 7
     assert poll.call_count == 2 and res.job_id == "g1" and res.seed == 7
 
 
@@ -498,5 +517,5 @@ def test_snap16_keeps_under_4mp():
 
 
 def test_registry_has_no_placeholders():
-    assert set(P.REGISTRY) == {"mock", "fal", "replicate", "bfl"}
+    assert set(P.REGISTRY) == {"mock", "fal", "replicate", "bfl", "openai"}
     assert P.get_provider("mock").name == "mock"

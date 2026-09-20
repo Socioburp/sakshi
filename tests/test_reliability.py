@@ -111,15 +111,28 @@ def test_no_logo_is_an_answer_not_a_gap():
 # --------------------------------------------------------------------------- #
 # memory
 # --------------------------------------------------------------------------- #
-def test_prod_refuses_to_write_unretrievable_memory(monkeypatch):
+def test_never_writes_unretrievable_memory(monkeypatch):
+    """A keyless WRITE fails in every environment, not only prod.
+
+    It used to be guarded by is_prod, so a dev or staging deploy wrote zero
+    vectors -- rows that log "brand_memory_written" and can never be read
+    back, because cosine distance to a zero vector is NaN. That is what "the
+    bot does not remember my brand" looked like from the outside.
+    """
     from app.memory import embed
 
     monkeypatch.setattr(embed.settings, "voyage_api_key", "")
-    monkeypatch.setattr(embed.settings, "env", "prod")
-    with pytest.raises(RuntimeError):
-        embed.embed_texts(["anything"])
+    for env in ("prod", "dev"):
+        monkeypatch.setattr(embed.settings, "env", env)
+        with pytest.raises(RuntimeError):
+            embed.embed_texts(["anything"], input_type="document")
+
+    # Reads still degrade quietly: a zero QUERY matches nothing, which is an
+    # empty prompt section rather than a poisoned one.
     monkeypatch.setattr(embed.settings, "env", "dev")
-    assert embed.embed_texts(["anything"])[0] == [0.0] * embed.settings.embed_dim
+    assert (
+        embed.embed_texts(["anything"], input_type="query")[0] == [0.0] * embed.settings.embed_dim
+    )
 
 
 # --------------------------------------------------------------------------- #

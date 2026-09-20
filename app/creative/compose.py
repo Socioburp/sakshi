@@ -23,7 +23,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from PIL import Image
 
 from app.config import settings
-from app.creative import fonts
+from app.creative import fonts, legibility
 from app.creative.brief import CreativeBrief, Slide
 from app.logging import get_logger
 
@@ -221,7 +221,13 @@ def _copy_text(brief: CreativeBrief, slide: Slide, brand_ctx: dict[str, Any]) ->
     return " ".join(b for b in bits if b)
 
 
-def render_html(brief: CreativeBrief, slide: Slide, brand: Any, background_data_uri: str) -> str:
+def render_html(
+    brief: CreativeBrief,
+    slide: Slide,
+    brand: Any,
+    background_data_uri: str,
+    scrim_boost: float = 1.0,
+) -> str:
     name = brief.template_for(slide)
     tpl = _env.get_template(TEMPLATES.get(name, TEMPLATES[DEFAULT_TEMPLATE]))
     w, h = brief.pixel_size()
@@ -247,6 +253,7 @@ def render_html(brief: CreativeBrief, slide: Slide, brand: Any, background_data_
         **padding_for(w, h),
         # The CTA belongs to the post, and on a carousel it earns its place on
         # the last slide only -- repeating it on every slide reads as a template.
+        scrim_boost=scrim_boost,
         show_cta=bool(brief.cta)
         and (not brief.is_carousel() or slide.position == len(brief.slides)),
         slide_count=len(brief.slides) if brief.is_carousel() else 1,
@@ -323,7 +330,15 @@ async def compose(
     background_mime: str = "image/jpeg",
 ) -> bytes:
     """Return the finished PNG for one slide (a single post is slide 1 of 1)."""
-    html = render_html(brief, slide, brand, as_data_uri(background, background_mime))
+    # How much scrim this particular photograph needs. Measured on the
+    # background before Chromium is started, so it costs a fraction of a
+    # millisecond and cannot delay the render.
+    boost, why = await asyncio.to_thread(
+        legibility.scrim_boost, background, brief.template_for(slide)
+    )
+    if boost != 1.0:
+        log.info("scrim_measured", template=brief.template_for(slide), **why)
+    html = render_html(brief, slide, brand, as_data_uri(background, background_mime), boost)
     w, h = brief.pixel_size()
     browser = await get_browser()
     page = await browser.new_page(

@@ -26,7 +26,7 @@ from sqlalchemy import select
 
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import claims, compose, photoreal, photoref, product
+from app.creative import claims, compose, dedupe, photoreal, photoref, product, shotplan
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
 from app.db import repo
@@ -238,13 +238,31 @@ async def generate(
 
     # Slides run concurrently. gather with return_exceptions so one bad slide
     # does not discard the ones that already succeeded.
+    # Every slide gets its own rung of the shot ladder and its own seed before
+    # anything is dispatched. Without this the whole carousel shared one lens,
+    # one distance and one angle, and came back as one picture six times.
+    shot_plan = shotplan.apply(brief) if brief.is_carousel() else []
+    if shot_plan:
+        log.info("shot_plan", carousel_group_id=str(group_id), plan=shot_plan)
+
+    # Slides run concurrently but share a duplicate register, so a slide that
+    # lands on a picture an earlier slide already produced is caught and
+    # re-rolled once instead of shipping.
+    register = dedupe_register()
+
     results = await asyncio.gather(
         *(
-            _build_one(ctx, brief, slide, cid, brand_snapshot, assets, resolved, reuse)
+            _build_one(ctx, brief, slide, cid, brand_snapshot, assets, resolved, reuse, register)
             for slide, cid in zip(units, creative_ids, strict=True)
         ),
         return_exceptions=True,
     )
+    if register["hashes"]:
+        log.info(
+            "carousel_variety",
+            carousel_group_id=str(group_id),
+            **dedupe.report(register["hashes"]),
+        )
 
     ok_urls: list[str] = []
     failures: list[str] = []
@@ -569,6 +587,41 @@ def reap_stuck_creatives(now: datetime | None = None) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# duplicate register
+# --------------------------------------------------------------------------- #
+def dedupe_register() -> dict:
+    """Shared state for one carousel: the hashes its slides have produced."""
+    return {"hashes": {}, "lock": asyncio.Lock()}
+
+
+async def _register_or_reroll(
+    register: dict, slide: Slide, image: bytes, *, force: bool = False
+) -> bool:
+    """Record this slide's picture. True when it repeats an earlier slide.
+
+    Held under a lock because slides finish in whatever order the vendor
+    returns them, and two slides checking an empty register at the same moment
+    would both believe they were first. The EARLIER slide position always
+    keeps its picture; the later one is the one asked to try again.
+
+    `force` records unconditionally -- used after a re-roll, which is not
+    allowed to trigger a second one.
+    """
+    try:
+        h = await asyncio.to_thread(dedupe.dhash, image)
+    except Exception:  # noqa: BLE001 - a hash failure must never fail a slide
+        log.warning("dedupe_hash_failed", position=slide.position)
+        return False
+    async with register["lock"]:
+        if not force:
+            for pos, seen in register["hashes"].items():
+                if pos < slide.position and dedupe.distance(h, seen) <= dedupe.DUPLICATE_DISTANCE:
+                    return True
+        register["hashes"][slide.position] = h
+    return False
+
+
+# --------------------------------------------------------------------------- #
 async def _build_one(
     ctx: ToolContext,
     brief: CreativeBrief,
@@ -578,6 +631,7 @@ async def _build_one(
     assets: dict[str, BrandAssetSnapshot],
     resolved: dict[int, str] | None = None,
     reuse: dict[int, tuple[str, str]] | None = None,
+    register: dict | None = None,
 ) -> str:
     w, h = brief.pixel_size()
     ref = (resolved or {}).get(slide.position)
@@ -622,7 +676,12 @@ async def _build_one(
             slide.visual_direction.negative_prompt,
             mood=slide.visual_direction.mood,
             category=getattr(brand_snapshot, "category", None),
+            # The slide's own rung of the shot ladder. Without these two the
+            # whole carousel shared one lens, one distance and one angle.
+            position=slide.position,
+            slide_count=len(brief.slides) if brief.is_carousel() else 1,
         )
+        seed = slide.visual_direction.seed
         with ctx.trace.stage(f"{stage}:imagegen", provider=provider.name):
             res = await provider.generate(
                 ImageRequest(
@@ -630,12 +689,39 @@ async def _build_one(
                     negative=negative,
                     width=w,
                     height=h,
-                    seed=slide.visual_direction.seed,
+                    seed=seed,
                     style=slide.visual_direction.mood,
                 )
             )
         image, mime = res.data, res.mime
         job_id, cost_micros = res.job_id, res.cost_micros
+
+        # Did this slide come back as a picture an earlier slide already made?
+        # One re-roll, with a different seed, and only for a real collision --
+        # a second vendor call per slide would double the bill.
+        if register is not None and await _register_or_reroll(register, slide, image):
+            salt_seed = shotplan.seed_for(shotplan.brief_key(brief), slide.position, salt=1)
+            log.warning(
+                "slide_duplicate_reroll",
+                position=slide.position,
+                old_seed=seed,
+                new_seed=salt_seed,
+            )
+            with ctx.trace.stage(f"{stage}:imagegen_reroll", provider=provider.name):
+                res = await provider.generate(
+                    ImageRequest(
+                        prompt=prompt,
+                        negative=negative,
+                        width=w,
+                        height=h,
+                        seed=salt_seed,
+                        style=slide.visual_direction.mood,
+                    )
+                )
+            image, mime = res.data, res.mime
+            job_id = res.job_id
+            cost_micros += res.cost_micros
+            await _register_or_reroll(register, slide, image, force=True)
 
     with ctx.trace.stage(f"{stage}:compose"):
         png = await compose.compose(brief, slide, brand_snapshot, image, mime)

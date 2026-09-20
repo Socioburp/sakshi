@@ -26,13 +26,43 @@ class ToolContext:
     # which is useless precisely when you are debugging a bad creative.
     grounding: Grounded = field(default_factory=Grounded)
 
-    async def say(self, text: str, buttons: list[Button] | None = None) -> bool:
-        """True if the provider accepted the message. Callers must not assume."""
+    # How many separate chat messages one turn may send before the rest are
+    # folded into the closing reply. WhatsApp is not a log: three notifications
+    # for one request reads as a machine talking to itself, and on a phone each
+    # one is a separate buzz. Two is a status line plus an answer.
+    say_budget: int = 2
+    _said: int = 0
+    _deferred: list[str] = field(default_factory=list)
+
+    async def say(
+        self, text: str, buttons: list[Button] | None = None, final: bool = False
+    ) -> bool:
+        """Send a chat message, or hold it back to travel with the closing one.
+
+        True if the provider accepted the message. Callers must not assume.
+
+        Nothing is ever dropped: over-budget lines are kept and prepended to
+        the turn's final reply, which the runner marks with `final=True`. That
+        is also why the budget is safe to tighten -- the worst case is one
+        longer message, never a lost one.
+        """
+        body = (text or "").strip()
+        if final:
+            if self._deferred:
+                body = "\n\n".join([*self._deferred, body]).strip()
+                self._deferred.clear()
+        elif self._said >= self.say_budget:
+            if body:
+                self._deferred.append(body)
+            return True
+        if not body:
+            return True
+        self._said += 1
         return await send.send_text(
             account_id=self.account_id,
             session_id=self.session_id,
             wa_id=self.wa_id,
-            text=text,
+            text=body,
             buttons=buttons,
         )
 

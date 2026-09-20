@@ -165,11 +165,33 @@ MAX_DOWNLOAD_BYTES = 30 * 1024 * 1024
 
 # Vendor list price per image, in micro-dollars, for the ledger. Overridden
 # for every vendor at once by IMAGEGEN_COST_MICROS when set.
+#
+# These are the QUALITY-tier prices, checked September 2026, and they match
+# the models config.py now defaults to. They were still the schnell figures
+# after the model defaults moved, which meant the credit ledger was
+# under-charging by roughly 10x on every creative.
+#
+# A post is 1080x1350 = 1.46MP, which is what these are computed against.
+# Vendors bill differently and the difference is not small:
+#
+#   fal        $0.025/MP on fal-ai/flux/dev, ROUNDED UP to the next whole
+#              megapixel -- so 1.46MP bills as 2MP: 2 x $0.025 = $0.050
+#   replicate  $0.030 flat per image on black-forest-labs/flux-dev,
+#              resolution-independent
+#   bfl        $0.030/MP on flux-2-pro: 1.46 x $0.030 = $0.044
+#
+# Re-check these before any pricing change to the product. If a vendor's
+# rate moves, set IMAGEGEN_COST_MICROS rather than editing here, so the
+# ledger can be corrected without a deploy.
 DEFAULT_COST_MICROS = {
-    "fal": 4400,  # FLUX.1 [schnell] $0.003/MP, a 1080x1350 post is 1.46MP
-    "replicate": 3000,  # flux-schnell "$3.00 / thousand output images"
-    "bfl": 14000,  # FLUX.2 [klein] 4B, 1.4c for the first megapixel
-    "openai": 40000,  # gpt-image-1 medium, ~4c for a 1024-edge image
+    "fal": 50000,  # FLUX.1 [dev] $0.025/MP, 1.46MP rounds up to 2MP
+    "replicate": 30000,  # flux-dev, $0.030 per image flat
+    "bfl": 44000,  # FLUX.2 [pro] $0.030/MP x 1.46MP
+    # gpt-image-1 at quality="high", portrait. The least certain number here:
+    # OpenAI is not the configured provider, so it is set high on purpose --
+    # over-charging a path nobody uses is safer than under-charging it.
+    # Verify against your own invoice before making OpenAI the default.
+    "openai": 190000,
 }
 
 
@@ -347,6 +369,55 @@ def _snap16(n: int) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# quality dials, shared by every step-taking vendor
+# --------------------------------------------------------------------------- #
+# FLUX.1 [schnell] is a timestep-distilled model: it is trained to land in 1-4
+# steps and gains nothing after that. FLUX.1 [dev] is guidance-distilled and
+# keeps improving to ~28, which is where BFL's own reference configs sit. The
+# old code hardcoded 4 for schnell and sent NOTHING for anything else, so a
+# `dev` model ran at whatever the vendor's default happened to be.
+STEPS_BY_FAMILY = (
+    ("schnell", 4),
+    ("klein", 8),
+    ("dev", 28),
+    ("pro", 28),
+)
+STEPS_FALLBACK = 28
+
+
+def steps_for(model: str) -> int:
+    """Denoising steps for a model id. `IMAGEGEN_STEPS` overrides everything."""
+    if settings.imagegen_steps:
+        return max(1, min(50, int(settings.imagegen_steps)))
+    name = (model or "").lower()
+    for family, n in STEPS_BY_FAMILY:
+        if family in name:
+            return n
+    return STEPS_FALLBACK
+
+
+def source_format() -> tuple[str, str]:
+    """(vendor output_format, mime) for the picture handed to the compositor.
+
+    PNG by default. The background is composited over, screenshotted by
+    Chromium and encoded once at the end; asking the vendor for JPEG put a
+    lossy generation in front of all of that, and JPEG ringing around a
+    product edge is exactly what makes a creative read as cheap.
+    """
+    return ("png", "image/png") if settings.imagegen_lossless_source else ("jpeg", "image/jpeg")
+
+
+def megapixels_for(width: int, height: int) -> str:
+    """Replicate's `megapixels` dial, rounded UP to cover the delivery size.
+
+    It was pinned to "1". A 1080x1350 post is 1.46MP, so every creative was
+    generated below its delivery resolution and upscaled by the browser --
+    soft type edges and mush in the product detail, on every single slide.
+    """
+    return "2" if (width * height) > 1_100_000 else "1"
+
+
+# --------------------------------------------------------------------------- #
 # fal.ai
 # --------------------------------------------------------------------------- #
 class FalProvider(HttpImageProvider):
@@ -373,15 +444,17 @@ class FalProvider(HttpImageProvider):
             raise ImageGenError("FAL_KEY is unset")
 
     def _payload(self, req: ImageRequest) -> dict[str, Any]:
+        fmt, _ = source_format()
         body: dict[str, Any] = {
             "prompt": flux_prompt(req.prompt, req.negative),
             "image_size": {"width": req.width, "height": req.height},
             "num_images": 1,
             "enable_safety_checker": True,
-            "output_format": "jpeg",
+            "output_format": fmt,
+            # Sent for every model, not only schnell. A `dev` model with no
+            # step count ran at the vendor's default, which is not ours.
+            "num_inference_steps": steps_for(self.model),
         }
-        if "schnell" in self.model:
-            body["num_inference_steps"] = 4
         if req.seed is not None:
             body["seed"] = req.seed
         return body
@@ -477,17 +550,23 @@ class ReplicateProvider(HttpImageProvider):
         }
 
     def _input(self, req: ImageRequest) -> dict[str, Any]:
+        fmt, _ = source_format()
         body: dict[str, Any] = {
             "prompt": flux_prompt(req.prompt, req.negative),
             "aspect_ratio": nearest_ratio(req.width, req.height),
-            "megapixels": "1",
+            # Was pinned to "1": every 4:5 post was generated at 1MP and
+            # upscaled to 1080x1350 by the browser.
+            "megapixels": megapixels_for(req.width, req.height),
             "num_outputs": 1,
-            "output_format": "jpg",
-            "output_quality": 92,
-            "go_fast": True,
+            "output_format": "png" if fmt == "png" else "jpg",
+            "num_inference_steps": steps_for(self.model),
+            # go_fast routes to a quantised/optimised path. It is the right
+            # trade for a draft and the wrong one for the only picture the
+            # owner will ever see.
+            "go_fast": False,
         }
-        if "schnell" in self.model:
-            body["num_inference_steps"] = 4
+        if fmt != "png":
+            body["output_quality"] = 95
         if req.seed is not None:
             body["seed"] = req.seed
         return body
@@ -520,7 +599,7 @@ class ReplicateProvider(HttpImageProvider):
             raise ImageGenError("replicate: succeeded with no output")
         return {
             "url": url,
-            "mime": "image/jpeg",
+            "mime": source_format()[1],
             "job_id": pred.get("id"),
             "seed": req.seed,
             "raw": {"model": self.model, "metrics": pred.get("metrics")},
@@ -564,13 +643,17 @@ class BflProvider(HttpImageProvider):
         w, h = _snap16(req.width), _snap16(req.height)
         while w * h > 4_000_000:  # the documented ceiling
             w, h = _snap16(int(w * 0.9)), _snap16(int(h * 0.9))
+        fmt, _ = source_format()
         body: dict[str, Any] = {
             "prompt": flux_prompt(req.prompt, req.negative),
             "width": w,
             "height": h,
             "safety_tolerance": 2,
-            "output_format": "jpeg",
+            "output_format": fmt,
         }
+        # FLUX.2 [pro] takes steps; [klein] is distilled and ignores them.
+        if "klein" not in self.model:
+            body["steps"] = steps_for(self.model)
         if req.seed is not None:
             body["seed"] = req.seed
         return body
@@ -605,7 +688,7 @@ class BflProvider(HttpImageProvider):
                     raise ImageGenError("bfl: Ready with no sample")
                 return {
                     "url": url,
-                    "mime": "image/jpeg",
+                    "mime": source_format()[1],
                     "job_id": job.get("id"),
                     "seed": result.get("seed", req.seed),
                     "raw": {"model": self.model},
@@ -672,8 +755,9 @@ class OpenAIProvider(HttpImageProvider):
         # gpt-image-1 accepts output_format + quality; dall-e-3 does not, and
         # returns a URL rather than base64 unless asked.
         if "gpt-image" in self.model:
-            body["output_format"] = "jpeg"
-            body["quality"] = settings.imagegen_openai_quality or "medium"
+            fmt, _ = source_format()
+            body["output_format"] = fmt
+            body["quality"] = settings.imagegen_openai_quality or "high"
         else:
             body["response_format"] = "b64_json"
         return body
@@ -702,7 +786,7 @@ class OpenAIProvider(HttpImageProvider):
         if b64:
             return {
                 "data": base64.b64decode(b64),
-                "mime": "image/jpeg" if "gpt-image" in self.model else "image/png",
+                "mime": source_format()[1] if "gpt-image" in self.model else "image/png",
                 "job_id": None,
                 "seed": req.seed,
                 "raw": {"model": self.model},

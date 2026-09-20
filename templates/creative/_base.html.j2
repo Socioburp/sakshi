@@ -29,7 +29,11 @@
   {# Multi-stop scrim. A 2-stop linear gradient bands visibly across a large
      canvas -- these stops approximate an ease-out so the darkening is felt but
      not seen, which keeps the photograph looking bright and real. #}
-  .scrim { position: absolute; inset: 0; }
+  {# The scrim's strength is measured per slide, not fixed (see
+     app/creative/legibility.py). Scaling opacity scales every stop of the
+     gradient together, so the ease the stops were chosen for is preserved --
+     the darkening just lands where the photograph needs it. #}
+  .scrim { position: absolute; inset: 0; opacity: {{ scrim_boost | default(1.0) }}; }
 
   {# Real film grain over everything. Generated backgrounds are too clean, and
      "too clean" is most of what people mean when they say an image looks AI.

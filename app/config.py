@@ -81,16 +81,32 @@ class Settings(BaseSettings):
 
     # imagegen -- the FLUX family (fal/replicate/bfl) plus OpenAI's gpt-image-1,
     # one interface. Model ids are per vendor; the price is what the ledger records.
+    #
+    # DEFAULTS ARE THE QUALITY TIER, NOT THE CHEAP TIER.
+    # Every default here used to be the fast/distilled variant -- schnell at 4
+    # steps, klein 4B, gpt-image-1 at "medium" -- which is why creatives came
+    # back soft, plasticky and obviously generated. Those models are built to
+    # win on latency, not on whether an owner would put the picture on their
+    # grid. The product promise is "a 25-year marketing creator made this", so
+    # the default is `dev` at full steps and the cheap tier is opt-in.
     imagegen_provider: Literal["mock", "fal", "replicate", "bfl", "openai"] = "mock"
     fal_key: str = ""
-    imagegen_fal_model: str = "fal-ai/flux/schnell"  # or fal-ai/flux-2/klein/4b
+    imagegen_fal_model: str = "fal-ai/flux/dev"  # schnell is the cheap tier
     replicate_api_token: str = ""
-    imagegen_replicate_model: str = "black-forest-labs/flux-schnell"
+    imagegen_replicate_model: str = "black-forest-labs/flux-dev"
     bfl_api_key: str = ""
-    imagegen_bfl_model: str = "flux-2-klein-4b"  # or flux-2-pro
+    imagegen_bfl_model: str = "flux-2-pro"  # klein-4b is the cheap tier
     openai_api_key: str = ""
     imagegen_openai_model: str = "gpt-image-1"  # or dall-e-3
-    imagegen_openai_quality: str = "medium"  # gpt-image-1: low | medium | high | auto
+    imagegen_openai_quality: str = "high"  # gpt-image-1: low | medium | high | auto
+    # Denoising steps for the step-taking FLUX models. schnell is distilled to
+    # 4 and ignores more; dev is trained for ~28 and visibly improves up to it.
+    # 0 means "the right number for the model", resolved in providers.py.
+    imagegen_steps: int = 0
+    # PNG out of the vendor, JPEG once at the end. Asking a vendor for JPEG
+    # meant the background was lossily encoded, composited over, screenshotted
+    # and encoded again -- two generation losses before the owner saw it.
+    imagegen_lossless_source: bool = True
     # Vendor price per image in micro-dollars, for the ledger only. Unset (0)
     # means the per-vendor list price in providers.DEFAULT_COST_MICROS.
     imagegen_cost_micros: int = 0

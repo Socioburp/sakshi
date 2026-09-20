@@ -159,6 +159,15 @@ a before/after, a menu, a list. Each slide needs its own `headline` and its own 
 slides cost three credits. A single strong image beats a padded carousel: do not \
 reach for one just because the owner said a lot.
 
+**Each slide must be a different photograph, not the same one reworded.** The \
+camera, distance and angle are handled for you -- slide 1 is shot wide, the middle \
+slides close in, the last is graphic with room for the CTA. Your job is the other \
+half: give each slide a different SUBJECT or MOMENT. "The dish" / "the dish again" \
+/ "the dish once more" is one photograph three times, whatever the camera does with \
+it. "The finished plate" / "the hands making it" / "the counter it is served at" \
+is a carousel. If you cannot name a different subject for every slide, the post \
+wants fewer slides -- say so and offer the number you can fill.
+
 ## Reels
 
 `format.type: "reel"` turns the same single creative into a seven-second vertical \

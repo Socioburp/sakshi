@@ -34,14 +34,21 @@ def embed_texts(texts: list[str], input_type: str = "document") -> list[list[flo
     if not texts:
         return []
     if not settings.voyage_api_key:
-        if settings.is_prod and input_type == "document":
+        if input_type == "document":
             # A zero vector has no direction: cosine distance to it is NaN, so
-            # a row WRITTEN this way can never be retrieved, even after the
-            # key is fixed. Failing loudly beats memory that silently forgets.
-            # Reads degrade quietly instead: a zero query matches nothing.
+            # a row WRITTEN this way can never be retrieved, even after the key
+            # is fixed. This used to be guarded by `settings.is_prod`, which is
+            # exactly backwards: staging and any deploy that has not had its
+            # key set yet are where this actually happens, and they are where
+            # it does the damage. Every approval, rejection and product note
+            # written without a key is a row that looks saved, reports
+            # "brand_memory_written", and can never be read back -- which is
+            # what "the bot does not remember my brand" looks like from the
+            # outside. Reads still degrade quietly: a zero query matches
+            # nothing, which is an empty prompt section, not a poisoned one.
             raise RuntimeError("VOYAGE_API_KEY is unset; refusing to write unretrievable memory")
-        # Deterministic stand-in so local runs and tests do not need a key.
-        log.warning("voyage_key_missing", note="using zero vectors")
+        # Deterministic stand-in for READS so local runs and tests need no key.
+        log.warning("voyage_key_missing", note="query embedded as zeros; retrieval will be empty")
         return [[0.0] * settings.embed_dim for _ in texts]
     res = _voyage().embed(texts, model=settings.voyage_model, input_type=input_type)
     return res.embeddings
