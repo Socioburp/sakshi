@@ -300,7 +300,8 @@ class _Chat:
         return True
 
 
-async def test_slides_are_sent_as_they_finish_and_say_where_they_belong():
+async def test_as_ready_sends_slides_as_they_finish_and_says_where_they_belong(monkeypatch):
+    monkeypatch.setattr(pipeline.settings, "carousel_delivery", "as_ready")
     brief = CreativeBrief.model_validate(EXAMPLE_CAROUSEL)
     chat = _Chat()
     delivery = pipeline._Delivery(chat, brief, 3, "en")
@@ -317,6 +318,42 @@ async def test_slides_are_sent_as_they_finish_and_say_where_they_belong():
         "u3": "3/3",
     }
     assert delivery.sent == {1: True, 2: True, 3: True}
+
+
+async def test_by_default_a_carousel_arrives_as_a_set_in_order():
+    """Slides finish 2, 3, 1. The owner sees 1, 2, 3 -- a set they can forward."""
+    assert Settings.model_fields["carousel_delivery"].default == "ordered"
+    brief = CreativeBrief.model_validate(EXAMPLE_CAROUSEL)
+    chat = _Chat()
+    delivery = pipeline._Delivery(chat, brief, 3, "en")
+
+    async def finish(position, after):
+        await asyncio.sleep(after)
+        await delivery.send(position, f"u{position}")
+
+    await asyncio.gather(finish(1, 0.03), finish(2, 0.0), finish(3, 0.015))
+    assert chat.images == [] and sorted(delivery.ready) == [1, 2, 3], "held, and counted as ready"
+    await delivery.flush()
+    assert [u for u, _ in chat.images] == ["u1", "u2", "u3"]
+    assert [c.split(" ")[0] for _, c in chat.images] == ["1/3", "2/3", "3/3"]
+    await delivery.flush()
+    assert len(chat.images) == 3, "flushing twice sends nothing twice"
+
+
+async def test_a_missing_slide_does_not_hold_up_the_rest_of_the_set():
+    chat = _Chat()
+    delivery = pipeline._Delivery(chat, CreativeBrief.model_validate(EXAMPLE_CAROUSEL), 3, "en")
+    await delivery.send(3, "u3")
+    await delivery.send(1, "u1")
+    await delivery.flush()
+    assert [u for u, _ in chat.images] == ["u1", "u3"]
+
+
+async def test_a_single_post_is_never_held():
+    chat = _Chat()
+    delivery = pipeline._Delivery(chat, CreativeBrief.model_validate(EXAMPLE), 1, "en")
+    await delivery.send(1, "u1")
+    assert [u for u, _ in chat.images] == ["u1"]
 
 
 async def test_a_slow_job_says_so_in_the_chat_and_changes_nothing_else(monkeypatch):

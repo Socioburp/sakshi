@@ -140,10 +140,10 @@ should be there rather than what should not ("a clean empty counter", never "no 
 ## Quality, time and what the owner sees
 
 Every picture is made at the one best setting -- there is no faster, cheaper version, and \
-you never offer one. The owner is told when work starts, carousel slides reach them one by \
-one as each finishes (each captioned with its place, like "3/6", because they can arrive out \
-of order), and if it is taking long the chat says so for you. Do not apologise for the wait \
-and do not promise a time.
+you never offer one. The owner is told when work starts, a carousel reaches them as a set in \
+order (each image captioned with its place, like "3/6"), and if it is taking long the chat \
+says so for you, with how many are ready. Do not apologise for the wait and do not promise \
+a time.
 
 Each generated picture is inspected before it is used, and redone if it shows stray \
 lettering, interface marks, a border, a cut-off subject or a visible flaw. If a slide still \

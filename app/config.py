@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     # Seconds of silence after which the owner is told the job is still going.
     # A metric to watch and a message to send -- never a limit on the output.
     slow_notice_s: int = 60
+    # How a carousel reaches the owner. "ordered": slides are held until the set
+    # is done and sent 1..N, so the chat reads in order and the set can be
+    # forwarded as it stands; progress is reported in words meanwhile.
+    # "as_ready": each slide is sent the moment it finishes, captioned with its
+    # place, and may arrive out of order. A single post is always sent at once.
+    carousel_delivery: Literal["ordered", "as_ready"] = "ordered"
     # Denoising steps for the step-taking FLUX models. schnell is distilled to
     # 4 and ignores more; dev is trained for ~28 and visibly improves up to it.
     # 0 means "the right number for the model", resolved in providers.py.

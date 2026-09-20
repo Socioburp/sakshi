@@ -15,7 +15,8 @@ and no deadline that changes what is made. Speed is solved by DELIVERY instead:
 
   * the owner is told the moment work starts;
   * slides are generated in parallel (bounded by IMAGEGEN_CONCURRENCY);
-  * each slide is sent the moment it is ready, not held for the slowest one;
+  * a single post is sent the moment it is ready; a carousel is sent as an
+    ordered set, or slide by slide as each finishes (CAROUSEL_DELIVERY);
   * if the job is slow the chat says so (SLOW_NOTICE_S) -- it never sends a
     worse picture to hit a time.
 
@@ -106,17 +107,21 @@ _NOTICE_AT = (1, 3, 7)
 
 
 class _Delivery:
-    """Sends each slide the moment it is ready, and says so when the job is slow.
+    """Gets the pictures to the owner, and says so when the job is slow.
 
-    Slides finish in whatever order the vendor returns them, so every carousel
-    image is captioned with its place ("3/6") and the owner can see the order
-    even when 3 lands before 2.
+    A single post goes the moment it is ready. A carousel follows
+    CAROUSEL_DELIVERY: "ordered" holds finished slides and sends the set 1..N
+    once the last one lands (the slow notices report "3 of 6 ready" meanwhile);
+    "as_ready" sends each slide as it finishes. Either way every carousel image
+    is captioned with its place ("3/6").
     """
 
     def __init__(self, ctx: ToolContext, brief: CreativeBrief, total: int, locale: str) -> None:
         self.ctx, self.brief, self.total = ctx, brief, total
         self.lang = ((locale or "en").split("-")[0]).lower()
         self.sent: dict[int, bool] = {}
+        self.ready: dict[int, str] = {}
+        self.hold = total > 1 and settings.carousel_delivery == "ordered"
         self._lock = asyncio.Lock()
         self._watch: asyncio.Task | None = None
 
@@ -126,6 +131,19 @@ class _Delivery:
         return f"{position}/{self.total}" + (f" · {self.brief.headline}" if position == 1 else "")
 
     async def send(self, position: int, url: str) -> bool:
+        """A slide is finished. Sent now, or held for `flush` (ordered carousels)."""
+        self.ready[position] = url
+        if self.hold:
+            return True
+        return await self._send(position, url)
+
+    async def flush(self) -> None:
+        """Send whatever was held, in slide order. A no-op when nothing was."""
+        for position in sorted(self.ready):
+            if position not in self.sent:
+                await self._send(position, self.ready[position])
+
+    async def _send(self, position: int, url: str) -> bool:
         async with self._lock:  # one message at a time: WhatsApp orders by arrival
             try:
                 show = self.ctx.show_video if self.brief.is_reel() else self.ctx.show
@@ -155,8 +173,9 @@ class _Delivery:
             await asyncio.sleep(wait)
             elapsed += wait
             table = _STILL_WORKING_ONE if self.total <= 1 else _STILL_WORKING
-            line = table.get(self.lang, table["en"]).format(done=len(self.sent), total=self.total)
-            log.info("slow_notice", elapsed_s=elapsed, done=len(self.sent), total=self.total)
+            done = len(self.ready)
+            line = table.get(self.lang, table["en"]).format(done=done, total=self.total)
+            log.info("slow_notice", elapsed_s=elapsed, done=done, total=self.total)
             try:
                 await self.ctx.progress(line)
             except Exception:  # noqa: BLE001 - a missed notice must never cost the creative
@@ -436,6 +455,9 @@ async def generate(
         )
     finally:
         await delivery.stop()
+    # Ordered carousels go out now, 1..N. Slides that failed are simply absent.
+    with ctx.trace.stage("deliver_set"):
+        await delivery.flush()
     if register["hashes"]:
         log.info(
             "carousel_variety",
@@ -469,7 +491,7 @@ async def generate(
         # Partial carousel: refund only the paid slides that did not ship.
         _refund(ctx, group_id, failed_billable, "partial_carousel")
 
-    # Already sent, one by one, as each slide finished (see _Delivery).
+    # Already sent -- as each finished, or as an ordered set (see _Delivery).
     delivered = bool(ok_urls) and len(delivery.sent) == len(ok_urls) and all(delivery.sent.values())
     if not delivered:
         log.error("creative_not_delivered", account_id=str(ctx.account_id), urls=len(ok_urls))
