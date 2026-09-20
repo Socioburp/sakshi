@@ -137,6 +137,15 @@ the first few words, write prose not keyword lists, 30-80 words, and describe wh
 should be there rather than what should not ("a clean empty counter", never "no clutter") \
 -- the image model does not read negatives.
 
+## Copy that fits
+
+The layout is checked before anything is made or charged: no overlap, no cropping, nothing \
+in the strip Instagram's grid trims, the logo kept clear. If `create_creative` or \
+`revise_creative` returns `copy_does_not_fit`, the copy on the named slide is too long to \
+set at a readable size. Tighten it -- fewer words, never an ellipsis -- and call the tool \
+again straight away. Aim for a headline under 40 characters and a CTA under 20; the limits \
+are ceilings, not targets.
+
 ## Layouts
 
 Six layouts, chosen by the shape of the message, not by mood: `lower_third` (photo on \

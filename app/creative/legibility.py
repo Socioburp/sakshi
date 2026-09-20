@@ -100,6 +100,74 @@ def measure(image: bytes, template: str | None = None) -> dict[str, float]:
     }
 
 
+def measure_box(image: bytes, box: tuple[float, float, float, float]) -> dict[str, float]:
+    """The same two numbers, for an arbitrary (l, t, r, b) box in 0..1 fractions."""
+    from PIL import Image, ImageStat
+
+    left, top, right, bottom = (min(1.0, max(0.0, float(v))) for v in box)
+    with Image.open(BytesIO(image)) as im:
+        grey = im.convert("L")
+        w, h = grey.size
+        x0, y0 = int(w * left), int(h * top)
+        x1, y1 = max(int(w * right), x0 + 1), max(int(h * bottom), y0 + 1)
+        grey = grey.crop((x0, y0, x1, y1))
+        grey.thumbnail((_SAMPLE, _SAMPLE), Image.LANCZOS)
+        stat = ImageStat.Stat(grey)
+        hist = grey.histogram()
+    return {
+        "luminance": _percentile(hist, BRIGHT_PERCENTILE),
+        "busyness": float(stat.stddev[0]),
+    }
+
+
+# The local scrim under the text block: invisible at the designed strength,
+# rising with the measured need, and capped well short of a black plate.
+LOCAL_MAX = 0.42
+
+
+def _boost_from(m: dict[str, float]) -> float:
+    # Brightness is the primary term: white type on a bright band is the case
+    # that actually fails. Below BRIGHT the scrim is eased off instead, which
+    # is what keeps a dark, moody photograph from turning to mud.
+    bright_term = (m["luminance"] - BRIGHT) / BRIGHT  # -1.0 .. +1.0
+    # Busyness only ever adds. A calm bright band can be handled with a little
+    # more scrim; a busy one needs more than its brightness alone suggests.
+    busy_term = max(0.0, m["busyness"] - BUSY) / BUSY
+    boost = 1.0 + 0.55 * bright_term + 0.35 * busy_term
+    return round(max(MIN_BOOST, min(MAX_BOOST, boost)), 3)
+
+
+def scrim_for_box(
+    image: bytes, box: tuple[float, float, float, float]
+) -> tuple[float, float, dict]:
+    """(gradient boost, local scrim opacity, why) for the MEASURED text block.
+
+    `box` is where the compositor actually set the words, after fitting -- not
+    a band the template was assumed to use. A two-line headline and a six-line
+    one in the same layout sit over different pixels, and TYPE_BANDS could not
+    tell them apart. Falls back to the scrim as designed on any failure.
+    """
+    try:
+        m = measure_box(image, box)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("legibility_measure_failed", box=list(box), error=repr(exc)[:120])
+        return 1.0, 0.0, {"reason": "measurement failed"}
+    boost = _boost_from(m)
+    # Only the need ABOVE the designed scrim goes into the local one.
+    local = round(max(0.0, min(LOCAL_MAX, (boost - 1.0) * (LOCAL_MAX / (MAX_BOOST - 1.0)))), 3)
+    return (
+        boost,
+        local,
+        {
+            "luminance": round(m["luminance"], 1),
+            "busyness": round(m["busyness"], 1),
+            "boost": boost,
+            "local": local,
+            "box": [round(float(v), 3) for v in box],
+        },
+    )
+
+
 def _percentile(hist: list[int], q: float) -> float:
     """The luminance below which `q` of the band's pixels fall."""
     total = sum(hist)
@@ -129,16 +197,7 @@ def scrim_boost(image: bytes, template: str | None = None) -> tuple[float, dict]
         log.warning("legibility_measure_failed", template=template, error=repr(exc)[:120])
         return 1.0, {"reason": "measurement failed"}
 
-    # Brightness is the primary term: white type on a bright band is the case
-    # that actually fails. Below BRIGHT the scrim is eased off instead, which
-    # is what keeps a dark, moody photograph from turning to mud.
-    bright_term = (m["luminance"] - BRIGHT) / BRIGHT  # -1.0 .. +1.0
-    # Busyness only ever adds. A calm bright band can be handled with a little
-    # more scrim; a busy one needs more than its brightness alone suggests.
-    busy_term = max(0.0, m["busyness"] - BUSY) / BUSY
-
-    boost = 1.0 + 0.55 * bright_term + 0.35 * busy_term
-    boost = round(max(MIN_BOOST, min(MAX_BOOST, boost)), 3)
+    boost = _boost_from(m)
     return boost, {
         "luminance": round(m["luminance"], 1),
         "busyness": round(m["busyness"], 1),

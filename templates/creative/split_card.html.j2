@@ -12,8 +12,13 @@
   .scrim { height: {{ photo_h }}px;
            background: linear-gradient(180deg, rgba(0,0,0,.22) 0%, rgba(0,0,0,0) 38%); }
   .grain { height: {{ photo_h }}px; }
+  {# Auto height: the panel is as tall as the words need (never shorter than
+     the design, never more than 62% of the frame) and the photograph takes
+     what is left -- FIT_JS's reflow() reads data-photo-above and resizes it.
+     A fixed-height panel is how copy gets cropped. #}
   .panel { position: absolute; left: 0; right: 0; bottom: 0;
-           height: {{ panel_h }}px; background: {{ brand.primary }};
+           min-height: {{ panel_h }}px; max-height: {{ (height*0.62)|round|int }}px;
+           background: {{ brand.primary }};
            border-radius: {{ (width*0.055)|round|int }}px {{ (width*0.055)|round|int }}px 0 0;
            padding: {{ (width*0.072)|round|int }}px {{ pad_x }}px {{ [pad_bottom, (width*0.072)|round|int]|max }}px;
            display: flex; flex-direction: column;
@@ -22,13 +27,15 @@
   .headline { font-size: {{ (width * hf)|round|int }}px; color: {{ brand.ink }};
               text-shadow: none; }
   .subhead { font-size: {{ (width*0.033)|round|int }}px; text-shadow: none; max-width: 86%; }
-  .footrow { display: flex; align-items: center; justify-content: space-between;
-             gap: {{ (width*0.03)|round|int }}px; margin-top: auto; }
-  .footrow .logo { height: {{ (width*0.052)|round|int }}px;
-                   max-width: {{ (width*0.34)|round|int }}px; filter: none; }
+  {# Wraps: a wide wordmark and a long CTA take a row each rather than one
+     pushing the other off the canvas. #}
+  .footrow { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; row-gap: {{ (width*0.03)|round|int }}px;
+             gap: {{ (width*0.04)|round|int }}px; margin-top: auto;
+             padding-top: {{ (width*0.045)|round|int }}px; }
+  .footrow .logo { filter: none; }
 {% endblock %}
 {% block body %}
-  <div class="panel">
+  <div class="panel" data-photo-above data-overlap="{{ (width*0.03)|round|int }}">
     <h1 class="headline">{{ slide.headline }}</h1>
     {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
     <div class="footrow">

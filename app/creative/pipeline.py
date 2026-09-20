@@ -97,6 +97,59 @@ def claim_notes(brief: CreativeBrief, brand: Any) -> list[dict[str, str]]:
     return [v.as_dict() for v in hits if v.severity == "advise"]
 
 
+# What each FIT_JS violation means, in words the agent can act on.
+_LAYOUT_WORDS = {
+    "overflow": "the copy is too long for the layout",
+    "clipped": "a word is wider than the layout",
+    "outside": "the copy runs off the canvas",
+    "unsafe": "the copy reaches into the strip the profile grid trims",
+    "overlap": "two elements would overlap",
+    "logo_clearspace": "the copy crowds the logo",
+    "logo_not_loaded": "the logo could not be loaded",
+}
+
+
+async def layout_gate(brief: CreativeBrief, units: list[Slide], brand_snapshot) -> dict | None:
+    """The deterministic guarantees, checked before any money moves.
+
+    Returns the tool result to hand back when a slide cannot be set, or None.
+    There is no degraded render to fall back to: the copy gets shorter.
+    """
+    results = await asyncio.gather(
+        *(compose.check_layout(brief, s, brand_snapshot) for s in units),
+        return_exceptions=True,
+    )
+    problems = []
+    for slide, res in zip(units, results, strict=True):
+        if isinstance(res, compose.LayoutError):
+            kinds = list(dict.fromkeys(v.split(":", 1)[0] for v in res.violations))
+            problems.append(
+                {
+                    "slide": slide.position,
+                    "headline": slide.headline,
+                    "problems": [_LAYOUT_WORDS.get(k, k) for k in kinds],
+                    "detail": res.violations[:6],
+                }
+            )
+        elif isinstance(res, BaseException):
+            raise res
+    if not problems:
+        return None
+    log.warning("layout_gate_refused", slides=[p["slide"] for p in problems])
+    return {
+        "ok": False,
+        "reason": "copy_does_not_fit",
+        "charged": 0,
+        "slides": problems,
+        "hint": (
+            "Nothing was made and nothing was charged. At a readable size this copy cannot be "
+            "set without cropping or overlapping, and we never ship that. Shorten the headline, "
+            "subhead or CTA on the slide(s) named -- fewer words, not smaller words -- and call "
+            "the tool again. Do not tell the owner about layout; just send the tighter version."
+        ),
+    }
+
+
 async def generate(
     ctx: ToolContext,
     brief: CreativeBrief,
@@ -152,7 +205,17 @@ async def generate(
                     sl.template_id = None
             units = brief.units()
             template_switched = True
+        brand_snapshot = _snapshot(db, brand)
 
+    # Prove the copy can be set -- no overlap, no crop, inside the safe zone,
+    # the mark clear -- BEFORE the brief is stored or a credit is charged. The
+    # layout does not depend on the picture, so there is no reason to buy one
+    # first and find out afterwards.
+    unfit = await layout_gate(brief, units, brand_snapshot)
+    if unfit:
+        return unfit
+
+    with session_scope() as db:
         billable_positions = {
             u.position for u in units if not resolved.get(u.position) and u.position not in reuse
         }
@@ -223,7 +286,6 @@ async def generate(
                     "needed": exc.needed,
                     "hint": "Tell the owner they are out of credits and offer a top-up.",
                 }
-        brand_snapshot = _snapshot(db, brand)
         locale = (db.get(Account, ctx.account_id).locale or "en") if ctx.account_id else "en"
 
     # "Making it..." goes out now -- after validation and the charge, before the
@@ -343,6 +405,22 @@ async def generate(
 
 async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> dict:
     """Copy-only revision. Reuses every stored background: no image call, no charge."""
+    # The new copy has to be settable before anything is stored. Done in its own
+    # short session so the browser work does not hold a pooled connection.
+    draft, snap = None, None
+    with session_scope() as db:
+        parent, brand = db.get(Brief, brief_id), db.get(Brand, ctx.brand_id)
+        if parent is not None and brand is not None:
+            try:
+                draft = CreativeBrief.model_validate(_merge(parent.payload, changes))
+                snap = _snapshot(db, brand)
+            except Exception:  # noqa: BLE001 - reported properly by the validation below
+                draft = None
+    if draft is not None:
+        unfit = await layout_gate(draft, draft.units(), snap)
+        if unfit:
+            return unfit
+
     with session_scope() as db:
         parent = db.get(Brief, brief_id)
         if parent is None:

@@ -34,6 +34,14 @@
      gradient together, so the ease the stops were chosen for is preserved --
      the darkening just lands where the photograph needs it. #}
   .scrim { position: absolute; inset: 0; opacity: {{ scrim_boost | default(1.0) }}; }
+  {# The second scrim is not a band: it is placed under the words AFTER they
+     have been fitted, sized to their measured block plus a feather, and given
+     only as much strength as the pixels behind that block call for (see
+     SCRIM_JS in compose.py). Zero-sized and invisible until then, and it stays
+     that way on a calm, dark photograph. #}
+  .scrim-text { position: absolute; left: 0; top: 0; width: 0; height: 0; opacity: 0;
+                background: #000; border-radius: {{ (width*0.09)|round|int }}px;
+                filter: blur({{ (width*0.05)|round|int }}px); pointer-events: none; }
 
   {# Real film grain over everything. Generated backgrounds are too clean, and
      "too clean" is most of what people mean when they say an image looks AI.
@@ -75,6 +83,7 @@
               line-height: {{ '1.14' if brand.indic else '.98' }};
               letter-spacing: {{ '0' if brand.indic else '-0.028em' }};
               color: {{ brand.ink }}; margin: 0; text-wrap: balance;
+              overflow-wrap: break-word;
               text-shadow: 0 {{ (width*0.002)|round|int }}px
                            {{ (width*0.006)|round|int }}px rgba(0,0,0,.34); }
   .subhead { font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }};
@@ -82,6 +91,7 @@
              line-height: {{ '1.5' if brand.indic else '1.34' }};
              letter-spacing: {{ '0' if brand.indic else '-0.004em' }};
              color: {{ brand.ink }}; opacity: .90; text-wrap: pretty;
+             overflow-wrap: break-word;
              margin: {{ (width*0.026)|round|int }}px 0 0;
              text-shadow: 0 {{ (width*0.0015)|round|int }}px
                           {{ (width*0.005)|round|int }}px rgba(0,0,0,.30); }
@@ -95,16 +105,15 @@
          box-shadow: 0 {{ (width*0.004)|round|int }}px
                      {{ (width*0.016)|round|int }}px rgba(0,0,0,.28); }
 
-  {# Sized by what the mark IS. A wordmark is wide and reads at a smaller height;
-     an emblem is compact and needs the height to be legible at feed scale. The
-     drop shadow separates it from a busy photograph without a plate. #}
-  .logo { display: block; object-fit: contain;
-  {% if brand.logo_wordmark %}
-          height: {{ (width*0.050)|round|int }}px; max-width: {{ (width*0.40)|round|int }}px;
-  {% else %}
-          height: {{ (width*0.098)|round|int }}px; max-width: {{ (width*0.26)|round|int }}px;
-  {% endif %}
-          width: auto;
+  {# Sized by what the mark IS, as a fixed share of the canvas WIDTH (see
+     LOGO_WIDTH in compose.py): one figure for a wordmark, one for an emblem,
+     the same in every layout, so the mark is the same size on every post of a
+     brand. No layout overrides it. flex: none -- a mark is never squeezed to
+     make room for a CTA; the CTA's type gives way instead. The drop shadow
+     separates it from a busy photograph without a plate. #}
+  .logo { display: block; object-fit: contain; flex: none;
+          width: {{ (width*brand.logo_width_frac)|round|int }}px; height: auto;
+          max-height: {{ (width*brand.logo_max_height_frac)|round|int }}px;
           filter: drop-shadow(0 {{ (width*0.002)|round|int }}px
                               {{ (width*0.008)|round|int }}px rgba(0,0,0,.42)); }
   .brandline { font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }};
@@ -123,6 +132,7 @@
   <div class="stage">
     <img class="bg" src="{{ background }}" alt="">
     <div class="scrim"></div>
+    <div class="scrim-text"></div>
     <div class="grain"></div>
     {% if brand.signature == 'corner' %}<div class="sig-corner"></div>{% endif %}
     {% if brand.signature == 'bar' %}<div class="sig-bar"></div>{% endif %}

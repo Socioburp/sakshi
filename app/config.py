@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     # compositor. Empty = the Chromium `playwright install` fetched; set it to
     # use a Chromium the host already ships (a path to the `chrome` binary).
     chromium_executable: str = ""
+    # Refuse to render when a face the creative is set in did not load, rather
+    # than ship the brand in a fallback face. Off only where there is no
+    # network to fetch fonts from (the test suite).
+    compose_require_fonts: bool = True
 
     # product lane: the owner's photo, product kept, background replaced
     cutout_enabled: bool = True

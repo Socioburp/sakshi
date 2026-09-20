@@ -21,20 +21,25 @@
   .scrim { display: none; }
   .grain { top: {{ inset_top }}px; left: {{ inset_x }}px; width: {{ width - 2*inset_x }}px;
            height: {{ photo_h }}px; border-radius: {{ (width*0.02)|round|int }}px; }
+  {# Anchored to the floor and auto height: the card grows upward with the
+     words and the framed photograph gives way (reflow() in FIT_JS), down to
+     38% of the frame. Pinning top AND bottom made it a fixed box. #}
   .card { position: absolute; left: {{ inset_x }}px; right: {{ inset_x }}px;
-          top: {{ inset_top + photo_h + gap }}px; bottom: {{ pad_bottom }}px;
+          bottom: {{ pad_bottom }}px;
+          min-height: {{ height - pad_bottom - inset_top - photo_h - gap }}px;
+          max-height: {{ height - pad_bottom - inset_top - gap - (height*0.38)|round|int }}px;
           display: flex; flex-direction: column; }
   .headline { font-size: {{ (width * hf)|round|int }}px; text-shadow: none; max-width: 96%;
               letter-spacing: 0; }
   .subhead { font-size: {{ (width*0.032)|round|int }}px; text-shadow: none; max-width: 90%; }
-  .footrow { display: flex; align-items: center; justify-content: space-between;
-             gap: {{ (width*0.03)|round|int }}px; margin-top: auto; }
-  .footrow .logo { height: {{ (width*0.05)|round|int }}px;
-                   max-width: {{ (width*0.32)|round|int }}px; filter: none; }
+  .footrow { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; row-gap: {{ (width*0.03)|round|int }}px;
+             gap: {{ (width*0.04)|round|int }}px; margin-top: auto;
+             padding-top: {{ (width*0.045)|round|int }}px; }
+  .footrow .logo { filter: none; }
   .sig-corner { display: none; }
 {% endblock %}
 {% block body %}
-  <div class="card">
+  <div class="card" data-photo-above data-photo-top="{{ inset_top }}" data-gap="{{ gap }}">
     <h1 class="headline">{{ slide.headline }}</h1>
     {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
     <div class="footrow">

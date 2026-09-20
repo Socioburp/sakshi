@@ -14,7 +14,7 @@
   .headline { font-size: {{ (width * hf)|round|int }}px; max-width: 80%;
               margin-top: {{ (width*0.02)|round|int }}px; }
   .subhead { font-size: {{ (width*0.036)|round|int }}px; max-width: 64%; }
-  .bottom { display: flex; align-items: flex-end; justify-content: space-between;
+  .bottom { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; row-gap: {{ (width*0.03)|round|int }}px;
             gap: {{ (width*0.03)|round|int }}px; }
   .cta { margin: 0; }
 {% endblock %}

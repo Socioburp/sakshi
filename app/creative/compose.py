@@ -94,6 +94,28 @@ def padding_for(width: int, height: int) -> dict[str, int]:
     }
 
 
+# Type floors, as a fraction of the canvas width. The fit search never goes
+# below these: a headline that only fits at 30px on a 1080 canvas is ~10pt on
+# a phone, which is "fits" in the way a crop is "fits". Below the floor the
+# render FAILS and the copy is shortened upstream -- never truncated, never
+# ellipsised, never shipped small.
+HEADLINE_MIN = 0.044
+SUBHEAD_MIN = 0.026
+CTA_MIN = 0.026
+
+# The mark is sized by canvas WIDTH, one figure per kind of mark, so it is the
+# same size on every post of a brand whatever the layout. A wordmark is wide
+# and reads at a modest height; an emblem is compact and needs the size.
+LOGO_WIDTH = {"wordmark": 0.30, "emblem": 0.11}
+LOGO_MAX_HEIGHT = 0.13
+# Clear space kept free around the mark, as a fraction of its rendered height.
+LOGO_CLEAR = 0.25
+
+# Layouts that set type over the photograph; the rest set it on a solid panel,
+# where there is nothing for a scrim to do.
+TYPE_OVER_PHOTO = frozenset({"centered_overlay", "lower_third", "poster_stack"})
+
+
 # Supersampling dial, measured rather than assumed.
 #
 # Rendering at 2x and resampling down does give visibly crisper stems and a
@@ -206,6 +228,8 @@ def _brand_context(brand: Any) -> dict[str, Any]:
     wordmark = bool(analysis.get("has_wordmark"))
     return {
         "logo_wordmark": wordmark,
+        "logo_width_frac": LOGO_WIDTH["wordmark" if wordmark else "emblem"],
+        "logo_max_height_frac": LOGO_MAX_HEIGHT,
         "name": getattr(brand, "name", ""),
         # Prefer the inlined data URI; fall back to the remote URL, then to text.
         "logo_url": getattr(brand, "logo_src", None) or getattr(brand, "logo_url", None),
@@ -269,48 +293,208 @@ def render_html(
     )
 
 
-# Runs in the page after fonts settle. Shrinks the headline (then the subhead)
-# until nothing spills out of its box. A cropped headline is the single most
-# visible way a creative looks broken, and it is entirely preventable: the
-# browser already knows the rendered size, so measure it instead of hoping the
-# copy limit was tight enough.
+# Runs in the page after fonts settle. Two jobs, in this order:
+#
+#   FIT     For the headline, then the subhead, then the CTA: a binary search
+#           for the LARGEST size between the type floor and the design size at
+#           which the layout has no violations. Containers are auto-height, so
+#           the text flows and the box follows it; nothing is set in a fixed
+#           band and hoped to fit.
+#   ASSERT  Every guarantee below is checked on real bounding boxes. Anything
+#           left over is returned as a violation, and compose() refuses to
+#           render. A collision is a bug, not a warning.
+#
+#             overflow:<box>      a container's content spills out of it
+#             clipped:<el>        text wider than its own block
+#             outside:<el>        an element leaves the canvas
+#             unsafe:<el>         text or the mark outside the safe zone
+#             overlap:<a>+<b>     two elements intersect
+#             logo_clearspace:<x> something inside the mark's clear space
+#             logo_not_loaded     the mark would render as a hole
+#
+# Text is measured with a Range, not the block box: an <h1> is as wide as its
+# container however short the words are, and that is not what a reader sees.
 FIT_JS = """
-([xi, yi]) => {
+(cfg) => {
   const stage = document.querySelector('.stage');
-  const boxes = [...document.querySelectorAll('.content, .panel, .band, .card')];
-  const fits = (el) => {
-    const s = stage.getBoundingClientRect();
-    const r = el.getBoundingClientRect();
-    const inside = r.top >= s.top - 1 && r.bottom <= s.bottom + 1
-                && r.left >= s.left - 1 && r.right <= s.right + 1;
-    return inside && el.scrollHeight <= el.clientHeight + 1
-                  && el.scrollWidth <= el.clientWidth + 1;
+  const S = stage.getBoundingClientRect();
+  const W = S.width, H = S.height;
+  const all = (s) => [...document.querySelectorAll(s)];
+  const rel = (r) => ({l: r.left - S.left, t: r.top - S.top,
+                       r: r.right - S.left, b: r.bottom - S.top});
+  const boxOf = (el) => rel(el.getBoundingClientRect());
+  // Width from the words (a Range), height from the block. A Range's height is
+  // the font's full ascent+descent -- ~1.5em for Poppins -- which overstates
+  // the line box of display type set at line-height .98 by a quarter em top
+  // and bottom, and reported every large headline as outside the safe zone.
+  const inkOf = (el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const r = range.getBoundingClientRect();
+    const b = boxOf(el);
+    if (!(r.width && r.height)) return b;
+    const k = rel(r);
+    return {l: Math.max(b.l, k.l), t: b.t, r: Math.min(b.r, k.r), b: b.b};
   };
-  const shrink = (sel, floorPx, steps) => {
-    const el = document.querySelector(sel);
-    if (!el) return 0;
-    let n = 0;
-    while (n < steps && boxes.some(b => !fits(b))) {
-      const size = parseFloat(getComputedStyle(el).fontSize);
-      if (size <= floorPx) break;
-      el.style.fontSize = (size * 0.97) + 'px';
-      n++;
+  const area = (b) => Math.max(0, b.r - b.l) * Math.max(0, b.b - b.t);
+  const hit = (a, b, tol = 1) =>
+    a.l < b.r - tol && b.l < a.r - tol && a.t < b.b - tol && b.t < a.b - tol;
+  const grow = (b, d) => ({l: b.l - d, t: b.t - d, r: b.r + d, b: b.b + d});
+
+  // Auto-height panels push the photograph: the picture takes what the words
+  // leave, instead of the words being cut to what a fixed panel allows.
+  const reflow = () => {
+    const panel = document.querySelector('[data-photo-above]');
+    if (!panel) return;
+    const d = panel.dataset;
+    const top = parseFloat(d.photoTop || 0), gap = parseFloat(d.gap || 0);
+    const h = Math.max(0, boxOf(panel).t - gap - top + parseFloat(d.overlap || 0));
+    all('.bg, .scrim, .grain').forEach(e => { e.style.height = h + 'px'; });
+  };
+
+  const TEXT = ['headline', 'subhead', 'brandline'];
+  const elements = () => {
+    const out = [];
+    for (const cls of ['headline', 'subhead', 'cta', 'logo', 'brandline', 'rule']) {
+      for (const el of all('.' + cls)) {
+        const box = TEXT.includes(cls) ? inkOf(el) : boxOf(el);
+        if (area(box) > 0) out.push({cls, el, box});
+      }
     }
-    return n;
+    return out;
   };
-  const head = shrink('.headline', 30, 60);
-  const sub = boxes.some(b => !fits(b)) ? shrink('.subhead', 20, 40) : 0;
-  // Grid safety: everything a reader must see sits inside the 3:4 centre crop.
-  const s = stage.getBoundingClientRect();
-  const must = [...document.querySelectorAll('.headline, .subhead, .cta, .logo, .brandline')];
-  const unsafe = must.filter(el => {
-    const r = el.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return false;
-    return r.left < s.left + xi - 1 || r.right > s.right - xi + 1
-        || r.top < s.top + yi - 1 || r.bottom > s.bottom - yi + 1;
-  }).map(el => el.className);
-  return {headline_steps: head, subhead_steps: sub,
-          fits: boxes.every(b => fits(b)), grid_safe: unsafe.length === 0, unsafe};
+
+  const violations = () => {
+    const v = [];
+    for (const b of all('.content, .panel, .band, .card')) {
+      const name = b.className.split(' ')[0];
+      if (b.scrollHeight > b.clientHeight + 1 || b.scrollWidth > b.clientWidth + 1)
+        v.push('overflow:' + name);
+      const r = boxOf(b);
+      if (r.l < -1 || r.t < -1 || r.r > W + 1 || r.b > H + 1) v.push('outside:' + name);
+    }
+    const els = elements();
+    const safe = {l: cfg.safe.x, t: cfg.safe.top, r: W - cfg.safe.x, b: H - cfg.safe.bottom};
+    for (const e of els) {
+      if (['headline', 'subhead', 'cta'].includes(e.cls) && e.el.scrollWidth > e.el.clientWidth + 1)
+        v.push('clipped:' + e.cls);
+      const b = e.box;
+      if (b.l < -1 || b.t < -1 || b.r > W + 1 || b.b > H + 1) v.push('outside:' + e.cls);
+      else if (e.cls !== 'rule' && (b.l < safe.l - 1 || b.r > safe.r + 1
+                                    || b.t < safe.t - 1 || b.b > safe.b + 1))
+        v.push('unsafe:' + e.cls);
+    }
+    for (let i = 0; i < els.length; i++)
+      for (let j = i + 1; j < els.length; j++)
+        if (hit(els[i].box, els[j].box)) v.push('overlap:' + els[i].cls + '+' + els[j].cls);
+    // The corner signature is a triangle; test the triangle, not its square.
+    const corner = document.querySelector('.sig-corner');
+    if (corner) {
+      const c = boxOf(corner);
+      for (const e of els)
+        if (e.box.r > c.l && e.box.t < c.b && (e.box.r - c.l) > (e.box.t - c.t) + 1)
+          v.push('overlap:' + e.cls + '+sig-corner');
+    }
+    const logo = document.querySelector('img.logo');
+    if (logo) {
+      if (!logo.complete || logo.naturalWidth === 0) v.push('logo_not_loaded');
+      const lb = boxOf(logo);
+      const clear = grow(lb, cfg.logoClear * (lb.b - lb.t));
+      if (clear.l < 0 || clear.t < 0 || clear.r > W || clear.b > H) v.push('logo_clearspace:edge');
+      for (const e of els)
+        if (e.el !== logo && hit(clear, e.box, 0)) v.push('logo_clearspace:' + e.cls);
+    }
+    return [...new Set(v)];
+  };
+
+  // The three sized elements, each with a design size (MAX) and a floor (MIN).
+  const parts = [['headline', cfg.min.headline], ['subhead', cfg.min.subhead], ['cta', cfg.min.cta]]
+    .map(([cls, min]) => {
+      const el = document.querySelector('.' + cls);
+      if (!el) return null;
+      const design = parseFloat(getComputedStyle(el).fontSize);
+      return {cls, el, design, min: Math.min(min, design), px: design, steps: 0};
+    }).filter(Boolean);
+  const set = (p, px) => { p.px = px; p.el.style.fontSize = px + 'px'; reflow(); };
+  const ok = () => violations().length === 0;
+  const half = (x) => Math.floor(x * 2) / 2;
+
+  reflow();
+  if (!ok() && parts.length) {
+    // Pass 1: one scale for all three, MIN..MAX together. Binary search for the
+    // largest scale that satisfies every guarantee. Shrinking them together
+    // keeps the hierarchy; shrinking the headline alone for a collision the
+    // CTA caused would throw away optical weight for nothing.
+    const at = (s) => parts.forEach(p => set(p, p.min + (p.design - p.min) * s));
+    let lo = 0, hi = 1;
+    at(0);
+    if (ok()) {
+      while (hi - lo > 0.01) {
+        const mid = (lo + hi) / 2;
+        at(mid); parts.forEach(p => p.steps++);
+        if (ok()) lo = mid; else hi = mid;
+      }
+      at(lo);
+      parts.forEach(p => set(p, half(p.px)));
+      // Pass 2: give back, one element at a time, whatever that element did
+      // not need to give up. Each is a binary search between where it is and
+      // its design size.
+      for (const p of parts) {
+        let a = p.px, b = p.design;
+        while (b - a > 0.5) {
+          const mid = (a + b) / 2;
+          set(p, mid); p.steps++;
+          if (ok()) a = mid; else b = mid;
+        }
+        set(p, half(a));
+      }
+    }
+    // else: not even the floors fit. Left at MIN; violations() reports why,
+    // and compose() refuses the render.
+  }
+  const sizes = {};
+  for (const p of parts) sizes[p.cls] = {px: p.px, design: p.design, steps: p.steps};
+
+  // The block the scrim has to serve: the union of the words actually set.
+  let text = null;
+  for (const e of elements()) {
+    if (!['headline', 'subhead', 'cta'].includes(e.cls)) continue;
+    text = text ? {l: Math.min(text.l, e.box.l), t: Math.min(text.t, e.box.t),
+                   r: Math.max(text.r, e.box.r), b: Math.max(text.b, e.box.b)} : {...e.box};
+  }
+  const boxes = {};
+  for (const e of elements()) boxes[e.cls] = e.box;
+  return {violations: violations(), sizes, boxes, canvas: [W, H],
+          text_box: text && [text.l / W, text.t / H, text.r / W, text.b / H]};
+}
+"""
+
+# Places the local scrim under the measured text block and sets both scrims'
+# strength from what legibility.py measured BEHIND that block.
+SCRIM_JS = """
+({box, boost, local}) => {
+  const stage = document.querySelector('.stage').getBoundingClientRect();
+  const W = stage.width, H = stage.height;
+  const scrim = document.querySelector('.scrim');
+  if (scrim) scrim.style.opacity = boost;
+  const el = document.querySelector('.scrim-text');
+  if (!el || !box) return;
+  const feather = W * 0.07;
+  el.style.left = (box[0] * W - feather) + 'px';
+  el.style.top = (box[1] * H - feather) + 'px';
+  el.style.width = ((box[2] - box[0]) * W + 2 * feather) + 'px';
+  el.style.height = ((box[3] - box[1]) * H + 2 * feather) + 'px';
+  el.style.opacity = local;
+}
+"""
+
+# Which of the faces this creative needs actually arrived. `document.fonts.check`
+# is no use here: it answers true for a family that does not exist at all.
+FONTS_JS = """
+(families) => {
+  const loaded = new Set([...document.fonts].filter(f => f.status === 'loaded')
+                           .map(f => f.family.replace(/["']/g, '')));
+  return families.filter(f => !loaded.has(f));
 }
 """
 
@@ -353,6 +537,129 @@ def image_size(data: bytes) -> tuple[int, int]:
         return im.size
 
 
+class LayoutError(TextDoesNotFit):
+    """A deterministic guarantee cannot be met. The render is refused.
+
+    `violations` are FIT_JS's strings ("overlap:headline+logo",
+    "overflow:panel", ...). The cure is always upstream: shorter copy.
+    """
+
+    def __init__(self, violations: list[str], *, position: int | None = None) -> None:
+        self.violations = list(violations)
+        self.position = position
+        super().__init__(f"layout guarantees not met: {', '.join(self.violations)}")
+
+
+class BrandFontUnavailable(RuntimeError):
+    """A face the creative is set in did not load. Rendering it in a fallback
+    face would be an approximation of the brand, so the render is refused."""
+
+
+def fit_background(image: bytes, width: int, height: int) -> bytes:
+    """The generated picture, resampled to the canvas with Lanczos.
+
+    Generation runs above the delivery size (1600x2000 for a 1080x1350 post).
+    Handing the browser the full frame and letting `object-fit` scale it uses
+    Chromium's bilinear-ish filter and makes every page carry a 5MB data URI;
+    resampling here is both sharper and faster. Same ratio in, so nothing is
+    cropped; a legacy or owner-supplied picture of another ratio is centre-
+    cropped to cover, which is what the template did with it anyway.
+    """
+    with Image.open(BytesIO(image)) as im:
+        im = im.convert("RGB")
+        if im.size == (width, height):
+            return image
+        scale = max(width / im.width, height / im.height)
+        if abs(im.width * scale - width) > 1 or abs(im.height * scale - height) > 1:
+            cw, ch = width / scale, height / scale
+            left, top = (im.width - cw) / 2, (im.height - ch) / 2
+            im = im.crop((round(left), round(top), round(left + cw), round(top + ch)))
+        out = BytesIO()
+        im.resize((width, height), Image.LANCZOS).save(out, format="PNG", compress_level=1)
+        return out.getvalue()
+
+
+def _fit_config(w: int, h: int) -> dict[str, Any]:
+    pad = padding_for(w, h)
+    return {
+        "safe": {"x": pad["pad_x"], "top": pad["pad_top"], "bottom": pad["pad_bottom"]},
+        "min": {
+            "headline": round(w * HEADLINE_MIN),
+            "subhead": round(w * SUBHEAD_MIN),
+            "cta": round(w * CTA_MIN),
+        },
+        "logoClear": LOGO_CLEAR,
+    }
+
+
+def _faces_needed(brief: CreativeBrief, slide: Slide, brand: Any) -> list[str]:
+    ctx = _brand_context(brand)
+    body_used = bool(slide.subhead or brief.cta or not ctx["logo_url"])
+    faces = [ctx["heading_font"]] + ([ctx["body_font"]] if body_used else [])
+    faces += fonts.script_families(_copy_text(brief, slide, ctx))
+    return list(dict.fromkeys(faces))
+
+
+async def _layout(page, brief: CreativeBrief, slide: Slide, brand: Any, html: str) -> dict:
+    """Load the page, prove the fonts, fit the type, assert the guarantees."""
+    template = brief.template_for(slide)
+    # The document is set immediately; the wait is for stylesheets and fonts.
+    # Bounded twice -- here and on fonts.ready -- so a font host that stalls
+    # costs seconds. What happens next is not a fallback face: see below.
+    try:
+        await page.set_content(html, wait_until="networkidle", timeout=int(FONT_WAIT_S * 1000))
+    except Exception:  # noqa: BLE001 - playwright's TimeoutError
+        log.warning("page_not_idle", template=template)
+    try:
+        await asyncio.wait_for(page.evaluate("document.fonts.ready"), FONT_WAIT_S)
+    except Exception:  # noqa: BLE001
+        log.warning("fonts_not_settled", template=template)
+
+    if settings.compose_require_fonts:
+        missing = await page.evaluate(FONTS_JS, _faces_needed(brief, slide, brand))
+        if missing:
+            raise BrandFontUnavailable(f"brand faces did not load: {', '.join(missing)}")
+
+    w, h = brief.pixel_size()
+    report = await page.evaluate(FIT_JS, _fit_config(w, h))
+    shrunk = {k: v for k, v in (report.get("sizes") or {}).items() if v and v.get("steps")}
+    if shrunk:
+        log.info("text_autofit", template=template, sizes=shrunk)
+    if report["violations"]:
+        log.error(
+            "layout_refused",
+            template=template,
+            position=slide.position,
+            violations=report["violations"],
+            headline=slide.headline,
+        )
+        raise LayoutError(report["violations"], position=slide.position)
+    return report
+
+
+# A 1x1 stand-in: layout does not depend on the picture, so the guarantees can
+# be proven before a picture is paid for.
+_BLANK_BG = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+    "2mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+async def check_layout(brief: CreativeBrief, slide: Slide, brand: Any) -> dict:
+    """Prove this slide's copy can be set -- before any money is spent.
+
+    Raises LayoutError with the violations when it cannot. Runs the very same
+    page, fit and assertions as compose(), over a blank background.
+    """
+    w, h = brief.pixel_size()
+    browser = await get_browser()
+    page = await browser.new_page(viewport={"width": w, "height": h})
+    try:
+        return await _layout(page, brief, slide, brand, render_html(brief, slide, brand, _BLANK_BG))
+    finally:
+        await page.close()
+
+
 async def compose(
     brief: CreativeBrief,
     slide: Slide,
@@ -360,57 +667,34 @@ async def compose(
     background: bytes,
     background_mime: str = "image/jpeg",
 ) -> bytes:
-    """Return the finished PNG for one slide (a single post is slide 1 of 1)."""
-    # How much scrim this particular photograph needs. Measured on the
-    # background before Chromium is started, so it costs a fraction of a
-    # millisecond and cannot delay the render.
-    boost, why = await asyncio.to_thread(
-        legibility.scrim_boost, background, brief.template_for(slide)
-    )
-    if boost != 1.0:
-        log.info("scrim_measured", template=brief.template_for(slide), **why)
-    html = render_html(brief, slide, brand, as_data_uri(background, background_mime), boost)
+    """Return the finished PNG for one slide (a single post is slide 1 of 1).
+
+    Raises LayoutError / BrandFontUnavailable instead of returning a frame that
+    breaks a guarantee. There is no degraded output.
+    """
     w, h = brief.pixel_size()
+    template = brief.template_for(slide)
+    fitted = await asyncio.to_thread(fit_background, background, w, h)
+    mime = "image/png" if fitted is not background else background_mime
+    html = render_html(brief, slide, brand, as_data_uri(fitted, mime))
     browser = await get_browser()
     page = await browser.new_page(
         viewport={"width": w, "height": h}, device_scale_factor=SUPERSAMPLE
     )
     try:
-        # The document is set immediately; the wait is for stylesheets and
-        # fonts. Bounded twice -- here and on fonts.ready -- because a font
-        # host that stalls must cost seconds, not the creative: the page is
-        # rendered in the fallback face instead.
-        try:
-            await page.set_content(html, wait_until="networkidle", timeout=int(FONT_WAIT_S * 1000))
-        except Exception:  # noqa: BLE001 - playwright's TimeoutError
-            log.warning("page_not_idle", template=brief.template_for(slide))
-        try:
-            await asyncio.wait_for(page.evaluate("document.fonts.ready"), FONT_WAIT_S)
-        except Exception:  # noqa: BLE001
-            log.warning("fonts_not_settled", template=brief.template_for(slide))
+        report = await _layout(page, brief, slide, brand, html)
 
-        try:
-            fit = await page.evaluate(FIT_JS, list(grid_insets(w, h)))
-        except Exception:  # noqa: BLE001
-            fit = {"fits": None}
-        if fit.get("grid_safe") is False:
-            # Not fatal -- the post itself is whole -- but a thumbnail with a
-            # clipped headline is what makes a grid look amateur.
-            log.warning(
-                "grid_unsafe", template=brief.template_for(slide), elements=fit.get("unsafe")
+        # The scrim is sized to the words as they were actually set, and its
+        # strength comes from the pixels behind THEM -- not from a fixed band
+        # the template was assumed to set its type in.
+        if template in TYPE_OVER_PHOTO and report.get("text_box"):
+            boost, local, why = await asyncio.to_thread(
+                legibility.scrim_for_box, fitted, tuple(report["text_box"])
             )
-        if fit.get("headline_steps") or fit.get("subhead_steps"):
-            log.info(
-                "text_autofit",
-                headline_steps=fit.get("headline_steps"),
-                subhead_steps=fit.get("subhead_steps"),
-                fits=fit.get("fits"),
-            )
-        if fit.get("fits") is False:
-            # Shipping a knowingly-cropped creative is worse than failing here:
-            # the client sees it, and so does their audience.
-            raise TextDoesNotFit(
-                f"copy still overflows at minimum size: headline={slide.headline!r}"
+            if boost != 1.0 or local:
+                log.info("scrim_measured", template=template, **why)
+            await page.evaluate(
+                SCRIM_JS, {"box": report["text_box"], "boost": boost, "local": local}
             )
 
         shot = await page.screenshot(type="png", clip={"x": 0, "y": 0, "width": w, "height": h})

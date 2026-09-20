@@ -11,7 +11,7 @@
   .bg, .scrim, .grain { display: none; }
   .col { position: absolute; inset: 0; display: flex; flex-direction: column; }
   .band { flex: 0 0 auto; min-height: {{ (height*0.30)|round|int }}px;
-          max-height: {{ (height*0.58)|round|int }}px; overflow: hidden;
+          max-height: {{ (height*0.58)|round|int }}px;
           background: {{ brand.primary }}; display: flex; flex-direction: column;
           justify-content: flex-end;
           padding: {{ pad_top }}px {{ pad_x }}px {{ (width*0.055)|round|int }}px; }
@@ -29,7 +29,7 @@
   .subhead { font-size: {{ (width*0.034)|round|int }}px; text-shadow: none; max-width: 86%;
              margin-top: {{ (width*0.018)|round|int }}px; }
   .foot { position: absolute; left: {{ pad_x }}px; right: {{ pad_x }}px;
-          bottom: {{ pad_bottom }}px; display: flex; align-items: center;
+          bottom: {{ pad_bottom }}px; display: flex; align-items: center; flex-wrap: wrap; row-gap: {{ (width*0.03)|round|int }}px;
           justify-content: space-between; gap: {{ (width*0.03)|round|int }}px; }
 {% endblock %}
 {% block body %}
