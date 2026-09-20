@@ -147,6 +147,7 @@ def test_the_reject_list_is_the_one_that_was_asked_for():
 # --------------------------------------------------------------------------- #
 async def test_on_exhaustion_the_slide_fails_and_no_rejected_picture_is_returned(monkeypatch):
     monkeypatch.setattr(pipeline.settings, "imagegen_gate_attempts", 4)
+    monkeypatch.setattr(pipeline.settings, "imagegen_gate_budget_micros", 0)  # count only
     _verdicts(monkeypatch, *[["text_or_lettering"]] * 4)
     provider = FakeProvider()
     with pytest.raises(pipeline.BackgroundRejected, match="4 attempts") as err:
@@ -154,6 +155,25 @@ async def test_on_exhaustion_the_slide_fails_and_no_rejected_picture_is_returned
     assert len(provider.requests) == 4
     assert err.value.cost_micros == 4 * 288_300, "the spend is recorded even though nothing shipped"
     assert [r["attempt"] for r in err.value.rejections] == [1, 2, 3, 4]
+
+
+async def test_the_gate_stops_at_its_dollar_cap_and_still_delivers_nothing(monkeypatch):
+    """One credit in, unbounded vendor spend out, was the hole. The cap ends the
+    RETRYING; every call made is still the full-quality call."""
+    assert Settings.model_fields["imagegen_gate_budget_micros"].default == 900_000
+    _verdicts(monkeypatch, *[["watermark"]] * 6)
+    provider = FakeProvider()
+    with pytest.raises(pipeline.BackgroundRejected, match="3 attempts") as err:
+        await _run(provider)
+    assert len(provider.requests) == 3 and err.value.cost_micros == 3 * 288_300 <= 900_000
+    assert {(r.width, r.height) for r in provider.requests} == {SIZE}
+
+
+async def test_a_pass_inside_the_cap_is_unaffected_by_it(monkeypatch):
+    _verdicts(monkeypatch, ["watermark"], ["watermark"], [])
+    provider = FakeProvider()
+    res, cost, rejections = await _run(provider)
+    assert res.job_id == "job-3" and cost == 3 * 288_300 and len(rejections) == 2
 
 
 def test_the_retry_cap_means_never_not_twice():

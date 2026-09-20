@@ -842,14 +842,17 @@ async def _generate_checked(
     the slide is failed and refunded, and the owner is told.
     """
     attempts = max(1, int(settings.imagegen_gate_attempts))
+    budget = int(settings.imagegen_gate_budget_micros or 0)
     gw, gh = size
     sem = (register or {}).get("sem") or asyncio.Semaphore(1)
     # The mock draws a gradient for tests and local development; there is no
     # model output to inspect. Every real vendor is inspected, no exceptions.
     inspected = provider.name != "mock"
     cost, rejections, reasons_so_far = 0, [], []
+    per_call = int(getattr(provider, "cost_micros_per_image", 0) or 0)
     for attempt in range(1, attempts + 1):
-        last = attempt == attempts
+        # The last attempt is the last the cap OR the count allows.
+        last = attempt == attempts or bool(budget and cost + 2 * per_call > budget)
         seed = slide.visual_direction.seed
         if attempt > 1:
             seed = shotplan.seed_for(shotplan.brief_key(brief), slide.position, salt=attempt - 1)
@@ -867,6 +870,7 @@ async def _generate_checked(
                     )
                 )
         cost += int(res.cost_micros or 0)
+        per_call = int(res.cost_micros or 0) or per_call
 
         reasons: list[str] = []
         notes = ""
@@ -904,9 +908,19 @@ async def _generate_checked(
             job_id=res.job_id,
             cost_micros_so_far=cost,
         )
+        if budget and cost + per_call > budget:
+            log.warning(
+                "background_gate_budget_reached",
+                creative_id=str(creative_id),
+                position=slide.position,
+                attempts=attempt,
+                cost_micros=cost,
+                budget_micros=budget,
+            )
+            break
     seen = sorted({r for rej in rejections for r in rej["reasons"]})
     raise BackgroundRejected(
-        f"no acceptable picture in {attempts} attempts ({', '.join(seen)})",
+        f"no acceptable picture in {len(rejections)} attempts ({', '.join(seen)})",
         cost_micros=cost,
         rejections=rejections,
     )

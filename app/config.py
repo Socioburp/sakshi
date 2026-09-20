@@ -120,6 +120,12 @@ class Settings(BaseSettings):
     # slide. On exhaustion the slide FAILS and is refunded; a rejected picture
     # is never delivered. Each attempt is a paid vendor call.
     imagegen_gate_attempts: int = 6
+    # ...and never more than this much vendor spend on one slide, in micro-dollars.
+    # The owner pays one credit however many attempts it takes, so an unbounded
+    # gate is an unbounded loss. At ~$0.29 a call this allows three honest tries;
+    # a prompt that fails three times is a prompt problem, not bad luck. The cap
+    # stops the RETRYING -- it never lowers the settings of a call. 0 = no cap.
+    imagegen_gate_budget_micros: int = 900_000
     # Seconds of silence after which the owner is told the job is still going.
     # A metric to watch and a message to send -- never a limit on the output.
     slow_notice_s: int = 60

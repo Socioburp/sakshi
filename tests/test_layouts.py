@@ -227,6 +227,36 @@ async def test_the_layout_gate_stops_the_job_before_any_charge(chromium, monkeyp
     assert await pipeline.layout_gate(brief, brief.units(), _brand_with("wordmark")) is None
 
 
+async def test_a_chromium_crash_costs_one_retry_not_the_creative(chromium, monkeypatch):
+    calls = {"n": 0}
+    real = compose._check_layout_once
+
+    async def dies_once(brief, slide, brand):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Page.set_content: Target closed")
+        return await real(brief, slide, brand)
+
+    monkeypatch.setattr(compose, "_check_layout_once", dies_once)
+    brief = _brief("lower_third", COPY["long_headline"])
+    report = await compose.check_layout(brief, brief.units()[0], _brand_with("none"))
+    assert calls["n"] == 2 and report["violations"] == []
+
+
+async def test_a_refusal_is_a_verdict_and_is_never_retried(chromium, monkeypatch):
+    calls = {"n": 0}
+
+    async def refuses(brief, slide, brand):
+        calls["n"] += 1
+        raise compose.LayoutError(["overflow:panel"], position=1)
+
+    monkeypatch.setattr(compose, "_check_layout_once", refuses)
+    brief = _brief("split_card", COPY["long_headline"])
+    with pytest.raises(compose.LayoutError):
+        await compose.check_layout(brief, brief.units()[0], _brand_with("none"))
+    assert calls["n"] == 1
+
+
 def test_nothing_truncates_and_nothing_ellipsises_anywhere():
     import pathlib
 

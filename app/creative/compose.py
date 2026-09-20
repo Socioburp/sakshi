@@ -647,7 +647,7 @@ _BLANK_BG = (
 )
 
 
-async def check_layout(brief: CreativeBrief, slide: Slide, brand: Any) -> dict:
+async def _check_layout_once(brief: CreativeBrief, slide: Slide, brand: Any) -> dict:
     """Prove this slide's copy can be set -- before any money is spent.
 
     Raises LayoutError with the violations when it cannot. Runs the very same
@@ -662,7 +662,7 @@ async def check_layout(brief: CreativeBrief, slide: Slide, brand: Any) -> dict:
         await page.close()
 
 
-async def compose(
+async def _compose_once(
     brief: CreativeBrief,
     slide: Slide,
     brand: Any,
@@ -703,6 +703,50 @@ async def compose(
         return _resample(shot, w, h)
     finally:
         await page.close()
+
+
+def _is_browser_death(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(
+        s in text
+        for s in ("target closed", "browser has been closed", "disconnected", "connection closed")
+    )
+
+
+async def _surviving_a_crash(fn, *args):
+    """Run a render; if Chromium died under it, relaunch and run it once more.
+
+    One shared browser serves every job in flight, so one crash used to fail
+    them all. get_browser() already relaunches a disconnected browser; this is
+    what gives the render that was caught mid-crash its second go. Refusals
+    (LayoutError, BrandFontUnavailable) are verdicts, not crashes, and pass
+    straight through.
+    """
+    try:
+        return await fn(*args)
+    except (TextDoesNotFit, BrandFontUnavailable):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if not _is_browser_death(exc):
+            raise
+        log.warning("chromium_died_retrying", error=repr(exc)[:160])
+        return await fn(*args)
+
+
+async def check_layout(brief: CreativeBrief, slide: Slide, brand: Any) -> dict:
+    """Prove this slide's copy can be set -- before any money is spent."""
+    return await _surviving_a_crash(_check_layout_once, brief, slide, brand)
+
+
+async def compose(
+    brief: CreativeBrief,
+    slide: Slide,
+    brand: Any,
+    background: bytes,
+    background_mime: str = "image/jpeg",
+) -> bytes:
+    """The finished PNG for one slide, or a refusal. Never a degraded frame."""
+    return await _surviving_a_crash(_compose_once, brief, slide, brand, background, background_mime)
 
 
 async def compose_to_file(
