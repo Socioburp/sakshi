@@ -121,12 +121,14 @@ TYPE_OVER_PHOTO = frozenset({"centered_overlay", "lower_third", "poster_stack"})
 # Rendering at 2x and resampling down does give visibly crisper stems and a
 # cleaner logo -- but on this workload it cost 1.1s -> 4.7s per slide, and a
 # six-slide carousel composes in parallel, so on a small instance it turned a
-# ~1s step into ~28s. That breaks the promise the product is built on: a
-# creative back inside 30-60 seconds. v1 already died of minute-long carousels.
+# ~1s step into ~28s.
 #
-# So it ships at 1. The type quality in this file comes from the templates --
-# leading, tracking, an eased scrim, grain -- not from brute pixels. Raise this
-# to 2 for a print-resolution one-off, never for the WhatsApp path.
+# So it ships at 1. This is a measured engineering choice about the TYPE layer,
+# not a quality tier: the photograph is generated at 1600x2000 and Lanczos-
+# resampled to the canvas before it ever reaches the page (fit_background), so
+# the picture gains nothing from a 2x page, and the type quality comes from
+# the templates -- leading, tracking, an eased scrim, grain. Re-measure before
+# changing it; do not change it to hit a time.
 SUPERSAMPLE = 1
 
 # How long the render waits for webfonts after the network goes idle.

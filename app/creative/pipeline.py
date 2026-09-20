@@ -7,9 +7,26 @@ Three entry points, and the difference between them is the whole cost model:
                No image call, no charge.
   regenerate   new background, same copy. Charges again.
 
-A carousel is N creatives sharing one `carousel_group_id`. Slides are dispatched
-IN PARALLEL -- a 5-slide carousel that generated serially would take most of a
-minute, which on WhatsApp reads as the bot having died.
+A carousel is N creatives sharing one `carousel_group_id`.
+
+QUALITY IS NEVER TRADED FOR SPEED. There is one setting -- the best one -- for a
+single post and for every slide of a carousel; there are no tiers, no step-downs
+and no deadline that changes what is made. Speed is solved by DELIVERY instead:
+
+  * the owner is told the moment work starts;
+  * slides are generated in parallel (bounded by IMAGEGEN_CONCURRENCY);
+  * each slide is sent the moment it is ready, not held for the slowest one;
+  * if the job is slow the chat says so (SLOW_NOTICE_S) -- it never sends a
+    worse picture to hit a time.
+
+Timings are recorded per stage (telemetry/stages.py) and are a metric to watch,
+not a limit.
+
+Nothing reaches the owner without passing BOTH gates: the compositor's
+deterministic guarantees (compose.LayoutError, checked before the charge by
+`layout_gate`) and the background inspection (bggate, enforced by
+`_generate_checked`, which regenerates on rejection and fails the slide on
+exhaustion rather than deliver a rejected picture).
 
 A slide whose `visual_direction.reference_asset_id` is set skips generation
 entirely and composites over the owner's own photograph. That path is free.
@@ -26,7 +43,17 @@ from sqlalchemy import select
 
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import claims, compose, dedupe, photoreal, photoref, product, shotplan
+from app.config import settings
+from app.creative import (
+    bggate,
+    claims,
+    compose,
+    dedupe,
+    photoreal,
+    photoref,
+    product,
+    shotplan,
+)
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
 from app.creative.imagegen.base import generation_size
@@ -60,7 +87,80 @@ _WORKING: dict[str, str] = {
 
 def working_line(locale: str | None, slides: int) -> str:
     lang = ((locale or "en").split("-")[0]).lower()
-    return _WORKING.get(lang, _WORKING["en"]).format(secs=30 if slides <= 1 else 45)
+    # NOT MEASURED YET at gpt-image-2 / high / 1600x2000 -- OpenAI documents "up
+    # to 2 minutes" per image. Set from the recorded p50 once there is one.
+    return _WORKING.get(lang, _WORKING["en"]).format(secs=90 if slides <= 1 else 120)
+
+
+_STILL_WORKING: dict[str, str] = {
+    "hi": "Abhi ban raha hai… {done}/{total} taiyaar. Achhi quality mein thoda time lagta hai.",
+    "en": "Still working… {done} of {total} ready. The high-quality pictures take a little longer.",
+}
+_STILL_WORKING_ONE: dict[str, str] = {
+    "hi": "Abhi ban raha hai… achhi quality mein thoda time lagta hai.",
+    "en": "Still working on it… the high-quality picture takes a little longer.",
+}
+# Notices go out this many seconds-multiples after the start: 1x, 3x, 7x of
+# SLOW_NOTICE_S. Three at most -- WhatsApp is not a log.
+_NOTICE_AT = (1, 3, 7)
+
+
+class _Delivery:
+    """Sends each slide the moment it is ready, and says so when the job is slow.
+
+    Slides finish in whatever order the vendor returns them, so every carousel
+    image is captioned with its place ("3/6") and the owner can see the order
+    even when 3 lands before 2.
+    """
+
+    def __init__(self, ctx: ToolContext, brief: CreativeBrief, total: int, locale: str) -> None:
+        self.ctx, self.brief, self.total = ctx, brief, total
+        self.lang = ((locale or "en").split("-")[0]).lower()
+        self.sent: dict[int, bool] = {}
+        self._lock = asyncio.Lock()
+        self._watch: asyncio.Task | None = None
+
+    def caption(self, position: int) -> str:
+        if self.total <= 1:
+            return self.brief.headline
+        return f"{position}/{self.total}" + (f" · {self.brief.headline}" if position == 1 else "")
+
+    async def send(self, position: int, url: str) -> bool:
+        async with self._lock:  # one message at a time: WhatsApp orders by arrival
+            try:
+                show = self.ctx.show_video if self.brief.is_reel() else self.ctx.show
+                ok = bool(await show(url, caption=self.caption(position)))
+            except Exception:  # noqa: BLE001 - the creative exists; the result says it was not shown
+                log.exception("slide_send_failed", position=position)
+                ok = False
+            self.sent[position] = ok
+            return ok
+
+    def start(self) -> None:
+        if settings.slow_notice_s > 0:
+            self._watch = asyncio.create_task(self._notices())
+
+    async def stop(self) -> None:
+        if self._watch is not None:
+            self._watch.cancel()
+            try:
+                await self._watch
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    async def _notices(self) -> None:
+        elapsed = 0
+        for mult in _NOTICE_AT:
+            wait = settings.slow_notice_s * mult - elapsed
+            await asyncio.sleep(wait)
+            elapsed += wait
+            table = _STILL_WORKING_ONE if self.total <= 1 else _STILL_WORKING
+            line = table.get(self.lang, table["en"]).format(done=len(self.sent), total=self.total)
+            log.info("slow_notice", elapsed_s=elapsed, done=len(self.sent), total=self.total)
+            try:
+                await self.ctx.progress(line)
+            except Exception:  # noqa: BLE001 - a missed notice must never cost the creative
+                log.warning("slow_notice_failed")
 
 
 # Credits at or below this get a one-line nudge from the agent. Finding out at
@@ -310,16 +410,32 @@ async def generate(
 
     # Slides run concurrently but share a duplicate register, so a slide that
     # lands on a picture an earlier slide already produced is caught and
-    # re-rolled once instead of shipping.
+    # regenerated instead of shipping. The register also carries the semaphore
+    # that bounds how many vendor calls are in flight at once.
     register = dedupe_register()
-
-    results = await asyncio.gather(
-        *(
-            _build_one(ctx, brief, slide, cid, brand_snapshot, assets, resolved, reuse, register)
-            for slide, cid in zip(units, creative_ids, strict=True)
-        ),
-        return_exceptions=True,
-    )
+    delivery = _Delivery(ctx, brief, len(units), locale)
+    delivery.start()
+    try:
+        results = await asyncio.gather(
+            *(
+                _build_one(
+                    ctx,
+                    brief,
+                    slide,
+                    cid,
+                    brand_snapshot,
+                    assets,
+                    resolved,
+                    reuse,
+                    register,
+                    delivery,
+                )
+                for slide, cid in zip(units, creative_ids, strict=True)
+            ),
+            return_exceptions=True,
+        )
+    finally:
+        await delivery.stop()
     if register["hashes"]:
         log.info(
             "carousel_variety",
@@ -332,8 +448,11 @@ async def generate(
     failed_billable = 0
     for slide, cid, res in zip(units, creative_ids, results, strict=True):
         if isinstance(res, BaseException):
-            log.exception("slide_failed", creative_id=str(cid), position=slide.position)
-            _mark_failed(cid, str(res))
+            log.error(
+                "slide_failed", creative_id=str(cid), position=slide.position, error=str(res)[:300]
+            )
+            # A slide that exhausted the gate still cost real money at the vendor.
+            _mark_failed(cid, str(res), cost_micros=getattr(res, "cost_micros", 0))
             failures.append(f"slide {slide.position}: {res}")
             # A failed slide is refunded only if it was paid for. A free photo
             # slide that failed to fetch was never charged, so refunding it
@@ -350,7 +469,10 @@ async def generate(
         # Partial carousel: refund only the paid slides that did not ship.
         _refund(ctx, group_id, failed_billable, "partial_carousel")
 
-    delivered = await _show(ctx, brief, ok_urls)
+    # Already sent, one by one, as each slide finished (see _Delivery).
+    delivered = bool(ok_urls) and len(delivery.sent) == len(ok_urls) and all(delivery.sent.values())
+    if not delivered:
+        log.error("creative_not_delivered", account_id=str(ctx.account_id), urls=len(ok_urls))
     with session_scope() as db:
         balance = db.get(Account, ctx.account_id).credits_balance
     _schedule_daily_nudge(ctx)
@@ -368,6 +490,14 @@ async def generate(
         "credits_left": balance,
         "note": "The owner can see it now. Ask if they want changes; keep it to one line.",
     }
+    if failures:
+        out["failed_slides"] = failures[:6]
+        out["note"] = (
+            f"{len(ok_urls)} of {len(units)} slides were made and sent; the rest could not be made "
+            "to our standard and were refunded (see failed_slides). We never send a picture "
+            "that failed the check. Tell the owner plainly, in one line, which slide is missing "
+            "and offer to try that slide again with regenerate_image."
+        )
     if brief.is_reel():
         out["format"] = "reel"
         out["reel_note"] = (
@@ -626,8 +756,10 @@ def _schedule_daily_nudge(ctx: ToolContext) -> None:
 
 
 # A creative still "generating" this long after it was created has lost its
-# worker. Generation is measured in seconds; this is minutes.
-STUCK_AFTER = timedelta(minutes=10)
+# worker. Sized past the worst legitimate case -- IMAGEGEN_GATE_ATTEMPTS calls
+# of up to ~5 minutes each -- so a slow, healthy job is never reaped and
+# refunded underneath itself.
+STUCK_AFTER = timedelta(minutes=45)
 
 
 def reap_stuck_creatives(now: datetime | None = None) -> int:
@@ -669,8 +801,115 @@ def reap_stuck_creatives(now: datetime | None = None) -> int:
 # duplicate register
 # --------------------------------------------------------------------------- #
 def dedupe_register() -> dict:
-    """Shared state for one carousel: the hashes its slides have produced."""
-    return {"hashes": {}, "lock": asyncio.Lock()}
+    """Shared state for one job: the hashes its slides have produced, and the
+    semaphore that bounds how many vendor calls run at once."""
+    return {
+        "hashes": {},
+        "lock": asyncio.Lock(),
+        "sem": asyncio.Semaphore(max(1, int(settings.imagegen_concurrency))),
+    }
+
+
+class BackgroundRejected(RuntimeError):
+    """No acceptable picture in the allowed attempts. The slide fails; nothing
+    that was rejected is ever delivered."""
+
+    def __init__(self, message: str, *, cost_micros: int = 0, rejections: list | None = None):
+        super().__init__(message)
+        self.cost_micros = cost_micros
+        self.rejections = rejections or []
+
+
+async def _generate_checked(
+    ctx: ToolContext,
+    provider,
+    brief: CreativeBrief,
+    slide: Slide,
+    creative_id: uuid.UUID,
+    prompt: str,
+    negative: str,
+    size: tuple[int, int],
+    register: dict | None,
+    stage: str,
+):
+    """Generate, inspect, and regenerate until a picture passes -- or fail.
+
+    Every attempt is the SAME call at the SAME settings; only the prompt gains
+    a sentence about what was wrong, and the seed moves. Reasons to reject:
+    anything bggate.inspect reports, a size other than the one asked for, or a
+    picture an earlier slide of this carousel already produced. Every rejection
+    is logged with its reason and attempt number. On exhaustion this raises:
+    the slide is failed and refunded, and the owner is told.
+    """
+    attempts = max(1, int(settings.imagegen_gate_attempts))
+    gw, gh = size
+    sem = (register or {}).get("sem") or asyncio.Semaphore(1)
+    # The mock draws a gradient for tests and local development; there is no
+    # model output to inspect. Every real vendor is inspected, no exceptions.
+    inspected = provider.name != "mock"
+    cost, rejections, reasons_so_far = 0, [], []
+    for attempt in range(1, attempts + 1):
+        last = attempt == attempts
+        seed = slide.visual_direction.seed
+        if attempt > 1:
+            seed = shotplan.seed_for(shotplan.brief_key(brief), slide.position, salt=attempt - 1)
+        name = f"{stage}:imagegen" if attempt == 1 else f"{stage}:imagegen_retry{attempt - 1}"
+        async with sem:
+            with ctx.trace.stage(name, provider=provider.name, attempt=attempt):
+                res = await provider.generate(
+                    ImageRequest(
+                        prompt=bggate.corrected(prompt, reasons_so_far),
+                        negative=negative,
+                        width=gw,
+                        height=gh,
+                        seed=seed,
+                        style=slide.visual_direction.mood,
+                    )
+                )
+        cost += int(res.cost_micros or 0)
+
+        reasons: list[str] = []
+        notes = ""
+        got = await asyncio.to_thread(compose.image_size, res.data)
+        if getattr(provider, "exact_size", False) and got != (gw, gh):
+            reasons.append("wrong_size")
+            notes = f"asked {gw}x{gh}, got {got[0]}x{got[1]}"
+        if not reasons and register is not None:
+            if await _register_or_reroll(register, slide, res.data, force=last):
+                reasons.append("duplicate_of_earlier_slide")
+        if not reasons and inspected:
+            with ctx.trace.stage(f"{stage}:inspect{attempt}"):
+                verdict = await bggate.inspect(res.data)
+            reasons, notes = list(verdict.reasons), verdict.notes
+        if not reasons:
+            if rejections:
+                log.info(
+                    "background_accepted_after_retry",
+                    creative_id=str(creative_id),
+                    position=slide.position,
+                    attempt=attempt,
+                )
+            return res, cost, rejections
+
+        rejections.append({"attempt": attempt, "reasons": reasons, "notes": notes})
+        reasons_so_far.extend(reasons)
+        log.warning(
+            "background_rejected",
+            creative_id=str(creative_id),
+            position=slide.position,
+            attempt=attempt,
+            of=attempts,
+            reasons=reasons,
+            notes=notes,
+            job_id=res.job_id,
+            cost_micros_so_far=cost,
+        )
+    seen = sorted({r for rej in rejections for r in rej["reasons"]})
+    raise BackgroundRejected(
+        f"no acceptable picture in {attempts} attempts ({', '.join(seen)})",
+        cost_micros=cost,
+        rejections=rejections,
+    )
 
 
 async def _register_or_reroll(
@@ -711,11 +950,13 @@ async def _build_one(
     resolved: dict[int, str] | None = None,
     reuse: dict[int, tuple[str, str]] | None = None,
     register: dict | None = None,
+    delivery: _Delivery | None = None,
 ) -> str:
     w, h = brief.pixel_size()
     ref = (resolved or {}).get(slide.position)
     stage = f"slide{slide.position}"
     job_id, cost_micros = None, 0  # set only when a vendor was paid
+    gate: dict | None = None  # set only when a picture was generated and inspected
 
     if reuse and slide.position in reuse:
         # Picture kept from the previous version of this creative.
@@ -765,48 +1006,20 @@ async def _build_one(
         )
         # Generated natively at 4:5 ABOVE the delivery size and resampled down
         # by the compositor. Never generated at a preset and cropped.
-        gw, gh = generation_size((w, h))
-        seed = slide.visual_direction.seed
-        with ctx.trace.stage(f"{stage}:imagegen", provider=provider.name):
-            res = await provider.generate(
-                ImageRequest(
-                    prompt=prompt,
-                    negative=negative,
-                    width=gw,
-                    height=gh,
-                    seed=seed,
-                    style=slide.visual_direction.mood,
-                )
-            )
-        image, mime = res.data, res.mime
-        job_id, cost_micros = res.job_id, res.cost_micros
-
-        # Did this slide come back as a picture an earlier slide already made?
-        # One re-roll, with a different seed, and only for a real collision --
-        # a second vendor call per slide would double the bill.
-        if register is not None and await _register_or_reroll(register, slide, image):
-            salt_seed = shotplan.seed_for(shotplan.brief_key(brief), slide.position, salt=1)
-            log.warning(
-                "slide_duplicate_reroll",
-                position=slide.position,
-                old_seed=seed,
-                new_seed=salt_seed,
-            )
-            with ctx.trace.stage(f"{stage}:imagegen_reroll", provider=provider.name):
-                res = await provider.generate(
-                    ImageRequest(
-                        prompt=prompt,
-                        negative=negative,
-                        width=gw,
-                        height=gh,
-                        seed=salt_seed,
-                        style=slide.visual_direction.mood,
-                    )
-                )
-            image, mime = res.data, res.mime
-            job_id = res.job_id
-            cost_micros += res.cost_micros
-            await _register_or_reroll(register, slide, image, force=True)
+        res, cost_micros, rejections = await _generate_checked(
+            ctx,
+            provider,
+            brief,
+            slide,
+            creative_id,
+            prompt,
+            negative,
+            generation_size((w, h)),
+            register,
+            stage,
+        )
+        image, mime, job_id = res.data, res.mime, res.job_id
+        gate = {"attempts": len(rejections) + 1, "rejections": rejections, "raw": res.raw}
 
     with ctx.trace.stage(f"{stage}:compose"):
         png = await compose.compose(brief, slide, brand_snapshot, image, mime)
@@ -840,7 +1053,24 @@ async def _build_one(
         c.cost_micros = int(cost_micros or 0)
         c.status = "ready"
         c.timings = dict(ctx.trace.timings)
-    return video_url or composed_url
+    if gate is not None:
+        # The generation record: exactly what was asked for and what it took.
+        log.info(
+            "generation_record",
+            creative_id=str(creative_id),
+            position=slide.position,
+            provider=provider_name,
+            cost_micros=int(cost_micros or 0),
+            attempts=gate["attempts"],
+            rejections=gate["rejections"],
+            **{k: v for k, v in (gate["raw"] or {}).items() if k in ("model", "size", "quality")},
+        )
+    url = video_url or composed_url
+    if delivery is not None:
+        # Out the door now. The other slides are still being made.
+        with ctx.trace.stage(f"{stage}:deliver"):
+            await delivery.send(slide.position, url)
+    return url
 
 
 async def _render_reel(ctx, creative_id: uuid.UUID, photo: bytes, card: bytes, stage: str):
@@ -900,11 +1130,13 @@ async def _show(ctx: ToolContext, brief: CreativeBrief, urls: list[str]) -> bool
     return ok
 
 
-def _mark_failed(creative_id: uuid.UUID, error: str) -> None:
+def _mark_failed(creative_id: uuid.UUID, error: str, *, cost_micros: int = 0) -> None:
     with session_scope() as db:
         c = db.get(Creative, creative_id)
         if c is not None:
             c.status, c.error = "failed", error[:2000]
+            if cost_micros:
+                c.cost_micros = int(cost_micros)
 
 
 def _refund(ctx: ToolContext, group_id: uuid.UUID, units: int, reason: str) -> None:

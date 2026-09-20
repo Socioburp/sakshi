@@ -66,6 +66,20 @@ class ToolContext:
             buttons=buttons,
         )
 
+    async def progress(self, text: str) -> bool:
+        """A "still working" line. Sent now or not at all.
+
+        Outside the say budget on purpose: a progress line that was deferred
+        and then prepended to the closing reply would tell the owner the job
+        is still running in the same message that delivers it.
+        """
+        body = (text or "").strip()
+        if not body:
+            return True
+        return await send.send_text(
+            account_id=self.account_id, session_id=self.session_id, wa_id=self.wa_id, text=body
+        )
+
     async def show_video(self, video_url: str, caption: str = "") -> bool:
         ok = await send.send_video(
             account_id=self.account_id,

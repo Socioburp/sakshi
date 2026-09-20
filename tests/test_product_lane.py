@@ -125,6 +125,69 @@ def test_product_background_composes_at_canvas_size(monkeypatch):
     assert min(zone_samples) > 150, "the type zone must stay clear of the product"
 
 
+def _striped_product(w=1200, h=1500) -> bytes:
+    """A product nobody could re-imagine by accident: exact red and blue bands."""
+    im = Image.new("RGB", (w, h), (180, 140, 100))
+    d = ImageDraw.Draw(im)
+    x0, x1, y0, y1 = int(w * 0.3), int(w * 0.7), int(h * 0.2), int(h * 0.8)
+    band = (y1 - y0) // 6
+    for i in range(6):
+        fill = (200, 30, 30) if i % 3 == 0 else (30, 60, 200)  # one red band to two blue
+        d.rectangle([x0, y0 + i * band, x1, y0 + (i + 1) * band], fill=fill)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _share(im: Image.Image, want) -> float:
+    raw = im.convert("RGB").resize((270, 338)).tobytes()
+    px = [raw[i : i + 3] for i in range(0, len(raw), 3)]
+    near = sum(1 for p in px if all(abs(a - b) < 40 for a, b in zip(p, want, strict=True)))
+    return near / len(px)
+
+
+def test_the_owners_product_is_reproduced_from_its_own_pixels(monkeypatch):
+    """The reference-image regression. A real product never goes through the
+    image model: it is cut out and stood in a studio, so what ships is the
+    owner's own pixels -- same colours, same proportions, nothing redrawn."""
+    _fake_remove(monkeypatch, _box_mask(0.4, 0.6))
+    res = P.product_background(
+        _striped_product(), 1080, 1350, palette={"primary": "#175B3D"}, template="lower_third"
+    )
+    assert res is not None
+    out = Image.open(io.BytesIO(res[0]))
+    red, blue = _share(out, (200, 30, 30)), _share(out, (30, 60, 200))
+    assert red > 0.01 and blue > 0.02, "the product's exact colours survive"
+    assert 1.6 < blue / red < 2.4, "and in the proportions the owner photographed (1 red : 2 blue)"
+
+
+@pytest.mark.skipif(
+    not __import__("os").environ.get("SAKSHI_PRODUCT_PHOTO"),
+    reason="opt-in: set SAKSHI_PRODUCT_PHOTO to a real client product photo",
+)
+def test_a_real_client_product_photo_survives_the_lane():
+    """Opt-in, real model, real photograph: the product region of the output
+    matches the source photograph's product region."""
+    import os
+
+    src_bytes = Path(os.environ["SAKSHI_PRODUCT_PHOTO"]).read_bytes()
+    cut = P.cutout(src_bytes)
+    if not cut.ok:
+        pytest.skip(f"cut refused ({cut.reason}); the lane ships the photo whole")
+    res = P.product_background(src_bytes, 1080, 1350, palette={}, template="lower_third")
+    assert res is not None
+    out = Image.open(io.BytesIO(res[0])).convert("RGB")
+    assert out.size == (1080, 1350)
+    # Compare colour signatures of the cut-out and of the output's non-backdrop area.
+    box = cut.rgba.getbbox()
+    ref = cut.rgba.crop(box).convert("RGB").resize((64, 64))
+    ref_mean = [sum(ref.tobytes()[c::3]) / 4096 for c in range(3)]
+    top, bottom, _ = P.PLACEMENT["lower_third"]
+    zone = out.crop((270, int(1350 * top), 810, int(1350 * bottom))).resize((64, 64))
+    zone_mean = [sum(zone.tobytes()[c::3]) / 4096 for c in range(3)]
+    assert all(abs(a - b) < 60 for a, b in zip(ref_mean, zone_mean, strict=True))
+
+
 def test_refused_cut_returns_none_so_the_photo_is_used_whole(monkeypatch):
     _fake_remove(monkeypatch, _box_mask(0.98, 0.98))
     assert P.product_background(_photo(), 1080, 1350, palette={}, template="lower_third") is None
