@@ -112,13 +112,9 @@
                color: {{ brand.ink }}; opacity: .88; letter-spacing: .14em;
                text-transform: uppercase; }
 
-  {# Carousel affordance: tells the reader there is more to swipe to. #}
-  .pips { position: absolute; top: {{ [pad_top - (width*0.02)|round|int, (width*0.03)|round|int]|max }}px;
-          left: 50%; transform: translateX(-50%); display: flex;
-          gap: {{ (width*0.013)|round|int }}px; }
-  .pip { width: {{ (width*0.015)|round|int }}px; height: {{ (width*0.015)|round|int }}px;
-         border-radius: 50%; background: {{ brand.ink }}; opacity: .38; }
-  .pip.on { opacity: 1; background: {{ brand.accent }}; }
+  {# No slide indicator is drawn. Instagram paints its own pagination dots
+     under a carousel; a second row baked into the image reads as a screenshot
+     of the app, and it goes stale the moment the owner reorders the slides. #}
   .spacer { flex: 1 1 auto; }
   {% block styles %}{% endblock %}
 </style>
@@ -130,13 +126,6 @@
     <div class="grain"></div>
     {% if brand.signature == 'corner' %}<div class="sig-corner"></div>{% endif %}
     {% if brand.signature == 'bar' %}<div class="sig-bar"></div>{% endif %}
-    {% if slide_count > 1 %}
-    <div class="pips">
-      {% for i in range(1, slide_count + 1) %}
-      <span class="pip {{ 'on' if i == slide.position else '' }}"></span>
-      {% endfor %}
-    </div>
-    {% endif %}
     {% block body %}{% endblock %}
   </div>
 </body>

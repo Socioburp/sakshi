@@ -256,7 +256,6 @@ def render_html(
         scrim_boost=scrim_boost,
         show_cta=bool(brief.cta)
         and (not brief.is_carousel() or slide.position == len(brief.slides)),
-        slide_count=len(brief.slides) if brief.is_carousel() else 1,
     )
 
 
