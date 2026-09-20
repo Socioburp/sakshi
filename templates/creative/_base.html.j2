@@ -9,9 +9,11 @@
 <head>
 <meta charset="utf-8">
 {# The brand faces plus a Noto face for every script the copy uses (see
-   app/creative/fonts.py). display=block: wait for real glyphs, never paint a
+   app/creative/fonts.py). Vendored faces are served from disk by the
+   compositor; Google Fonts is linked only for a face that is not vendored. display=block: wait for real glyphs, never paint a
    stand-in. A brand-supplied stylesheet is loaded as well, after it. #}
-<link rel="stylesheet" href="{{ brand.fonts_href }}">
+{% if brand.local_fonts_href %}<link rel="stylesheet" href="{{ brand.local_fonts_href }}">{% endif %}
+{% if brand.fonts_href %}<link rel="stylesheet" href="{{ brand.fonts_href }}">{% endif %}
 {% if brand.script_fonts_href %}<link rel="stylesheet" href="{{ brand.script_fonts_href }}">{% endif %}
 {% if brand.google_fonts %}<link rel="stylesheet" href="{{ brand.google_fonts }}">{% endif %}
 <style>

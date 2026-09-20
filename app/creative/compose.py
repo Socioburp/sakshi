@@ -271,7 +271,10 @@ def render_html(
     # The faces the copy needs, not the faces the brand chose: a Kannada
     # headline in a Latin display font is tofu unless a Kannada face is loaded.
     scripts = fonts.script_families(_copy_text(brief, slide, brand_ctx))
-    brand_ctx["fonts_href"] = fonts.google_fonts_href(
+    # Vendored faces come off disk; Google Fonts is asked only for a face that
+    # is not vendored (a brand outside the four looks).
+    brand_ctx["local_fonts_href"] = fonts.local_href()
+    brand_ctx["fonts_href"] = fonts.remote_brand_href(
         brand_ctx["heading_font"], brand_ctx["body_font"]
     )
     brand_ctx["script_fonts_href"] = fonts.script_fonts_href(scripts)
@@ -492,11 +495,28 @@ SCRIM_JS = """
 
 # Which of the faces this creative needs actually arrived. `document.fonts.check`
 # is no use here: it answers true for a family that does not exist at all.
+#
+# A brand face must have loaded. A SCRIPT is different: what matters is that
+# some loaded face covers it, not which one. Poppins carries Devanagari, so a
+# Hindi headline never touches Noto Sans Devanagari -- demanding that it load
+# refused perfectly good renders. Kannada is in no brand face, so there the
+# Noto face is the only thing that can cover it, and it has to be there.
 FONTS_JS = """
-(families) => {
-  const loaded = new Set([...document.fonts].filter(f => f.status === 'loaded')
-                           .map(f => f.family.replace(/["']/g, '')));
-  return families.filter(f => !loaded.has(f));
+({families, scripts}) => {
+  const clean = (s) => s.replace(/["']/g, '');
+  const loaded = [...document.fonts].filter(f => f.status === 'loaded');
+  const names = new Set(loaded.map(f => clean(f.family)));
+  const covers = (range, cp) => range.split(',').some(part => {
+    const m = part.trim().match(/^U\\+([0-9A-F?]+)(?:-([0-9A-F]+))?$/i);
+    if (!m) return false;
+    const lo = parseInt(m[1].replace(/\\?/g, '0'), 16);
+    const hi = m[2] ? parseInt(m[2], 16) : parseInt(m[1].replace(/\\?/g, 'F'), 16);
+    return cp >= lo && cp <= hi;
+  });
+  const missing = families.filter(f => !names.has(f));
+  for (const s of scripts)
+    if (!loaded.some(f => covers(f.unicodeRange || 'U+0-10FFFF', s.cp))) missing.push(s.family);
+  return missing;
 }
 """
 
@@ -594,17 +614,45 @@ def _fit_config(w: int, h: int) -> dict[str, Any]:
     }
 
 
-def _faces_needed(brief: CreativeBrief, slide: Slide, brand: Any) -> list[str]:
+def _faces_needed(brief: CreativeBrief, slide: Slide, brand: Any) -> dict[str, Any]:
+    """The brand faces that must load, and one sample codepoint per script in
+    the copy that SOME loaded face must cover (see FONTS_JS)."""
     ctx = _brand_context(brand)
     body_used = bool(slide.subhead or brief.cta or not ctx["logo_url"])
     faces = [ctx["heading_font"]] + ([ctx["body_font"]] if body_used else [])
-    faces += fonts.script_families(_copy_text(brief, slide, ctx))
-    return list(dict.fromkeys(faces))
+    text = _copy_text(brief, slide, ctx)
+    scripts = []
+    for family, lo, hi in fonts.SCRIPT_BLOCKS:
+        cp = next((ord(ch) for ch in text if lo <= ord(ch) <= hi), None)
+        if cp is not None:
+            scripts.append({"family": family, "cp": cp})
+    return {"families": list(dict.fromkeys(faces)), "scripts": scripts}
+
+
+_FONT_TYPES = {".css": "text/css; charset=utf-8", ".woff2": "font/woff2"}
+
+
+async def _serve_fonts(route) -> None:
+    """Answer the compositor's private font host from templates/fonts/."""
+    name = route.request.url.rsplit("/", 1)[-1].split("?", 1)[0]
+    path = fonts.LOCAL_DIR / name
+    kind = _FONT_TYPES.get(path.suffix)
+    # A bare filename of a known type, inside the directory: nothing else is served.
+    if not kind or "/" in name or "\\" in name or ".." in name or not path.is_file():
+        await route.fulfill(status=404, body="")
+        return
+    await route.fulfill(
+        status=200,
+        body=path.read_bytes(),
+        content_type=kind,
+        headers={"access-control-allow-origin": "*", "cache-control": "max-age=31536000"},
+    )
 
 
 async def _layout(page, brief: CreativeBrief, slide: Slide, brand: Any, html: str) -> dict:
     """Load the page, prove the fonts, fit the type, assert the guarantees."""
     template = brief.template_for(slide)
+    await page.route(f"{fonts.LOCAL_HOST}/**", _serve_fonts)
     # The document is set immediately; the wait is for stylesheets and fonts.
     # Bounded twice -- here and on fonts.ready -- so a font host that stalls
     # costs seconds. What happens next is not a fallback face: see below.

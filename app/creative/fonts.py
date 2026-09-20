@@ -14,6 +14,8 @@ painting a stand-in.
 
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote
 
 # Unicode blocks -> Google Fonts family. Ordered as they appear in Unicode.
@@ -32,6 +34,30 @@ SCRIPT_BLOCKS: tuple[tuple[str, int, int], ...] = (
 )
 
 GOOGLE_CSS = "https://fonts.googleapis.com/css2"
+
+# Vendored faces (scripts/fetch_fonts.py -> templates/fonts/). The compositor
+# answers this host from disk (compose._serve_fonts); nothing leaves the box.
+# `.invalid` is reserved by RFC 2606, so it can never resolve to a real server
+# if the route is somehow not installed -- the render fails instead of leaking.
+LOCAL_HOST = "https://fonts.sakshi.invalid"
+LOCAL_DIR = Path(__file__).resolve().parents[2] / "templates" / "fonts"
+
+
+@lru_cache(maxsize=1)
+def vendored() -> frozenset[str]:
+    """Families that are served from disk. Empty when nothing has been fetched."""
+    listing = LOCAL_DIR / "families.txt"
+    if not (listing.exists() and (LOCAL_DIR / "fonts.css").exists()):
+        return frozenset()
+    return frozenset(
+        s.strip() for s in listing.read_text(encoding="utf-8").splitlines() if s.strip()
+    )
+
+
+def local_href() -> str | None:
+    return f"{LOCAL_HOST}/fonts.css" if vendored() else None
+
+
 HEADING_WEIGHTS = "600;700;800"
 BODY_WEIGHTS = "400;600;700"
 SCRIPT_WEIGHTS = "400;600;700;800"
@@ -71,8 +97,19 @@ def google_fonts_href(heading: str, body: str, scripts: list[str] = ()) -> str:
     return f"{GOOGLE_CSS}?{'&'.join(params)}&display=block"
 
 
+def remote_brand_href(heading: str, body: str) -> str | None:
+    """Google Fonts, for brand faces that are NOT vendored -- a brand that asked
+    for a face outside the four looks. None when both faces are on disk."""
+    need = [f for f in dict.fromkeys([heading, body]) if f and f not in vendored()]
+    if not need:
+        return None
+    params = [_family_param(f, HEADING_WEIGHTS if f == heading else BODY_WEIGHTS) for f in need]
+    return f"{GOOGLE_CSS}?{'&'.join(params)}&display=block"
+
+
 def script_fonts_href(scripts: list[str]) -> str | None:
     """A stylesheet URL for the script faces alone, or None for Latin copy."""
+    scripts = [s for s in scripts if s not in vendored()]
     if not scripts:
         return None
     params = [_family_param(fam, SCRIPT_WEIGHTS) for fam in scripts]

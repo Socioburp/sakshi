@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import types
 
+import pytest
+
 from app.creative import compose, fonts
 from app.creative.brief import EXAMPLE, CreativeBrief
 
@@ -58,7 +60,13 @@ def _brand():
     )
 
 
-def test_script_faces_get_their_own_stylesheet_request():
+@pytest.fixture
+def nothing_vendored(monkeypatch):
+    """The Google Fonts path: what a brand face outside templates/fonts/ gets."""
+    monkeypatch.setattr(fonts, "vendored", lambda: frozenset())
+
+
+def test_script_faces_get_their_own_stylesheet_request(nothing_vendored):
     """One unknown brand face 400s the whole CSS2 request; the Kannada face
     must not go down with it."""
     assert fonts.script_fonts_href([]) is None
@@ -67,7 +75,7 @@ def test_script_faces_get_their_own_stylesheet_request():
     assert "Poppins" not in href and href.endswith("&display=block")
 
 
-def test_rendered_html_loads_the_faces_the_headline_needs():
+def test_rendered_html_loads_the_faces_the_headline_needs(nothing_vendored):
     payload = json.loads(json.dumps(EXAMPLE))
     payload["headline"] = "ಇಂದು ಆರ್ಡರ್ ಮಾಡಿ"
     brief = CreativeBrief.model_validate(payload)
@@ -80,6 +88,106 @@ def test_rendered_html_loads_the_faces_the_headline_needs():
     assert "display=block" in html
     # Marks above and below the line need room; conjuncts need no tracking.
     assert "line-height: 1.14" in html and "letter-spacing: 0;" in html
+
+
+# --------------------------------------------------------------------------- #
+# vendored faces: nothing leaves the box
+# --------------------------------------------------------------------------- #
+def test_every_face_the_product_can_set_is_on_disk():
+    from app.creative import brandkit
+
+    have = fonts.vendored()
+    for look in brandkit.LOOKS.values():
+        assert look.heading in have and look.body in have, look.key
+    for family, _, _ in fonts.SCRIPT_BLOCKS:
+        assert family in have, family
+    assert "Noto Sans" in have
+    css = (fonts.LOCAL_DIR / "fonts.css").read_text(encoding="utf-8")
+    assert "fonts.gstatic.com" not in css and "googleapis" not in css
+    import re
+
+    for name in set(re.findall(r"/([a-z0-9-]+\.woff2)\)", css)):
+        assert (fonts.LOCAL_DIR / name).is_file(), name
+    assert (fonts.LOCAL_DIR / "OFL-NOTICE.txt").is_file()
+
+
+def test_a_vendored_brand_asks_google_for_nothing():
+    payload = json.loads(json.dumps(EXAMPLE))
+    payload["headline"] = "ಇಂದು ಆರ್ಡರ್ ಮಾಡಿ"
+    brief = CreativeBrief.model_validate(payload)
+    html = compose.render_html(brief, brief.units()[0], _brand(), "data:image/jpeg;base64,")
+    assert html.count('<link rel="stylesheet"') == 1
+    assert f'href="{fonts.LOCAL_HOST}/fonts.css"' in html
+    assert "googleapis" not in html and "gstatic" not in html
+    assert fonts.LOCAL_HOST.endswith(".invalid"), "can never resolve if the route is missing"
+
+
+def test_only_an_unvendored_brand_face_goes_to_google():
+    brand = _brand()
+    brand.fonts = {"heading": "Bricolage Grotesque", "body": "Inter"}
+    brief = CreativeBrief.model_validate(EXAMPLE)
+    html = compose.render_html(brief, brief.units()[0], brand, "data:image/jpeg;base64,")
+    assert "family=Bricolage+Grotesque" in html and "family=Inter" not in html
+    assert fonts.remote_brand_href("Poppins", "Inter") is None
+
+
+async def test_renders_with_google_fonts_unreachable_and_the_font_guard_on(monkeypatch):
+    """The whole point: block the network's font hosts, keep the guard that
+    refuses a fallback face, and set Latin, Devanagari and Kannada anyway."""
+    try:
+        browser = await compose.get_browser()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"no chromium: {exc}")
+    monkeypatch.setattr(compose.settings, "compose_require_fonts", True)
+    real_new_page = browser.new_page
+    blocked = []
+
+    async def new_page(**kw):
+        page = await real_new_page(**kw)
+
+        async def block(route):
+            blocked.append(route.request.url)
+            await route.abort()
+
+        await page.route("**://fonts.googleapis.com/**", block)
+        await page.route("**://fonts.gstatic.com/**", block)
+        return page
+
+    monkeypatch.setattr(browser, "new_page", new_page)
+    try:
+        for headline in (
+            "Weekend Sale",
+            "\u0906\u091c \u0939\u0940 \u0911\u0930\u094d\u0921\u0930 \u0915\u0930\u0947\u0902",
+            "\u0c87\u0c82\u0ca6\u0cc1 \u0c86\u0cb0\u0ccd\u0ca1\u0cb0\u0ccd "
+            + "\u0cae\u0cbe\u0ca1\u0cbf",
+        ):
+            payload = json.loads(json.dumps(EXAMPLE))
+            payload["headline"] = headline
+            brief = CreativeBrief.model_validate(payload)
+            report = await compose.check_layout(brief, brief.units()[0], _brand())
+            assert report["violations"] == []
+        assert blocked == [], "a vendored brand never even asks"
+    finally:
+        await compose.shutdown()
+
+
+async def test_the_font_route_serves_only_font_files_from_its_own_directory():
+    served = {}
+
+    class Route:
+        def __init__(self, url):
+            self.request = types.SimpleNamespace(url=url)
+
+        async def fulfill(self, **kw):
+            served[self.request.url] = kw
+
+    ok = f"{fonts.LOCAL_HOST}/fonts.css"
+    host = fonts.LOCAL_HOST
+    bad = (f"{host}/families.txt", f"{host}/..%2f..%2fpyproject.toml", f"{host}/nope.woff2")
+    for url in (ok, *bad):
+        await compose._serve_fonts(Route(url))
+    assert served[ok]["status"] == 200 and served[ok]["content_type"].startswith("text/css")
+    assert [v["status"] for k, v in served.items() if k != ok] == [404, 404, 404]
 
 
 def test_copy_is_escaped_but_the_font_stack_is_not():
@@ -98,7 +206,7 @@ def test_copy_is_escaped_but_the_font_stack_is_not():
     assert ", 'Noto Sans', system-ui, sans-serif" in html
 
 
-def test_latin_headline_loads_only_the_brand_faces():
+def test_latin_headline_loads_only_the_brand_faces(nothing_vendored):
     brief = CreativeBrief.model_validate(EXAMPLE)
     html = compose.render_html(brief, brief.units()[0], _brand(), "data:image/jpeg;base64,")
     assert "Noto+Sans+" not in html

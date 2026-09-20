@@ -1,0 +1,5 @@
+The font files in this directory are redistributed under the SIL Open Font
+License, Version 1.1 (https://openfontlicense.org). Each family's copyright is
+held by its authors; see https://fonts.google.com/ for the specimen and licence
+page of each: Poppins, Inter, Playfair Display, Fraunces, Manrope, and the Noto
+Sans script families. Fetched by scripts/fetch_fonts.py.
