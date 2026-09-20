@@ -24,8 +24,7 @@ depends_on = None
 def upgrade() -> None:
     op.execute("ALTER TABLE creatives ADD COLUMN billed BOOLEAN NOT NULL DEFAULT FALSE")
     op.execute(
-        "CREATE INDEX ix_jobs_open ON jobs(status, started_at) "
-        "WHERE status IN ('queued','running')"
+        "CREATE INDEX ix_jobs_open ON jobs(status, started_at) WHERE status IN ('queued','running')"
     )
     op.execute(
         "CREATE INDEX ix_creatives_open ON creatives(status, created_at) "
