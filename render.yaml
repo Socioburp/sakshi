@@ -23,6 +23,13 @@ services:
     envVars:
       - fromGroup: sakshi-secrets
 
+  # ONE worker is one job at a time: a carousel that takes minutes holds up every
+  # other owner's reply for those minutes. The queue is safe to scale out --
+  # dequeue is an atomic BRPOP and worker._claim flips queued->running in one
+  # conditional statement, so two instances can never run the same job. Raise
+  # numInstances (it bills per instance) before onboarding more than a handful
+  # of concurrent owners. IMAGEGEN_CONCURRENCY is PER INSTANCE: keep
+  # instances x concurrency under your OpenAI images-per-minute tier.
   - type: worker
     name: sakshi-worker
     runtime: docker

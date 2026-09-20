@@ -38,7 +38,15 @@ BACKOFF = (10, 60)
 MAX_ATTEMPTS = 3
 
 # A job "running" longer than this has lost its worker (SIGKILL, OOM, redeploy).
-STALE_RUNNING = timedelta(minutes=10)
+#
+# It MUST stay longer than the slowest legitimate job, because a job re-queued
+# while it is still running is run twice -- and a creative job charges. At
+# gpt-image-2/high a picture can take ~2 minutes plus inspection, the gate
+# allows ~3 attempts a slide (IMAGEGEN_GATE_BUDGET_MICROS) and six slides run
+# four at a time: two waves of ~7 minutes. Ten minutes was right for FLUX and
+# would double-charge a slow carousel now. pipeline.STUCK_AFTER (45 min) stays
+# above this so a creative is never refunded while its job may still re-run.
+STALE_RUNNING = timedelta(minutes=30)
 # A job still "queued" this long after creation was never pushed, or its push
 # was lost. Longer than any legitimate delay before a worker picks it up.
 STALE_QUEUED = timedelta(seconds=90)

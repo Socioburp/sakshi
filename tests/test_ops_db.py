@@ -100,12 +100,14 @@ def _ctx(account_id, brand_id):
 # reaper
 # --------------------------------------------------------------------------- #
 def test_stuck_creatives_are_failed_and_billed_ones_refunded_once(owner):
-    from app.creative.pipeline import reap_stuck_creatives
+    from app.creative.pipeline import STUCK_AFTER, reap_stuck_creatives
     from app.db.models import Brief, Creative
     from app.db.session import session_scope
 
     account_id, brand_id = owner
-    old = datetime.now(UTC) - timedelta(minutes=30)
+    # Older than the window, whatever the window is: it moved from 10 to 45
+    # minutes when generation stopped being a matter of seconds.
+    old = datetime.now(UTC) - STUCK_AFTER - timedelta(minutes=5)
     with session_scope() as db:
         brief = Brief(account_id=account_id, brand_id=brand_id, payload=EXAMPLE)
         db.add(brief)
@@ -157,7 +159,7 @@ def test_job_reaper_requeues_lost_pushes_and_retires_dead_workers(db_ready, monk
 
     pushed: list[str] = []
     monkeypatch.setattr(client, "_push", lambda envelope, at=None: pushed.append(envelope) or True)
-    old = datetime.now(UTC) - timedelta(minutes=20)
+    old = datetime.now(UTC) - client.STALE_RUNNING - timedelta(minutes=10)
     tag = uuid.uuid4().hex
     # An unknown kind: if a real worker ever sees these rows it retires them
     # on sight instead of trying to run a message that does not exist.
