@@ -146,10 +146,17 @@ def apply(brand, look_key: str | None = None) -> Look:
     """Set the brand's fonts and signature from a look; returns the look."""
     look = LOOKS.get(look_key or "", None) or pick(getattr(brand, "category", None))
     brand.fonts = {**(brand.fonts or {}), "heading": look.heading, "body": look.body}
+    # The photographic style rides with the look, split by brand so two brands
+    # on the same look do not share a photographer. Set once; changing the look
+    # re-picks it, an explicit template_prefs["shoot"] survives only until then.
+    from app.creative import shotplan
+
+    shoot = shotplan.pick_style(look.key, str(getattr(brand, "name", "") or ""))
     brand.template_prefs = {
         **(brand.template_prefs or {}),
         "look": look.key,
         "signature": look.signature,
+        "shoot": shoot,
     }
     return look
 

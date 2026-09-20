@@ -115,6 +115,66 @@ ART_DIRECTION = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# the shoot style: one per BRAND
+# --------------------------------------------------------------------------- #
+# ART_DIRECTION above was one string for every brand on the platform: the same
+# side daylight, the same grade, the same "candid editorial". Inside a brand
+# that sameness is the point. ACROSS brands it meant a sweet shop, a jeweller
+# and a gym all came back from the same imaginary photographer, and a feed of
+# our customers looked like one account.
+#
+# So the lock stays -- one art direction per brief, repeated on every slide --
+# but WHICH one is a property of the brand: chosen once from its look, kept in
+# template_prefs["shoot"], and the same on every post thereafter. Each string
+# is kept no longer than ART_DIRECTION so the enrichment budget in photoreal.py
+# is unchanged.
+SHOOT_STYLES: dict[str, str] = {
+    "daylight": ART_DIRECTION,
+    "bright_airy": (
+        "bright, airy high-key daylight through a sheer curtain, pale clean tones, "
+        "soft open shadows, fine natural grain, fresh editorial photography"
+    ),
+    "moody": (
+        "low-key light from one small window, deep shadows with rich blacks, muted "
+        "jewel tones, fine natural grain, quiet luxury editorial photography"
+    ),
+    "warm_documentary": (
+        "warm late-afternoon light, golden tones, lived-in surfaces left as they are, "
+        "fine natural grain, unposed documentary photography"
+    ),
+    "graphic_studio": (
+        "crisp studio light with one hard-edged shadow, saturated clean colour, bold "
+        "simple shapes, fine natural grain, graphic advertising photography"
+    ),
+}
+assert all(len(v) <= len(ART_DIRECTION) for v in SHOOT_STYLES.values()), "shoot style too long"
+
+# Two candidates per look, so two brands that share a look can still differ.
+STYLES_BY_LOOK: dict[str, tuple[str, ...]] = {
+    "clean": ("bright_airy", "daylight"),
+    "editorial": ("moody", "bright_airy"),
+    "warm": ("warm_documentary", "daylight"),
+    "bold": ("graphic_studio", "warm_documentary"),
+}
+
+
+def pick_style(look: str | None, brand_key: str) -> str:
+    """A brand's shoot style: from its look, split by a stable hash of the brand."""
+    options = STYLES_BY_LOOK.get((look or "").strip(), ("daylight",))
+    digest = hashlib.blake2b((brand_key or "").encode(), digest_size=2).digest()
+    return options[int.from_bytes(digest, "big") % len(options)]
+
+
+def style_of(template_prefs: dict | None, brand_key: str = "") -> str:
+    """The style to shoot in NOW: the stored one, else the one this brand would
+    be given -- so brands created before this existed are consistent from their
+    first post, without a backfill."""
+    prefs = template_prefs or {}
+    stored = prefs.get("shoot")
+    return stored if stored in SHOOT_STYLES else pick_style(prefs.get("look"), brand_key)
+
+
 def order_for(slide_count: int) -> tuple[str, ...]:
     n = max(1, min(6, int(slide_count or 1)))
     return ORDERS.get(n, ORDERS[6])
@@ -127,7 +187,7 @@ def shot_for(position: int, slide_count: int) -> Shot:
     return SHOT_BY_KEY[order[idx]]
 
 
-def camera_clause(position: int, slide_count: int) -> str:
+def camera_clause(position: int, slide_count: int, style: str | None = None) -> str:
     """The full camera + framing + copy-space clause for one slide.
 
     Starts with photoreal's marker so the enrichment stays idempotent and the
@@ -136,7 +196,7 @@ def camera_clause(position: int, slide_count: int) -> str:
     shot = shot_for(position, slide_count)
     return (
         f"shot on a full-frame camera with a {shot.camera}, "
-        f"{shot.framing}, {shot.copy_space}, {ART_DIRECTION}"
+        f"{shot.framing}, {shot.copy_space}, {SHOOT_STYLES.get(style or '', ART_DIRECTION)}"
     )
 
 

@@ -203,6 +203,18 @@ async def test_without_usage_the_ledger_falls_back_to_the_list_price(openai):
     assert res.cost_micros == P.DEFAULT_COST_MICROS["openai"] == 288_300
 
 
+def test_vendor_prices_have_been_checked_recently():
+    """Goes red on purpose. When it does: open each vendor's pricing page, fix
+    DEFAULT_COST_MICROS / OPENAI_MICROS_PER_* if they moved, then move the date."""
+    from datetime import date
+
+    age = (date.today() - date.fromisoformat(P.PRICES_CHECKED_ON)).days
+    assert 0 <= age <= P.PRICES_MAX_AGE_DAYS, (
+        f"vendor prices were last checked {age} days ago ({P.PRICES_CHECKED_ON}); "
+        "re-verify them and update PRICES_CHECKED_ON"
+    )
+
+
 @respx.mock
 async def test_a_rate_limit_is_waited_out_never_answered_with_a_cheaper_call(openai, monkeypatch):
     async def no_sleep(_s):

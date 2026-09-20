@@ -197,6 +197,15 @@ MAX_DOWNLOAD_BYTES = 30 * 1024 * 1024
 # Re-check these before any pricing change to the product. If a vendor's
 # rate moves, set IMAGEGEN_COST_MICROS rather than editing here, so the
 # ledger can be corrected without a deploy.
+# The day the figures below (and OPENAI_MICROS_PER_* further down) were last
+# read off the vendors' own pricing pages. Two of them were stale the day
+# they were audited, and nobody knew. tests/test_openai_image.py fails once
+# this is more than PRICES_MAX_AGE_DAYS old: re-check the pages, then move
+# the date. The ledger prefers measured usage, but the fallbacks, the soak
+# estimate and the credit price are all built on these.
+PRICES_CHECKED_ON = "2026-09-20"
+PRICES_MAX_AGE_DAYS = 90
+
 DEFAULT_COST_MICROS = {
     "fal": 50000,  # FLUX.1 [dev] $0.025/MP, 1.46MP rounds up to 2MP
     "replicate": 30000,  # flux-dev, $0.030 per image flat

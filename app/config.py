@@ -166,7 +166,10 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
-    free_trial_credits: int = 10
+    # A credit is now ~$0.29-0.90 of vendor spend (gpt-image-2 high, plus gate
+    # retries), not the ~$0.03 it was when this was 10. Ten free credits was up
+    # to ~$9 handed to every signup; three is a fair look at the product.
+    free_trial_credits: int = 3
 
     @property
     def is_prod(self) -> bool:

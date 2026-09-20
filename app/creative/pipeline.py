@@ -1039,6 +1039,11 @@ async def _build_one(
             # The brand's exact hex values, so the picture harmonises with
             # the type and the mark that will be laid over it.
             palette=dict(getattr(brand_snapshot, "palette", {}) or {}),
+            # One photographer per brand, the same on every post (shotplan).
+            style=shotplan.style_of(
+                getattr(brand_snapshot, "template_prefs", None),
+                str(getattr(brand_snapshot, "name", "") or ""),
+            ),
         )
         # Generated natively at 4:5 ABOVE the delivery size and resampled down
         # by the compositor. Never generated at a preset and cropped.

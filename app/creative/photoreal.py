@@ -248,6 +248,7 @@ def photographic(
     position: int | None = None,
     slide_count: int | None = None,
     palette: dict | None = None,
+    style: str | None = None,
 ) -> tuple[str, str]:
     """Return (prompt, negative) tuned for a photograph, safely re-runnable.
 
@@ -263,7 +264,13 @@ def photographic(
         play_clause = f" {play}." if play else ""
         camera = CAMERA_DIRECTION
         if position and slide_count and slide_count > 1:
-            camera = _shotplan.camera_clause(position, slide_count)
+            camera = _shotplan.camera_clause(position, slide_count, style)
+        elif style and style != "daylight" and style in _shotplan.SHOOT_STYLES:
+            # A single post in the brand's own shoot style: the hero lens, their light.
+            camera = (
+                f"{_MARKER} with a 50mm prime at f/2.0, shallow depth of field with soft "
+                f"falloff, {_shotplan.SHOOT_STYLES[style]}"
+            )
         tint = palette_clause(palette)
         tint_clause = f" {tint}." if tint else ""
         p = f"{p.rstrip('.,; ')}{mood_clause}.{play_clause}{tint_clause} {camera}."
