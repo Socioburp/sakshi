@@ -31,6 +31,8 @@
   .foot { position: absolute; left: {{ pad_x }}px; right: {{ pad_x }}px;
           bottom: {{ pad_bottom }}px; display: flex; align-items: center; flex-wrap: wrap; row-gap: {{ (width*0.03)|round|int }}px;
           justify-content: space-between; gap: {{ (width*0.03)|round|int }}px; }
+  {# The band is solid brand colour; the foot sits over the photograph. #}
+  .foot .brandline { color: {{ brand.ink_photo }}; }
 {% endblock %}
 {% block body %}
   <div class="col">

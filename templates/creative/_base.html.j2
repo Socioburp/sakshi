@@ -100,7 +100,7 @@
 
   .cta { display: inline-flex; align-items: center; align-self: flex-start;
          font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }}; font-weight: 700;
-         background: {{ brand.accent }}; color: {{ brand.secondary }};
+         background: {{ brand.accent }}; color: {{ brand.cta_ink }};
          padding: {{ (width*0.024)|round|int }}px {{ (width*0.048)|round|int }}px;
          border-radius: 999px; font-size: {{ (width*0.033)|round|int }}px;
          letter-spacing: .005em; white-space: nowrap;

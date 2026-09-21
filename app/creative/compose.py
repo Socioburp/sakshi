@@ -219,6 +219,35 @@ def _font_name(value: Any, default: str) -> str:
     return name if _FONT_NAME_OK.match(name) else default
 
 
+# WCAG 2.x contrast. 4.5:1 is the AA line for body text; the subhead is body
+# text, so everything set in type is held to it.
+MIN_CONTRAST = 4.5
+_LIGHT, _DARK = "#FFFFFF", "#141414"
+_HEX6 = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _luminance(colour: str) -> float:
+    c = colour if _HEX6.match(colour or "") else "#808080"
+    out = []
+    for i in (1, 3, 5):
+        v = int(c[i : i + 2], 16) / 255
+        out.append(v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
+
+
+def contrast(a: str, b: str) -> float:
+    la, lb = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def readable_on(ground: str, wanted: str) -> str:
+    """`wanted` if it can be read on `ground`; otherwise white or near-black,
+    whichever reads better. The brand's colour is used whenever it CAN be."""
+    if _HEX6.match(wanted or "") and contrast(wanted, ground) >= MIN_CONTRAST:
+        return wanted
+    return max((_LIGHT, _DARK), key=lambda c: contrast(c, ground))
+
+
 def _brand_context(brand: Any) -> dict[str, Any]:
     palette = dict(getattr(brand, "palette", {}) or {})
     faces = dict(getattr(brand, "fonts", {}) or {})
@@ -239,6 +268,9 @@ def _brand_context(brand: Any) -> dict[str, Any]:
         "secondary": palette.get("secondary", "#FFFFFF"),
         "accent": palette.get("accent", "#E4572E"),
         "ink": palette.get("ink", "#FFFFFF"),
+        # Set per layout in render_html: the brand's ink where it can be read,
+        # a readable ink where it cannot. See `readable_on`.
+        "ink_photo": _LIGHT,
         "heading_font": _font_name(faces.get("heading"), "Poppins"),
         "body_font": _font_name(faces.get("body"), "Inter"),
         "google_fonts": faces.get("google_fonts_href"),
@@ -282,6 +314,20 @@ def render_html(
     brand_ctx["indic"] = bool(scripts)
     prefs = getattr(brand, "template_prefs", None) or {}
     brand_ctx["signature"] = prefs.get("signature") or "none"
+    # LEGIBILITY IS A GUARANTEE TOO. The layouts that set type over the
+    # photograph put a BLACK scrim behind it, so the type must be light; a brand
+    # whose ink is dark (a light-palette brand) came out as near-black words on
+    # a darkened photograph -- inside every box, overlapping nothing, and
+    # unreadable. On a solid panel the ink must read against the brand's own
+    # primary, and the CTA's label against its accent. The brand's colour is
+    # kept wherever it passes 4.5:1 and replaced only where it cannot.
+    ink = brand_ctx["ink"]
+    brand_ctx["ink_photo"] = ink if contrast(ink, "#000000") >= 7.0 else _LIGHT
+    if name in TYPE_OVER_PHOTO:
+        brand_ctx["ink"] = brand_ctx["ink_photo"]
+    else:
+        brand_ctx["ink"] = readable_on(brand_ctx["primary"], ink)
+    brand_ctx["cta_ink"] = readable_on(brand_ctx["accent"], brand_ctx["secondary"])
     return tpl.render(
         brief=brief,
         slide=slide,
