@@ -53,6 +53,7 @@ from app.creative import (
     photoreal,
     photoref,
     product,
+    remembered,
     shotplan,
 )
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
@@ -326,6 +327,16 @@ async def generate(
             units = brief.units()
             template_switched = True
         brand_snapshot = _snapshot(db, brand)
+        # The layout their approved posts share -- read BEFORE this brief is
+        # stored, so a creative is never evidence for its own "usual".
+        usual_template = None
+        try:
+            from app.creative import grid
+
+            fp = grid.fingerprint(db, ctx.brand_id)
+            usual_template = fp.dominant(fp.templates) if fp.enough else None
+        except Exception:  # noqa: BLE001 - a missing signature costs one remembered fact
+            log.warning("grid_fingerprint_failed", brand_id=str(ctx.brand_id))
 
     # Prove the copy can be set -- no overlap, no crop, inside the safe zone,
     # the mark clear -- BEFORE the brief is stored or a credit is charged. The
@@ -512,6 +523,26 @@ async def generate(
         "credits_left": balance,
         "note": "The owner can see it now. Ask if they want changes; keep it to one line.",
     }
+    # What was KNOWN about this brand and used here, for the agent to say out
+    # loud. Derived from what the pipeline actually did -- never inferred.
+    shipped = {
+        s.position for s, r in zip(units, results, strict=True) if not isinstance(r, BaseException)
+    }
+    known = remembered.build(
+        brief=brief,
+        grounding=getattr(ctx, "grounding", None),
+        photo_labels={
+            pos: assets[ref].label
+            for pos, ref in sorted(resolved.items())
+            if pos in shipped and ref in assets
+        },
+        usual_template=usual_template,
+        palette=dict(getattr(brand_snapshot, "palette", {}) or {}),
+        generated=bool(shipped & billable_positions),
+    )
+    if known:
+        out["remembered"] = known
+        out["remembered_hint"] = remembered.HINT
     if failures:
         out["failed_slides"] = failures[:6]
         out["note"] = (
@@ -1207,10 +1238,18 @@ def _merge(payload: dict, changes: dict) -> dict:
 
 
 class BrandAssetSnapshot:
-    __slots__ = ("id", "storage_key", "mime", "kind")
+    __slots__ = ("id", "storage_key", "mime", "kind", "label")
 
-    def __init__(self, id: str, storage_key: str, mime: str | None, kind: str = "product") -> None:
+    def __init__(
+        self,
+        id: str,
+        storage_key: str,
+        mime: str | None,
+        kind: str = "product",
+        label: str | None = None,
+    ) -> None:
         self.id, self.storage_key, self.mime, self.kind = id, storage_key, mime, kind
+        self.label = label
 
 
 def _resolve_photos(
@@ -1281,7 +1320,9 @@ def _load_assets(
         except ValueError:
             continue
         if asset is not None and asset.brand_id == brand_id:
-            out[raw] = BrandAssetSnapshot(raw, asset.storage_key, asset.mime, asset.kind)
+            out[raw] = BrandAssetSnapshot(
+                raw, asset.storage_key, asset.mime, asset.kind, asset.label
+            )
     return out
 
 

@@ -227,6 +227,9 @@ async def test_a_single_post_uses_the_same_settings_as_a_carousel_slide(world, m
     assert (first.width, first.height) == (second.width, second.height) == (1600, 2000)
     assert bggate.CORRECTIONS["watermark"] in second.prompt
     assert "#123B2E" in first.prompt, "the brand's exact hex reaches the image prompt"
+    # ...and the agent is handed what was known and used, to say out loud.
+    assert [f["kind"] for f in res["remembered"]] == ["brand_colours"]
+    assert "never add a memory" in res["remembered_hint"].lower()
     (row,) = world["rows"].values()
     assert row.cost_micros == 2 * 288_300
     assert world["images"] == [(res["image_urls"][0], EXAMPLE["headline"])]
