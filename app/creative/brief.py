@@ -16,6 +16,7 @@ prompt to hold.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -69,6 +70,62 @@ _QUOTED = re.compile(
     r"[\"“”][^\"“”]{2,}[\"“”]"
     r"|(?<![A-Za-z0-9])'[^']{2,}'(?![A-Za-z0-9])"
 )
+
+# COPY THE FACES CANNOT SET. The headline, subhead and CTA are composited in
+# the brand's faces plus a Noto face per script -- none of which carries emoji,
+# pictographs or dingbats. A headline ending in two emoji used to be accepted: the emoji were set
+# in whatever emoji font the render host happened to have (a different one on
+# every machine, none of them the brand's), wrapped onto a 135px line of their
+# own, and nothing measured them. So they are stopped HERE, before any layout
+# or charge, with a message the agent can act on. Emoji are welcome in
+# caption.body, which Instagram sets, not us.
+_PICTOGRAPHS = (
+    (0x2300, 0x23FF),  # technical pictographs: watch, hourglass, alarm clock
+    (0x2600, 0x27BF),  # miscellaneous symbols and dingbats: stars, hearts, ticks
+    (0x2B00, 0x2BFF),  # star, large squares and circles
+    (0x1F000, 0x1FAFF),  # every emoji plane, flags and skin tones included
+    (0xFE00, 0xFE0F),  # variation selectors (the "make it an emoji" switch)
+    (0xE0000, 0xE01EF),  # tag characters and the variation selector supplement
+    (0x20E3, 0x20E3),  # the keycap
+)
+# Zero-width joiner and non-joiner are part of ordinary Hindi, Malayalam, Sinhala
+# and Urdu spelling. They only ever built an emoji sequence between pictographs,
+# and those are already refused.
+_JOINERS = frozenset("\u200c\u200d")
+
+
+def _unsettable(text: str) -> list[str]:
+    """The characters in `text` the compositor's faces cannot set, in order."""
+    found: list[str] = []
+    for ch in text:
+        cp = ord(ch)
+        pictograph = any(lo <= cp <= hi for lo, hi in _PICTOGRAPHS)
+        control = unicodedata.category(ch) in ("Cc", "Cf", "Co", "Cs") and ch not in _JOINERS
+        if (pictograph or control) and ch not in found:
+            found.append(ch)
+    return found
+
+
+def settable_copy(field: str, value: str | None) -> str | None:
+    """Copy as the compositor will set it: whitespace collapsed (a newline in a
+    headline is a space to the browser anyway), and refused when it carries a
+    character no face of ours has."""
+    if value is None:
+        return None
+    text = " ".join(value.split())
+    bad = _unsettable(text)
+    if bad:
+        shown = ", ".join(
+            f"{ch!r} (U+{ord(ch):04X})" if ch.isprintable() else f"U+{ord(ch):04X}"
+            for ch in bad[:6]
+        )
+        raise ValueError(
+            f"{field} contains characters the brand's typefaces cannot set: {shown}. "
+            f"Rewrite the {field} in plain words and punctuation -- no emoji, pictographs, "
+            f"dingbat symbols or invisible control characters. Emoji are fine in caption.body."
+        )
+    return text
+
 
 # `mood` is appended to the image prompt by the photoreal enrichment, so its
 # length is part of the enrichment budget.
@@ -198,6 +255,11 @@ class Slide(BaseModel):
     visual_direction: VisualDirection
     template_id: str | None = None
 
+    @field_validator("headline", "subhead")
+    @classmethod
+    def copy_can_be_set(cls, v: str | None, info) -> str | None:
+        return settable_copy(info.field_name, v)
+
 
 class CreativeBrief(BaseModel):
     intent: Intent
@@ -219,6 +281,14 @@ class CreativeBrief(BaseModel):
     )
     grounding: Grounding = Field(default_factory=Grounding)
     slides: list[Slide] = Field(default_factory=list)
+
+    @field_validator("headline", "subhead", "cta")
+    @classmethod
+    def copy_can_be_set(cls, v: str | None, info) -> str | None:
+        text = settable_copy(info.field_name, v)
+        if info.field_name == "headline" and not text:
+            raise ValueError("headline is empty once whitespace is removed.")
+        return text
 
     @model_validator(mode="after")
     def carousel_consistency(self) -> CreativeBrief:
