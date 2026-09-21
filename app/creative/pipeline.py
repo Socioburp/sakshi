@@ -221,53 +221,139 @@ def claim_notes(brief: CreativeBrief, brand: Any) -> list[dict[str, str]]:
 # What each FIT_JS violation means, in words the agent can act on.
 _LAYOUT_WORDS = {
     "overflow": "the copy is too long for the layout",
-    "clipped": "a word is wider than the layout",
+    "clipped": "a word is wider than the layout, and words are never split",
+    "wordbreak": "a word would have to be split across two lines",
+    "too_many_lines": "the copy runs to too many lines to read as a post",
+    "hierarchy": "the subhead is so long the headline would stop reading as the headline",
+    "linegap": "two lines of type would touch",
+    "tofu": "the copy uses a character the brand's typefaces cannot set",
     "outside": "the copy runs off the canvas",
     "unsafe": "the copy reaches into the strip the profile grid trims",
     "overlap": "two elements would overlap",
     "logo_clearspace": "the copy crowds the logo",
     "logo_not_loaded": "the logo could not be loaded",
 }
+# The same violations when their subject is the brand's own mark. Shorter copy
+# cannot cure any of these, so they are never described as a copy problem.
+_MARK_WORDS = {
+    "logo_not_loaded": "the brand's logo file could not be loaded",
+    "logo_clearspace": "the logo cannot keep its clear space in this layout",
+    "too_many_lines": "the brand name is too long to set as the mark, even on two lines",
+    "clipped": "a word in the brand name is wider than the layout",
+    "wordbreak": "a word in the brand name would have to be split",
+    "tofu": "the brand name uses a character the brand's typefaces cannot set",
+}
+_MARK_DEFAULT = "the brand name or logo cannot be set inside the safe zone"
+
+_COPY_HINT = (
+    "Nothing was made and nothing was charged. At a readable size this copy cannot be "
+    "set without cropping or overlapping, and we never ship that. Shorten the headline, "
+    "subhead or CTA on the slide(s) named -- fewer words, not smaller words -- and call "
+    "the tool again. Do not tell the owner about layout; just send the tighter version."
+)
+_TOFU_HINT = (
+    " Where a problem names a character (U+....), remove that character: write it in "
+    "plain words instead."
+)
+_MARK_HINT = (
+    "Nothing was made and nothing was charged. The COPY IS FINE -- do not shorten or "
+    "rewrite it, that cannot help. What does not fit is the brand's own mark: with no "
+    "logo on file the brand NAME is set on every creative, and this one is too long (or "
+    "the logo file is broken). Ask the owner for the short name they want on their posts "
+    "and save it with update_brand(name=...), or ask them to send their logo; then call "
+    "the tool again with the same copy."
+)
+_FONT_HINT = (
+    "Nothing was made and nothing was charged. This is NOT a copy problem: a typeface the "
+    "brand is set in did not load on our side. Do not rewrite the copy. Call the tool once "
+    "more with the same brief; if it fails again, tell the owner there is a technical "
+    "problem on our end and that they have not been charged."
+)
+
+
+def _about_the_mark(violation: str) -> bool:
+    """True when the thing that does not fit is the brand's name or logo itself,
+    not the copy around it. "overlap:headline+logo" and
+    "logo_clearspace:subhead" are the COPY crowding the mark, and stay copy."""
+    kind, _, subject = violation.partition(":")
+    if kind == "logo_not_loaded":
+        return True
+    if kind in ("overlap", "overflow", "hierarchy"):
+        return False
+    if kind == "logo_clearspace":
+        return subject == "edge"
+    return subject.split(":", 1)[0] in ("brandline", "logo")
 
 
 async def layout_gate(brief: CreativeBrief, units: list[Slide], brand_snapshot) -> dict | None:
     """The deterministic guarantees, checked before any money moves.
 
     Returns the tool result to hand back when a slide cannot be set, or None.
-    There is no degraded render to fall back to: the copy gets shorter.
+    There is no degraded render to fall back to. WHAT has to change is part of
+    the answer: a brand whose 44-character name was set as its mark used to be
+    told "shorten the headline" on every request, for ever, and a typeface that
+    failed to load surfaced as a bare tool error -- the agent rewrote good copy
+    in a loop and the owner got nothing.
     """
     results = await asyncio.gather(
         *(compose.check_layout(brief, s, brand_snapshot) for s in units),
         return_exceptions=True,
     )
-    problems = []
+    problems, faces = [], []
     for slide, res in zip(units, results, strict=True):
         if isinstance(res, compose.LayoutError):
-            kinds = list(dict.fromkeys(v.split(":", 1)[0] for v in res.violations))
+            mark_only = all(_about_the_mark(v) for v in res.violations)
+            words = []
+            for v in res.violations:
+                kind = v.split(":", 1)[0]
+                if _about_the_mark(v):
+                    words.append(_MARK_WORDS.get(kind, _MARK_DEFAULT))
+                else:
+                    words.append(_LAYOUT_WORDS.get(kind, kind))
             problems.append(
                 {
                     "slide": slide.position,
                     "headline": slide.headline,
-                    "problems": [_LAYOUT_WORDS.get(k, k) for k in kinds],
+                    "about": "brand_mark" if mark_only else "copy",
+                    "problems": list(dict.fromkeys(words)),
                     "detail": res.violations[:6],
                 }
             )
+        elif isinstance(res, compose.BrandFontUnavailable):
+            faces.append({"slide": slide.position, "detail": str(res)})
         elif isinstance(res, BaseException):
             raise res
+    if faces:
+        log.error("layout_gate_fonts_unavailable", slides=faces)
+        return {
+            "ok": False,
+            "reason": "brand_font_unavailable",
+            "charged": 0,
+            "slides": faces,
+            "hint": _FONT_HINT,
+        }
     if not problems:
         return None
     log.warning("layout_gate_refused", slides=[p["slide"] for p in problems])
+    if all(p["about"] == "brand_mark" for p in problems):
+        return {
+            "ok": False,
+            "reason": "brand_mark_does_not_fit",
+            "charged": 0,
+            "slides": problems,
+            "hint": _MARK_HINT,
+        }
+    hint = _COPY_HINT
+    if any(d.startswith("tofu:") for p in problems for d in p["detail"]):
+        hint += _TOFU_HINT
+    if any(p["about"] == "brand_mark" for p in problems):
+        hint += " On a slide marked brand_mark the copy is fine; see its problems."
     return {
         "ok": False,
         "reason": "copy_does_not_fit",
         "charged": 0,
         "slides": problems,
-        "hint": (
-            "Nothing was made and nothing was charged. At a readable size this copy cannot be "
-            "set without cropping or overlapping, and we never ship that. Shorten the headline, "
-            "subhead or CTA on the slide(s) named -- fewer words, not smaller words -- and call "
-            "the tool again. Do not tell the owner about layout; just send the tighter version."
-        ),
+        "hint": hint,
     }
 
 
