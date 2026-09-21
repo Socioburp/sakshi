@@ -70,6 +70,10 @@ GRID_MARGIN = 0.03  # of width, inside the safe zone
 # fails the render rather than shipping.
 SAFE_PAD = 90
 
+# Share of a full-screen 9:16 frame the app's own chrome covers, top and bottom.
+STORY_TOP = 0.14
+STORY_BOTTOM = 0.18
+
 # The one lossy encode in the whole path. The vendor returns PNG, Chromium
 # screenshots PNG, and this is where it becomes the JPEG Instagram requires.
 EXPORT_JPEG_QUALITY = 93
@@ -87,6 +91,16 @@ def padding_for(width: int, height: int) -> dict[str, int]:
     margins. Templates read pad_x / pad_top / pad_bottom from the context."""
     x_in, y_in = grid_insets(width, height)
     margin = int(round(width * GRID_MARGIN))
+    if height / width > 1.7:
+        # Full-screen 9:16 (a story, a reel's card). The app draws over it: the
+        # account row and progress bars across the top ~14%, the reply bar and
+        # send/like across the bottom ~18%. Instagram's own guidance is to keep
+        # text and logos out of roughly the top 250px and bottom 340px of 1920.
+        return {
+            "pad_x": max(SAFE_PAD, x_in + margin),
+            "pad_top": max(SAFE_PAD, y_in + margin, int(round(height * STORY_TOP))),
+            "pad_bottom": max(SAFE_PAD, y_in + margin, int(round(height * STORY_BOTTOM))),
+        }
     return {
         "pad_x": max(SAFE_PAD, x_in + margin),
         "pad_top": max(SAFE_PAD, y_in + margin),

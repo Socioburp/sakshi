@@ -551,6 +551,14 @@ async def generate(
             "that failed the check. Tell the owner plainly, in one line, which slide is missing "
             "and offer to try that slide again with regenerate_image."
         )
+    if brief.is_story():
+        out["format"] = "story"
+        out["story_note"] = (
+            "Made full-screen (9:16) as they chose: it fits an Instagram Story and a "
+            "WhatsApp Status as it is -- they can forward it to their Status straight from "
+            "this chat. publish_to_instagram posts it as a Story. It does not go on their "
+            "grid. Say this once, in one line."
+        )
     if brief.is_reel():
         out["format"] = "reel"
         out["reel_note"] = (

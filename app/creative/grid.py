@@ -139,6 +139,9 @@ def check(fp: Fingerprint, brief: Any) -> GridNote | None:
     # the grid. Judging it against the still grid's ratio would flag every reel.
     if getattr(brief, "is_reel", None) and brief.is_reel():
         return None
+    # A story never appears on the grid at all, so it cannot break it.
+    if getattr(brief, "is_story", None) and brief.is_story():
+        return None
     deviations: list[str] = []
     changes: dict[str, Any] = {}
     severity = 0

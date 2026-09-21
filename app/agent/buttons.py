@@ -38,6 +38,10 @@ _TITLES: dict[str, dict[str, str]] = {
         "mr": "Aaj nako",
         "ml": "Innu venda",
     },
+    # "Post" and "Story" are what Instagram itself calls them in every language
+    # it ships in India; owners say the English words. Not translated on purpose.
+    "fmt:post": {"en": "Post"},
+    "fmt:story": {"en": "Story"},
     "grid:adjusted": {
         "hi": "Grid se match karo",
         "en": "Match my grid",

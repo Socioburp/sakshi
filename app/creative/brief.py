@@ -40,6 +40,10 @@ POST_SIZE: tuple[int, int] = (1080, 1350)
 POST_ASPECT = "4:5"
 # A reel is video, published through a different container with its own rules.
 REEL_SIZE: tuple[int, int] = (1080, 1920)
+# A STORY is the other still the owner can ask for: full-screen 9:16, for an
+# Instagram Story or a WhatsApp Status. It is a CHOICE, never a default and
+# never a conversion -- a post stays 4:5. Same pixels as a reel's frame.
+STORY_SIZE: tuple[int, int] = REEL_SIZE
 
 # The ratios the publishing API takes for an image, as width / height.
 IG_MIN_RATIO = 4 / 5
@@ -88,7 +92,9 @@ class Format(BaseModel):
     # single: one image. carousel: 2-6 images. reel: one image set in motion,
     # always 9:16 -- a seven-second push-in over the photo with the card
     # fading in, published as a Reel (or forwarded to WhatsApp Status).
-    type: Literal["single", "carousel", "reel"] = "single"
+    # story: one full-screen 9:16 still, for an Instagram Story or a WhatsApp
+    # Status. The owner picks post or story; see prompts.py, "Post or Story".
+    type: Literal["single", "carousel", "reel", "story"] = "single"
     # Still accepted as input so stored and model-authored briefs validate, but
     # it is not a choice: a still is 4:5 and a reel is 9:16 (see the validator).
     aspect_ratio: AspectRatio = "4:5"
@@ -100,8 +106,8 @@ class Format(BaseModel):
         # locks a carousel to its first slide's ratio and crops or letterboxes
         # the rest, so the ratio lives on the brief -- never on a slide -- and
         # every slide inherits it by construction.
-        self.aspect_ratio = "9:16" if self.type == "reel" else POST_ASPECT
-        if self.type == "reel":
+        self.aspect_ratio = "9:16" if self.type in ("reel", "story") else POST_ASPECT
+        if self.type in ("reel", "story"):
             self.slide_count = 1
         elif self.type == "single":
             self.slide_count = 1
@@ -238,13 +244,18 @@ class CreativeBrief(BaseModel):
 
     # -- helpers used downstream -------------------------------------------- #
     def pixel_size(self) -> tuple[int, int]:
-        return REEL_SIZE if self.is_reel() else POST_SIZE
+        if self.is_reel():
+            return REEL_SIZE
+        return STORY_SIZE if self.is_story() else POST_SIZE
 
     def is_carousel(self) -> bool:
         return self.format.type == "carousel"
 
     def is_reel(self) -> bool:
         return self.format.type == "reel"
+
+    def is_story(self) -> bool:
+        return self.format.type == "story"
 
     def units(self) -> list[Slide]:
         """Normalise single and carousel into one list the pipeline can loop over."""

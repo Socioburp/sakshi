@@ -105,7 +105,10 @@ IG_MAX_RATIO = 1.91
 _RATIO_EPS = 0.002
 
 
-def assert_publishable(images: list[tuple[str, int, int]]) -> None:
+STORY_SIZE = (1080, 1920)
+
+
+def assert_publishable(images: list[tuple[str, int, int]], *, story: bool = False) -> None:
     """Fail loudly BEFORE any container is created.
 
     `images` is one (format, width, height) per slide, read from the actual
@@ -115,6 +118,18 @@ def assert_publishable(images: list[tuple[str, int, int]]) -> None:
     """
     if not images:
         raise PublishSpecError("nothing to publish")
+    if story:
+        # A Story is one full-screen JPEG. The feed's 4:5..1.91:1 rule does not
+        # apply to it -- and a 4:5 picture sent as a Story is letterboxed, which
+        # is exactly the half-measure the owner's Post/Story choice exists to avoid.
+        if len(images) != 1:
+            raise PublishSpecError(f"a story is one image, got {len(images)}")
+        fmt, w, h = images[0]
+        if (fmt or "").upper() != "JPEG":
+            raise PublishSpecError(f"the story is {fmt}; Instagram takes JPEG only")
+        if (w, h) != STORY_SIZE:
+            raise PublishSpecError(f"the story is {w}x{h}; it must be exactly 1080x1920 (9:16)")
+        return
     for i, (fmt, w, h) in enumerate(images, start=1):
         if (fmt or "").upper() != "JPEG":
             raise PublishSpecError(f"slide {i} is {fmt}; Instagram takes JPEG only")
@@ -290,9 +305,9 @@ async def create_media_container(
     }
     if is_carousel_item:
         payload["is_carousel_item"] = "true"
-    else:
+    elif media_type != "STORIES":  # a Story carries no caption
         payload["caption"] = caption[:2200]
-    if alt_text:
+    if alt_text and media_type != "STORIES":
         payload["alt_text"] = alt_text[:300]
 
     async with _client() as c:

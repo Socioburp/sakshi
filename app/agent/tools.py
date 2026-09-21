@@ -409,6 +409,19 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "ask_post_or_story",
+        "description": (
+            "Ask the owner whether they want a Post or a Story, with two tappable buttons. "
+            "Call it ONCE, before create_creative, whenever they ask for a single picture and "
+            "have not said which -- then stop and wait for the tap; send one short line with "
+            "it. Do NOT call it when they already said (post / feed / grid -> single; story / "
+            "status -> story), for a carousel or a reel, when building from an idea they "
+            "tapped, or when revising. Post = 4:5 for the Instagram feed and grid. Story = "
+            "full-screen 9:16 for an Instagram Story or a WhatsApp Status. Free."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "check_credits",
         "description": (
             "Check how many creative credits the owner has left. Use before promising "
@@ -910,10 +923,19 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
                 return blocked
         is_carousel = len(creatives) > 1
         is_reel = bool(creatives[0].video_url) and not is_carousel
+        is_story = brief.is_story() and not is_carousel
         pub = Publication(
             creative_id=creatives[0].id,
             ig_account_id=ig_row.id,
-            media_type="CAROUSEL" if is_carousel else "REELS" if is_reel else "IMAGE",
+            media_type=(
+                "CAROUSEL"
+                if is_carousel
+                else "REELS"
+                if is_reel
+                else "STORIES"
+                if is_story
+                else "IMAGE"
+            ),
             caption=caption,
             hashtags=brief.caption.hashtags,
             alt_text=brief.alt_text,
@@ -934,7 +956,9 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
     # A reel's still is only its cover, and the video container has its own rules.
     if not is_reel:
         try:
-            ig.assert_publishable(await asyncio.to_thread(_image_facts, composed_keys))
+            ig.assert_publishable(
+                await asyncio.to_thread(_image_facts, composed_keys), story=is_story
+            )
         except Exception as exc:  # noqa: BLE001 - unreadable bytes are as unpublishable as bad ones
             log.error("ig_publish_spec_violation", publication_id=str(pub_id), error=str(exc))
             with session_scope() as db:
@@ -994,6 +1018,14 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
                 video_url=video_url,
                 caption=caption,
                 cover_url=urls[0],
+            )
+        elif is_story:
+            # A Story takes no caption and no alt text; it is the picture.
+            container_id = await ig.create_media_container(
+                ig_user_id=ig_user_id,
+                access_token=token,
+                image_url=urls[0],
+                media_type="STORIES",
             )
         else:
             container_id = await ig.create_media_container(
@@ -1079,6 +1111,26 @@ async def _publish_to_instagram(ctx: ToolContext, args: dict) -> dict:
     }
 
 
+async def _ask_post_or_story(ctx: ToolContext, args: dict) -> dict:
+    """Two buttons, nothing else. The choice is the owner's; the sizes are ours."""
+    return {
+        "ok": True,
+        "buttons": buttons.as_payload(["fmt:post", "fmt:story"], _locale(ctx)),
+        "options": {
+            "fmt:post": 'a Post: format.type "single" -- 4:5, for the Instagram feed and grid',
+            "fmt:story": (
+                'a Story: format.type "story" -- full-screen 9:16, for an Instagram Story '
+                "or a WhatsApp Status"
+            ),
+        },
+        "note": (
+            "Ask in ONE short line in their language (e.g. 'Post ya Story?') -- the two "
+            "buttons are attached for you. Then stop and wait. Their tap arrives as 'Post' or "
+            "'Story'; build exactly that with create_creative. Same price either way."
+        ),
+    }
+
+
 async def _check_credits(ctx: ToolContext, args: dict) -> dict:
     from app.db.models import Account
 
@@ -1135,6 +1187,7 @@ _HANDLERS = {
     "publish_to_instagram": _publish_to_instagram,
     "list_brand_assets": _list_brand_assets,
     "check_credits": _check_credits,
+    "ask_post_or_story": _ask_post_or_story,
 }
 
 # Tools that already put something in front of the owner. After one of these
