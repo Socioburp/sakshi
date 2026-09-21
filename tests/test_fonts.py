@@ -87,7 +87,43 @@ def test_rendered_html_loads_the_faces_the_headline_needs(nothing_vendored):
     assert "&#39;Noto" not in html
     assert "display=block" in html
     # Marks above and below the line need room; conjuncts need no tracking.
-    assert "line-height: 1.14" in html and "letter-spacing: 0;" in html
+    assert "line-height: 1.26" in html and "letter-spacing: 0;" in html
+
+
+def test_leading_follows_the_script_of_the_element_it_sets():
+    """One figure for every Indic script (1.14) left a two-line Hindi headline
+    with -20px between the ink of its lines. Devanagari and its relatives hang
+    matras below and stack marks above; the southern scripts mostly do not;
+    Latin display type stays tight."""
+    assert fonts.display_leading([]) == ".98"
+    assert fonts.display_leading(["Noto Sans Tamil"]) == "1.26"
+    assert fonts.display_leading(["Noto Sans Kannada", "Noto Sans Devanagari"]) == "1.38"
+    for tall in ("Devanagari", "Bengali", "Gujarati", "Gurmukhi", "Arabic"):
+        assert float(fonts.display_leading([f"Noto Sans {tall}"])) > float(
+            fonts.display_leading(["Noto Sans Malayalam"])
+        )
+    assert fonts.body_leading([]) == "1.34" and fonts.body_leading(["Noto Sans Bengali"]) == "1.6"
+    # A Latin headline over a Hindi subhead keeps its tight leading.
+    payload = json.loads(json.dumps(EXAMPLE))
+    payload["subhead"] = "\u0906\u091c \u0939\u0940 \u0911\u0930\u094d\u0921\u0930"
+    brief = CreativeBrief.model_validate(payload)
+    html = compose.render_html(brief, brief.units()[0], _brand(), "data:image/jpeg;base64,")
+    assert "line-height: .98;" in html and "line-height: 1.6;" in html
+
+
+def test_urdu_copy_reads_from_the_right_and_the_layout_mirrors():
+    assert fonts.text_direction("\u0622\u062c \u06c1\u06cc \u0622\u0631\u0688\u0631") == "rtl"
+    assert fonts.text_direction("Weekend Sale") == "ltr"
+    assert fonts.text_direction("50% \u0622\u0641") == "rtl", "digits are not a direction"
+    assert fonts.text_direction("") == "ltr"
+    payload = json.loads(json.dumps(EXAMPLE))
+    payload.update(
+        headline="\u0622\u062c \u06c1\u06cc \u0622\u0631\u0688\u0631", template_id="lower_third"
+    )
+    brief = CreativeBrief.model_validate(payload)
+    html = compose.render_html(brief, brief.units()[0], _brand(), "data:image/jpeg;base64,")
+    assert 'dir="rtl"' in html and '<h1 class="headline" dir="auto">' in html
+    assert "text-align: left" not in html
 
 
 # --------------------------------------------------------------------------- #

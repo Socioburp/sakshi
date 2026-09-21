@@ -43,7 +43,9 @@ def _colours(html: str) -> dict[str, str]:
         rule = html.split(f"  {selector} {{", 1)[1].split("}", 1)[0]
         return re.search(r"(?<![-\w])color:\s*(#[0-9A-Fa-f]{6})", rule).group(1)
 
-    return {"headline": grab(".headline"), "cta": grab(".cta")}
+    pill = html.split("  .cta {", 1)[1].split("}", 1)[0]
+    ground = re.search(r"background:\s*(#[0-9A-Fa-f]{6})", pill).group(1)
+    return {"headline": grab(".headline"), "cta": grab(".cta"), "cta_ground": ground}
 
 
 def test_contrast_maths_is_the_wcag_formula():
@@ -68,7 +70,14 @@ def test_type_can_always_be_read_against_what_it_sits_on(template, palette):
         assert compose.contrast(got["headline"], "#000000") >= 7.0, (template, palette, got)
     else:
         assert compose.contrast(got["headline"], ctx["primary"]) >= compose.MIN_CONTRAST, got
-    assert compose.contrast(got["cta"], ctx["accent"]) >= compose.MIN_CONTRAST, (palette, got)
+    # The label is read against the pill it actually sits on. That is the
+    # accent -- except on a panel layout whose accent cannot be told from the
+    # panel, where the pill takes the panel's ink (pinned further down).
+    assert compose.contrast(got["cta"], got["cta_ground"]) >= compose.MIN_CONTRAST, (palette, got)
+    if template in compose.CTA_ON_PANEL:
+        assert compose.contrast(got["cta_ground"], ctx["primary"]) >= compose.MIN_SHAPE_CONTRAST
+    else:
+        assert got["cta_ground"].upper() == ctx["accent"].upper()
 
 
 def test_the_brands_own_ink_is_kept_wherever_it_can_be_read():
@@ -76,4 +85,38 @@ def test_the_brands_own_ink_is_kept_wherever_it_can_be_read():
     for template in compose.TEMPLATES:
         brief = CreativeBrief.model_validate({**EXAMPLE, "template_id": template})
         got = _colours(compose.render_html(brief, brief.units()[0], _brand(palette), "data:,"))
-        assert got == {"headline": "#FFF4D6", "cta": "#2A0D0D"}, template
+        assert got == {"headline": "#FFF4D6", "cta": "#2A0D0D", "cta_ground": "#F2B233"}, template
+
+
+def test_the_button_does_not_dissolve_into_the_panel():
+    """A palette pulled from a one-colour logo: accent ~= primary. On the panel
+    layouts the pill vanished into the panel and the CTA read as loose bold
+    text. It becomes an inverse button in the panel's readable ink, and
+    frame_card's border goes with it -- decided from the numbers, every time."""
+    palette = {"primary": "#0B2A5B", "accent": "#10326B", "ink": "#FFFFFF", "secondary": "#FFFFFF"}
+    assert compose.contrast(palette["accent"], palette["primary"]) < compose.MIN_SHAPE_CONTRAST
+    for template in sorted(compose.CTA_ON_PANEL):
+        brief = CreativeBrief.model_validate({**EXAMPLE, "template_id": template})
+        html = compose.render_html(brief, brief.units()[0], _brand(palette), "data:,")
+        got = _colours(html)
+        assert got["cta_ground"] == "#FFFFFF" and got["cta"] == "#0B2A5B", (template, got)
+        assert compose.contrast(got["cta_ground"], palette["primary"]) >= compose.MIN_CONTRAST
+    frame = compose.render_html(
+        CreativeBrief.model_validate({**EXAMPLE, "template_id": "frame_card"}),
+        CreativeBrief.model_validate({**EXAMPLE, "template_id": "frame_card"}).units()[0],
+        _brand(palette),
+        "data:,",
+    )
+    assert "solid #FFFFFF" in frame and "solid #10326B" not in frame
+    # Over the photograph the accent pill is left alone: its ground is the picture.
+    brief = CreativeBrief.model_validate({**EXAMPLE, "template_id": "lower_third"})
+    html = compose.render_html(brief, brief.units()[0], _brand(palette), "data:,")
+    assert _colours(html)["cta_ground"] == "#10326B"
+
+
+def test_a_mid_tone_ground_still_gets_an_ink_that_clears_the_bar():
+    """At luminance ~0.19 white and near-black both land at ~4.3:1, under the
+    bar the label is later MEASURED against. Pure black always clears it."""
+    for ground in ("#7A7A7A", "#767676", "#808080", "#6E7B8B", "#8A7F72"):
+        ink = compose.readable_on(ground, "not-a-colour")
+        assert compose.contrast(ink, ground) >= compose.MIN_CONTRAST, (ground, ink)

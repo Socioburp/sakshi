@@ -5,7 +5,10 @@
    as it gets bigger, a logo sized by what the mark actually is, and a film
    grain that stops a generated background reading as plastic. #}
 <!DOCTYPE html>
-<html lang="{{ brief.caption.language }}">
+{# dir follows the COPY, not the caption language: an Urdu headline reads from the
+   right whatever language the brief says it is, and the whole layout mirrors
+   with it -- the block sits on the right, the CTA under its start edge. #}
+<html lang="{{ brief.caption.language }}" dir="{{ text_dir }}">
 <head>
 <meta charset="utf-8">
 {# The brand faces plus a Noto face for every script the copy uses (see
@@ -32,18 +35,36 @@
      canvas -- these stops approximate an ease-out so the darkening is felt but
      not seen, which keeps the photograph looking bright and real. #}
   {# The scrim's strength is measured per slide, not fixed (see
-     app/creative/legibility.py). Scaling opacity scales every stop of the
-     gradient together, so the ease the stops were chosen for is preserved --
-     the darkening just lands where the photograph needs it. #}
-  .scrim { position: absolute; inset: 0; opacity: {{ scrim_boost | default(1.0) }}; }
-  {# The second scrim is not a band: it is placed under the words AFTER they
-     have been fitted, sized to their measured block plus a feather, and given
-     only as much strength as the pixels behind that block call for (see
-     SCRIM_JS in compose.py). Zero-sized and invisible until then, and it stays
-     that way on a calm, dark photograph. #}
-  .scrim-text { position: absolute; left: 0; top: 0; width: 0; height: 0; opacity: 0;
-                background: #000; border-radius: {{ (width*0.09)|round|int }}px;
-                filter: blur({{ (width*0.05)|round|int }}px); pointer-events: none; }
+     app/creative/legibility.py). --k multiplies the ALPHA of every stop, so
+     the ease the stops were chosen for is preserved and a boost above 1 is a
+     real boost. It used to be set as `opacity`, which CSS clamps at 1: every
+     strength above the design did nothing, and white type over a white
+     photograph shipped at 2.8:1. #}
+  .scrim { position: absolute; inset: 0; --k: {{ scrim_boost | default(1.0) }}; }
+  {# The plates are not bands: one is placed under each CLUSTER of words AFTER
+     they have been fitted, sized to their measured ink plus a feather, and
+     given exactly the strength the rendered frame was measured to need for
+     4.5:1 (SCRIM_JS and _make_legible in compose.py). None exists until a
+     measurement asks for it, so a calm, dark photograph never gets one. The
+     feather is twice the blur: at the edge of the words the plate is still at
+     ~97% of its strength instead of fading out under the last letter. #}
+  .scrim-text { position: absolute; z-index: -1; pointer-events: none;
+                border-radius: {{ (width*0.06)|round|int }}px;
+                filter: blur({{ (width*0.03)|round|int }}px); }
+  {# A mark that cannot separate from its ground gets a plate of its own, and
+     an opaque logo file (a JPEG with its white background) sits on a rounded
+     card of that same colour -- deliberate, not a bare rectangle with a
+     drop shadow. Both live inside the mark's clear space, which FIT_JS has
+     already proven empty. #}
+  .mark-plate { position: absolute; z-index: -1; pointer-events: none;
+                box-shadow: 0 {{ (width*0.003)|round|int }}px
+                            {{ (width*0.012)|round|int }}px rgba(0,0,0,.22); }
+  {# What the legibility pass screenshots: the frame exactly as it will ship,
+     minus the ink, so the ground behind every word can be read off it. #}
+  .stage.no-type .headline, .stage.no-type .subhead, .stage.no-type .cta,
+  .stage.no-type .brandline { color: transparent !important; text-shadow: none !important; }
+  .stage.no-type .logo { filter: none !important; }
+  .stage.no-mark .logo { visibility: hidden; }
 
   {# Real film grain over everything. Generated backgrounds are too clean, and
      "too clean" is most of what people mean when they say an image looks AI.
@@ -78,29 +99,36 @@
   {# Display type tightens as it grows: leading below 1 and negative tracking are
      what separate a headline from a paragraph set large. #}
   {# Indic scripts carry marks above and below the line and their conjuncts
-     do not survive negative tracking: the display leading opens up and the
-     tracking is dropped whenever the copy uses one. #}
+     do not survive negative tracking: the tracking is dropped and the display
+     leading opens up BY SCRIPT (fonts.display_leading) -- Devanagari hangs
+     matras from a headline and stacks them above it, Tamil and Kannada mostly
+     do not. FIT_JS opens it further for the rare pair of lines whose ink
+     would still touch.
+     A word is never broken. `overflow-wrap: break-word` used to split
+     "Anniversar|y" and "Mahashivr|atri" at full size with nothing to notice:
+     now a word that does not fit overflows, FIT_JS sees it, and the type
+     shrinks until the word is whole -- or the render is refused. #}
   .headline { font-family: '{{ brand.heading_font }}', {{ brand.font_stack|safe }};
               font-weight: 800;
-              line-height: {{ '1.14' if brand.indic else '.98' }};
+              line-height: {{ brand.display_leading }};
               letter-spacing: {{ '0' if brand.indic else '-0.028em' }};
               color: {{ brand.ink }}; margin: 0; text-wrap: balance;
-              overflow-wrap: break-word;
+              overflow-wrap: normal; word-break: normal; hyphens: manual;
               text-shadow: 0 {{ (width*0.002)|round|int }}px
                            {{ (width*0.006)|round|int }}px rgba(0,0,0,.34); }
   .subhead { font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }};
              font-weight: 400;
-             line-height: {{ '1.5' if brand.indic else '1.34' }};
+             line-height: {{ brand.body_leading }};
              letter-spacing: {{ '0' if brand.indic else '-0.004em' }};
-             color: {{ brand.ink }}; opacity: .90; text-wrap: pretty;
-             overflow-wrap: break-word;
+             color: {{ brand.ink }}; text-wrap: pretty;
+             overflow-wrap: normal; word-break: normal; hyphens: manual;
              margin: {{ (width*0.026)|round|int }}px 0 0;
              text-shadow: 0 {{ (width*0.0015)|round|int }}px
                           {{ (width*0.005)|round|int }}px rgba(0,0,0,.30); }
 
   .cta { display: inline-flex; align-items: center; align-self: flex-start;
          font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }}; font-weight: 700;
-         background: {{ brand.accent }}; color: {{ brand.cta_ink }};
+         background: {{ brand.cta_ground }}; color: {{ brand.cta_ink }};
          padding: {{ (width*0.024)|round|int }}px {{ (width*0.048)|round|int }}px;
          border-radius: 999px; font-size: {{ (width*0.033)|round|int }}px;
          letter-spacing: .005em; white-space: nowrap;
@@ -118,10 +146,18 @@
           max-height: {{ (width*brand.logo_max_height_frac)|round|int }}px;
           filter: drop-shadow(0 {{ (width*0.002)|round|int }}px
                               {{ (width*0.008)|round|int }}px rgba(0,0,0,.42)); }
-  .brandline { font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }};
-               font-weight: 600; font-size: {{ (width*0.026)|round|int }}px;
-               color: {{ brand.ink }}; opacity: .88; letter-spacing: .14em;
-               text-transform: uppercase; }
+  {# The brand's name where there is no logo. It is the smallest type on the
+     creative, so it is set at full opacity (the .88 it used to carry was never
+     counted by the contrast check) and it is a FITTED part like the headline:
+     a long shop name wraps to two balanced lines inside the safe zone instead
+     of running off it and refusing every render the brand ever asks for. #}
+  .brandline { display: block; flex: 0 1 auto; min-width: 0; max-width: 100%;
+               font-family: '{{ brand.body_font }}', {{ brand.font_stack|safe }};
+               font-weight: 600; font-size: {{ (width*0.028)|round|int }}px;
+               line-height: 1.32; color: {{ brand.ink }};
+               letter-spacing: {{ brand.name_tracking }};
+               text-transform: uppercase; text-wrap: balance;
+               overflow-wrap: normal; word-break: normal; hyphens: manual; }
 
   {# No slide indicator is drawn. Instagram paints its own pagination dots
      under a carousel; a second row baked into the image reads as a screenshot
@@ -134,7 +170,6 @@
   <div class="stage">
     <img class="bg" src="{{ background }}" alt="">
     <div class="scrim"></div>
-    <div class="scrim-text"></div>
     <div class="grain"></div>
     {% if brand.signature == 'corner' %}<div class="sig-corner"></div>{% endif %}
     {% if brand.signature == 'bar' %}<div class="sig-bar"></div>{% endif %}

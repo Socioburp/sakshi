@@ -89,8 +89,13 @@ COPY = {
     "multi_line_subhead": ("Weekend Sale", AT_LIMIT_SUBHEAD, "Order now"),
     "cta_overflow": ("Weekend Sale", None, AT_LIMIT_CTA),
     "everything_at_its_limit": (AT_LIMIT_HEADLINE, AT_LIMIT_SUBHEAD, AT_LIMIT_CTA),
-    "one_unbreakable_word": ("Supercalifragilisticexpialidocious", None, None),
+    # A festival name is one long word. It is set WHOLE, smaller -- it used to
+    # ship as "Mahashivr|atri" at full size (see the two tests below the grid).
+    "one_long_word": ("Mahashivratri", None, None),
 }
+# Too wide for the columns set over the photograph even at the floor: refused
+# there, set whole on the full-width panels, split nowhere.
+UNSETTABLE_WORD = "Supercalifragilisticexpialidocious"
 
 
 def _logo(kind: str) -> bytes:
@@ -138,15 +143,18 @@ def _hit(a, b) -> bool:
 
 @pytest.mark.parametrize("template", sorted(compose.TEMPLATES))
 async def test_every_layout_holds_every_guarantee_for_every_copy_shape(chromium, template):
-    """Short, long, at the limit, multi-line, an overlong CTA, one giant word;
-    with no mark, an emblem and a wordmark; as a post and as a reel. The
+    """Short, long, at the limit, multi-line, an overlong CTA, one long word;
+    with no mark, an emblem and a wordmark; as a post, a story and a reel. The
     compositor never has to give up, and the geometry is re-checked here in
-    Python so the test does not simply trust the page's own verdict."""
+    Python -- on the REAL INK boxes -- so the test does not simply trust the
+    page's own verdict."""
     combos = [("single", n, m) for n in COPY for m in ("emblem", "wordmark")]
     combos += [("single", "everything_at_its_limit", "none")]
     combos += [
         ("reel", "everything_at_its_limit", "wordmark"),
         ("reel", "very_short_headline", "emblem"),
+        ("story", "everything_at_its_limit", "none"),
+        ("story", "long_headline", "none"),
     ]
     for kind, name, logo in combos:
         for copy in (COPY[name],):
@@ -176,6 +184,43 @@ async def test_every_layout_holds_every_guarantee_for_every_copy_shape(chromium,
                     floor = getattr(compose, f"{cls.upper()}_MIN") * w
                     assert size["px"] >= min(floor, size["design"]) - 1, (where, cls, size)
                     assert size["px"] <= size["design"] + 0.01, (where, cls, size)
+                # a post, not a paragraph; and the headline is still the headline
+                for ink in report["inks"]:
+                    limit = compose.MAX_LINES.get(ink["cls"], 1)
+                    assert len(ink["lines"]) <= limit, (where, ink["cls"], ink["lines"])
+                px = {c: v["px"] for c, v in report["sizes"].items()}
+                if "subhead" in px:
+                    assert px["headline"] >= compose.HIERARCHY * px["subhead"] - 0.01, (where, px)
+
+
+@pytest.mark.parametrize("template", sorted(compose.TEMPLATES))
+async def test_a_long_word_is_set_whole_and_smaller_never_split(chromium, template):
+    """This test used to pin the opposite: it asserted violations == [] for a
+    34-letter word, which `overflow-wrap: break-word` achieved by cutting the
+    word in two. The rule now: the type shrinks until the word is whole."""
+    for word in ("Anniversary", "Mahashivratri", "Congratulations"):
+        brief = _brief(template, (word, None, None))
+        report = await compose.check_layout(brief, brief.units()[0], _brand_with("none"))
+        headline = next(i for i in report["inks"] if i["cls"] == "headline")
+        assert headline["lines"] == [word], (template, headline["lines"])
+        assert headline["px"] >= compose.HEADLINE_MIN * 1080 - 1
+
+
+@pytest.mark.parametrize("template", sorted(compose.TEMPLATES))
+async def test_a_word_that_cannot_fit_at_the_floor_is_refused_not_broken(chromium, template):
+    """34 letters. The full-width panels can just set it, whole, near the floor;
+    the narrower columns over the photograph cannot, and refuse. Nowhere is it
+    cut in two."""
+    brief = _brief(template, (UNSETTABLE_WORD, None, None))
+    try:
+        report = await compose.check_layout(brief, brief.units()[0], _brand_with("none"))
+    except compose.LayoutError as err:
+        assert template in compose.TYPE_OVER_PHOTO
+        assert "clipped:headline" in err.violations, err.violations
+    else:
+        assert template not in compose.TYPE_OVER_PHOTO
+        headline = next(i for i in report["inks"] if i["cls"] == "headline")
+        assert headline["lines"] == [UNSETTABLE_WORD]
 
 
 async def test_the_fit_search_gives_back_what_an_element_did_not_need_to_lose(chromium):
@@ -322,8 +367,8 @@ def test_the_scrim_is_measured_under_the_words_not_in_a_fixed_band():
     buf = io.BytesIO()
     im.save(buf, "PNG")
     box = (0.1, 0.6, 0.9, 0.84)
-    boost, local, why = legibility.scrim_for_box(buf.getvalue(), box)
-    assert boost > 1.3 and 0 < local <= legibility.LOCAL_MAX and why["box"] == list(box)
-    calm, none, _ = legibility.scrim_for_box(buf.getvalue(), (0.1, 0.05, 0.9, 0.3))
-    assert calm < 1.0 and none == 0.0
-    assert legibility.scrim_for_box(b"not an image", box)[:2] == (1.0, 0.0)
+    boost, why = legibility.scrim_for_box(buf.getvalue(), box)
+    assert 1.3 < boost <= legibility.MAX_BOOST and why["box"] == list(box)
+    calm, _ = legibility.scrim_for_box(buf.getvalue(), (0.1, 0.05, 0.9, 0.3))
+    assert calm < 1.0
+    assert legibility.scrim_for_box(b"not an image", box)[0] == 1.0

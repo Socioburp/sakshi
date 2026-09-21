@@ -28,6 +28,14 @@ comfortable-looking middle that is wrong for both.
 
 Pillow only -- it is already in the image path, and this runs on the
 background bytes before Chromium is asked for anything.
+
+That much is a PREDICTION, made from the photograph. The second half of this
+module is the GUARANTEE, made from the rendered frame: the compositor
+screenshots the finished page with the ink hidden, and `contrast_on` reads the
+ground actually behind each word -- photograph, gradient, plate, panel,
+whatever is there -- and holds it to WCAG 4.5:1. Where it falls short,
+`plate_alpha` says exactly how strong the plate under that cluster of words
+has to be, from the contrast target rather than from a cap chosen by eye.
 """
 
 from __future__ import annotations
@@ -53,8 +61,16 @@ TYPE_BANDS: dict[str, tuple[float, float]] = {
 DEFAULT_BAND = (0.28, 0.78)
 
 # The dial the templates read. 1.0 is the scrim as designed.
+#
+# The ceiling was 1.85 while the boost was applied as CSS `opacity`, which
+# clamps at 1 -- so nothing above 1.0 ever did anything, and nobody saw what
+# 1.85 looks like. Now that the boost is real (it multiplies the alpha of every
+# gradient stop), 1.85 would turn the foot of a centred layout solid black and
+# kill the photograph the owner paid for. The gradient is allowed a modest
+# lift; whatever the words still need is delivered UNDER the words, by the
+# measured plate, where it costs the picture least.
 MIN_BOOST = 0.75
-MAX_BOOST = 1.85
+MAX_BOOST = 1.4
 
 # Above this luminance (0-255) a white headline is in trouble.
 BRIGHT = 128.0
@@ -120,9 +136,11 @@ def measure_box(image: bytes, box: tuple[float, float, float, float]) -> dict[st
     }
 
 
-# The local scrim under the text block: invisible at the designed strength,
-# rising with the measured need, and capped well short of a black plate.
-LOCAL_MAX = 0.42
+# The plate under a cluster of words. Its strength is computed from the
+# contrast target, so the cap is only a backstop: at .88 even a pure white
+# photograph sits at 30/255 behind white type (14:1). The old cap of .42 was
+# chosen by eye and, blurred, left white-on-white at 2.78:1.
+LOCAL_MAX = 0.88
 
 
 def _boost_from(m: dict[str, float]) -> float:
@@ -137,35 +155,28 @@ def _boost_from(m: dict[str, float]) -> float:
     return round(max(MIN_BOOST, min(MAX_BOOST, boost)), 3)
 
 
-def scrim_for_box(
-    image: bytes, box: tuple[float, float, float, float]
-) -> tuple[float, float, dict]:
-    """(gradient boost, local scrim opacity, why) for the MEASURED text block.
+def scrim_for_box(image: bytes, box: tuple[float, float, float, float]) -> tuple[float, dict]:
+    """(gradient boost, why) for a MEASURED cluster of words.
 
     `box` is where the compositor actually set the words, after fitting -- not
     a band the template was assumed to use. A two-line headline and a six-line
     one in the same layout sit over different pixels, and TYPE_BANDS could not
-    tell them apart. Falls back to the scrim as designed on any failure.
+    tell them apart. Falls back to the scrim as designed on any failure: this
+    is the prediction, and the rendered frame is measured afterwards whatever
+    it says.
     """
     try:
         m = measure_box(image, box)
     except Exception as exc:  # noqa: BLE001
         log.warning("legibility_measure_failed", box=list(box), error=repr(exc)[:120])
-        return 1.0, 0.0, {"reason": "measurement failed"}
+        return 1.0, {"reason": "measurement failed"}
     boost = _boost_from(m)
-    # Only the need ABOVE the designed scrim goes into the local one.
-    local = round(max(0.0, min(LOCAL_MAX, (boost - 1.0) * (LOCAL_MAX / (MAX_BOOST - 1.0)))), 3)
-    return (
-        boost,
-        local,
-        {
-            "luminance": round(m["luminance"], 1),
-            "busyness": round(m["busyness"], 1),
-            "boost": boost,
-            "local": local,
-            "box": [round(float(v), 3) for v in box],
-        },
-    )
+    return boost, {
+        "luminance": round(m["luminance"], 1),
+        "busyness": round(m["busyness"], 1),
+        "boost": boost,
+        "box": [round(float(v), 3) for v in box],
+    }
 
 
 def _percentile(hist: list[int], q: float) -> float:
@@ -202,4 +213,157 @@ def scrim_boost(image: bytes, template: str | None = None) -> tuple[float, dict]
         "luminance": round(m["luminance"], 1),
         "busyness": round(m["busyness"], 1),
         "boost": boost,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# the guarantee: contrast measured on the rendered frame
+# --------------------------------------------------------------------------- #
+# WCAG 2.x AA for text. The subhead and the brand name are body-sized, so every
+# word on the creative is held to the body figure, not the large-text one.
+TEXT_CONTRAST = 4.5
+# WCAG 1.4.11 for a graphical object: the logo against what it sits on.
+MARK_CONTRAST = 3.0
+# Light ink fails against the BRIGHT part of its ground and dark ink against
+# the dark part, so the ground is read at both ends and the worse one counts.
+# The 90th percentile, not the maximum: one specular highlight behind a serif
+# does not make a headline unreadable, a tenth of the ground does.
+GROUND_PERCENTILE = 0.90
+# The plate is aimed a little past the bar, so that the blur at its edge and
+# the resample to the delivery size cannot leave the measured frame a hair
+# under it and cost another round.
+_AIM = 1.08
+# Pixels that differ by more than this between the frame with and without the
+# mark are the mark. Film grain and PNG rounding move a pixel by 2-3 levels.
+_MARK_DIFF = 12
+
+
+def relative_luminance(rgb: tuple[float, float, float]) -> float:
+    """WCAG relative luminance of an sRGB colour given as 0-255 channels."""
+    out = []
+    for channel in rgb:
+        v = channel / 255
+        out.append(v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
+
+
+def contrast_ratio(a: float, b: float) -> float:
+    """WCAG contrast between two relative luminances."""
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _encoded(luminance: float) -> float:
+    """The sRGB-encoded grey (0..1) that has this relative luminance."""
+    lum = min(1.0, max(0.0, luminance))
+    return lum * 12.92 if lum <= 0.0031308 else 1.055 * lum ** (1 / 2.4) - 0.055
+
+
+def _decoded(value: float) -> float:
+    v = min(1.0, max(0.0, value))
+    return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def _luminance_plane(frame, box: tuple[float, float, float, float]):
+    """Per-pixel relative luminance of `box` (l, t, r, b in pixels) of a PIL image."""
+    import numpy as np
+
+    left, top = max(0, int(box[0])), max(0, int(box[1]))
+    right = min(frame.width, max(left + 1, int(round(box[2]))))
+    bottom = min(frame.height, max(top + 1, int(round(box[3]))))
+    rgb = np.asarray(frame.convert("RGB").crop((left, top, right, bottom)), dtype=np.float64) / 255
+    linear = np.where(rgb <= 0.03928, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    return linear @ np.array([0.2126, 0.7152, 0.0722])
+
+
+def ground(frame, box: tuple[float, float, float, float]) -> dict[str, float]:
+    """How bright and how dark the ground inside `box` gets, as relative
+    luminance. `frame` is the rendered page with the ink hidden."""
+    import numpy as np
+
+    plane = _luminance_plane(frame, box)
+    return {
+        "bright": float(np.quantile(plane, GROUND_PERCENTILE)),
+        "dark": float(np.quantile(plane, 1 - GROUND_PERCENTILE)),
+    }
+
+
+def contrast_on(ink: float, opacity: float, stats: dict[str, float]) -> float:
+    """The worst contrast `ink` has anywhere on this ground.
+
+    `opacity` is the ink's effective CSS opacity: a subhead at .90 is not the
+    colour the stylesheet names, it is that colour mixed with whatever is
+    behind it, and a pair that just clears 4.5:1 on paper renders below it.
+    """
+    worst = None
+    for lum in (stats["bright"], stats["dark"]):
+        seen = ink
+        if opacity < 1:
+            seen = _decoded(opacity * _encoded(ink) + (1 - opacity) * _encoded(lum))
+        ratio = contrast_ratio(seen, lum)
+        worst = ratio if worst is None else min(worst, ratio)
+    return float(worst)
+
+
+def plate_alpha(ink: float, stats: dict[str, float], current: float, target: float) -> float:
+    """The opacity a plate under these words needs for `target` contrast.
+
+    A black plate under light ink, a white one under dark ink (the caller picks
+    the colour with `plate_colour`). `current` is the plate already there when
+    this ground was measured: the answer is absolute, not an increment, so a
+    second round tightens the first instead of stacking on it.
+    """
+    wanted = target * _AIM
+    if ink >= 0.18:
+        # Light ink: bring the BRIGHT end of the ground down to this luminance.
+        limit = (ink + 0.05) / wanted - 0.05
+        if limit <= 0:
+            return LOCAL_MAX
+        keep = min(1.0, _encoded(limit) / max(_encoded(stats["bright"]), 1e-6))
+    else:
+        # Dark ink: lift the DARK end of the ground up to this luminance.
+        limit = (ink + 0.05) * wanted - 0.05
+        have = _encoded(stats["dark"])
+        keep = min(1.0, (1 - _encoded(limit)) / max(1 - have, 1e-6))
+    return round(min(LOCAL_MAX, max(current, 1 - (1 - current) * keep)), 3)
+
+
+def plate_colour(ink: float) -> str:
+    return "#000000" if ink >= 0.18 else "#FFFFFF"
+
+
+def mark_stats(with_mark, without_mark, box: tuple[float, float, float, float]) -> dict:
+    """What the logo looks like ON THIS FRAME, from two screenshots of it.
+
+    Read off the render rather than the upload, so it holds for a PNG, a JPEG,
+    an SVG and a remote URL alike, and it sees the mark at the size and on the
+    ground it actually ships with.
+
+      luminance  mean relative luminance of the pixels the mark changed
+      opaque     the mark is a filled rectangle -- a JPEG with its background,
+                 or a PNG exported without transparency
+      edge       that rectangle's own colour, for the card it is set on
+    """
+    import numpy as np
+
+    left, top = max(0, int(box[0])), max(0, int(box[1]))
+    right, bottom = int(round(box[2])), int(round(box[3]))
+    a = np.asarray(with_mark.convert("RGB").crop((left, top, right, bottom)), dtype=np.int16)
+    b = np.asarray(without_mark.convert("RGB").crop((left, top, right, bottom)), dtype=np.int16)
+    mask = np.abs(a - b).max(axis=2) > _MARK_DIFF
+    plane = _luminance_plane(with_mark, (left, top, right, bottom))
+    if not mask.any():
+        # The mark changed nothing: it IS its ground. Its luminance is the
+        # ground's, the contrast comes out at 1:1, and it gets a plate.
+        return {"luminance": float(plane.mean()), "opaque": False, "edge": None}
+    rows, cols = np.where(mask.any(axis=1))[0], np.where(mask.any(axis=0))[0]
+    y0, y1, x0, x1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+    filled = float(mask[y0:y1, x0:x1].mean())
+    ring = np.concatenate([a[y0, x0:x1], a[y1 - 1, x0:x1], a[y0:y1, x0], a[y0:y1, x1 - 1]]).mean(
+        axis=0
+    )
+    return {
+        "luminance": float(plane[mask].mean()),
+        "opaque": filled >= 0.97,
+        "edge": "#{:02X}{:02X}{:02X}".format(*(int(round(c)) for c in ring)),
     }

@@ -37,8 +37,8 @@
 {% block body %}
   <div class="col">
     <div class="band">
-      <h1 class="headline">{{ slide.headline }}</h1>
-      {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
+      <h1 class="headline" dir="auto">{{ slide.headline }}</h1>
+      {% if slide.subhead %}<p class="subhead" dir="auto">{{ slide.subhead }}</p>{% endif %}
     </div>
     <div class="photo">
       <img src="{{ background }}" alt="">
@@ -48,7 +48,7 @@
   </div>
   <div class="foot">
     {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
-    {% else %}<span class="brandline">{{ brand.name }}</span>{% endif %}
-    {% if show_cta %}<span class="cta">{{ brief.cta }}</span>{% endif %}
+    {% else %}<span class="brandline" dir="auto">{{ brand.name }}</span>{% endif %}
+    {% if show_cta %}<span class="cta" dir="auto">{{ brief.cta }}</span>{% endif %}
   </div>
 {% endblock %}

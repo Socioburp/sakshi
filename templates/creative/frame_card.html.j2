@@ -17,7 +17,7 @@
   html, body { background: {{ brand.primary }}; }
   .bg { top: {{ inset_top }}px; left: {{ inset_x }}px; width: {{ width - 2*inset_x }}px;
         height: {{ photo_h }}px; border-radius: {{ (width*0.02)|round|int }}px;
-        border: {{ (width*0.004)|round|int }}px solid {{ brand.accent }}; box-sizing: border-box; }
+        border: {{ (width*0.004)|round|int }}px solid {{ brand.frame }}; box-sizing: border-box; }
   .scrim { display: none; }
   .grain { top: {{ inset_top }}px; left: {{ inset_x }}px; width: {{ width - 2*inset_x }}px;
            height: {{ photo_h }}px; border-radius: {{ (width*0.02)|round|int }}px; }
@@ -40,12 +40,12 @@
 {% endblock %}
 {% block body %}
   <div class="card" data-photo-above data-photo-top="{{ inset_top }}" data-gap="{{ gap }}">
-    <h1 class="headline">{{ slide.headline }}</h1>
-    {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
+    <h1 class="headline" dir="auto">{{ slide.headline }}</h1>
+    {% if slide.subhead %}<p class="subhead" dir="auto">{{ slide.subhead }}</p>{% endif %}
     <div class="footrow">
       {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
-      {% else %}<span class="brandline">{{ brand.name }}</span>{% endif %}
-      {% if show_cta %}<span class="cta">{{ brief.cta }}</span>{% endif %}
+      {% else %}<span class="brandline" dir="auto">{{ brand.name }}</span>{% endif %}
+      {% if show_cta %}<span class="cta" dir="auto">{{ brief.cta }}</span>{% endif %}
     </div>
   </div>
 {% endblock %}

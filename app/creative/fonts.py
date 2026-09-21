@@ -14,6 +14,7 @@ painting a stand-in.
 
 from __future__ import annotations
 
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
@@ -114,6 +115,55 @@ def script_fonts_href(scripts: list[str]) -> str | None:
         return None
     params = [_family_param(fam, SCRIPT_WEIGHTS) for fam in scripts]
     return f"{GOOGLE_CSS}?{'&'.join(params)}&display=block"
+
+
+# Leading by script, because "Indic" is not one shape. Devanagari, Bengali,
+# Gujarati, Gurmukhi and Odia hang matras and stacked conjuncts below the line
+# and carry reph and vowel signs above it: at the 1.14 every script used to
+# share, a two-line Hindi headline in Poppins measured -20px between the ink of
+# its lines. The southern scripts are rounder and mostly stay between their
+# lines; Arabic-script Urdu dips deep below. Latin display type stays tight --
+# that is what makes it a headline. These are starting points, not the
+# guarantee: FIT_JS measures the real ink and opens a pair of lines further if
+# they would still touch (`linegap`).
+_TALL_SCRIPTS = frozenset(
+    {
+        "Noto Sans Devanagari",
+        "Noto Sans Bengali",
+        "Noto Sans Gurmukhi",
+        "Noto Sans Gujarati",
+        "Noto Sans Oriya",
+        "Noto Sans Arabic",
+    }
+)
+LATIN_DISPLAY_LEADING, ROUND_DISPLAY_LEADING, TALL_DISPLAY_LEADING = ".98", "1.26", "1.38"
+LATIN_BODY_LEADING, ROUND_BODY_LEADING, TALL_BODY_LEADING = "1.34", "1.5", "1.6"
+
+
+def display_leading(scripts: list[str]) -> str:
+    """The headline's line-height for the scripts its copy is written in."""
+    if not scripts:
+        return LATIN_DISPLAY_LEADING
+    return TALL_DISPLAY_LEADING if _TALL_SCRIPTS & set(scripts) else ROUND_DISPLAY_LEADING
+
+
+def body_leading(scripts: list[str]) -> str:
+    """The subhead's line-height, by the same families."""
+    if not scripts:
+        return LATIN_BODY_LEADING
+    return TALL_BODY_LEADING if _TALL_SCRIPTS & set(scripts) else ROUND_BODY_LEADING
+
+
+def text_direction(text: str) -> str:
+    """'rtl' when the first strong character reads right to left (Urdu), else
+    'ltr'. The first strong character is the rule browsers use for dir=auto."""
+    for ch in text or "":
+        kind = unicodedata.bidirectional(ch)
+        if kind in ("R", "AL"):
+            return "rtl"
+        if kind == "L":
+            return "ltr"
+    return "ltr"
 
 
 def css_stack(scripts: list[str]) -> str:
