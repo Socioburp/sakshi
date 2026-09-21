@@ -182,6 +182,32 @@ class MetaAdapter:
                     },
                 },
             }
+        if msg.kind == "template":
+            components: list[dict[str, Any]] = []
+            if msg.template_params:
+                components.append(
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": p} for p in msg.template_params],
+                    }
+                )
+            for i, b in enumerate(msg.buttons[:3]):
+                components.append(
+                    {
+                        "type": "button",
+                        "sub_type": "quick_reply",
+                        "index": str(i),
+                        "parameters": [{"type": "payload", "payload": b.id}],
+                    }
+                )
+            return base | {
+                "type": "template",
+                "template": {
+                    "name": msg.template_name,
+                    "language": {"code": msg.template_lang},
+                    "components": components,
+                },
+            }
         raise ValueError(f"unsupported outbound kind {msg.kind}")
 
     async def mark_read(self, provider_message_id: str) -> None:

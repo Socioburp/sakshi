@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_from: str = ""
+    # Festival offers to owners OUTSIDE the 24h window can only travel as an
+    # approved template message, which Meta bills as a marketing conversation
+    # (about Rs 1 in India). Empty = those pushes are off; in-window ones still
+    # go, free. The template is created once in WhatsApp Manager -- see
+    # docs/whatsapp_templates.md for the exact body and button.
+    wa_template_festival: str = ""
+    # At most this many PAID pushes per brand per calendar month.
+    festival_push_monthly_cap: int = 4
 
     # instagram (Track A)
     instagram_mock: bool = True

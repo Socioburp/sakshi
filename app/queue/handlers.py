@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 import uuid as _uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
@@ -581,6 +582,103 @@ async def daily_suggestion(payload: dict) -> None:
     )
 
 
+async def festival_push(payload: dict) -> None:
+    """A festival a few days out, offered on THEIR product -- in or out of the window.
+
+    Inside the 24h window: an ordinary message with buttons, free. Outside it:
+    the approved template, which Meta bills -- so it is capped per brand per
+    month and skipped entirely when no template is configured. Either way the
+    idea is parked where the owner's tap will find it (see repo._carry_over).
+    """
+    from app.agent import buttons as btn
+    from app.channels.whatsapp import send
+    from app.insights import festival_push as fp
+    from app.insights import suggest as sg
+
+    account_id = uuid.UUID(payload["account_id"])
+    brand_id = uuid.UUID(payload["brand_id"])
+    wa_id = payload.get("wa_id", "")
+    if not wa_id:
+        return
+    now = datetime.now(UTC)
+    today = now.astimezone(fp.IST).date()
+    with session_scope() as db:
+        brand, acct = db.get(Brand, brand_id), db.get(Account, account_id)
+        if brand is None or not fp.eligible(brand, acct):
+            return
+        due = fp.due_festival(today, acct.locale)
+        if due is None or fp.already_pushed(db, brand_id, due):
+            return
+        sess = repo.latest_session(db, wa_id, account_id=account_id)
+        in_window = sess is not None and repo.window_is_open(sess)
+        if not in_window:
+            if not fp.template_configured():
+                log.info("festival_push_no_template", brand_id=str(brand_id), festival=due.name)
+                return
+            if fp.paid_pushes_this_month(db, brand_id, now) >= settings.festival_push_monthly_cap:
+                log.info("festival_push_capped", brand_id=str(brand_id), festival=due.name)
+                return
+        elif sg.suggested_recently(db, brand_id, hours=6):
+            return  # they were offered something this morning; do not stack a second
+        offer = fp.build_offer(db, brand, due, today)
+        locale = acct.locale or "en"
+        brand_name = brand.name
+        session_id = sess.id if sess is not None else None
+
+    lang = locale.split("-")[0].lower()
+    line = fp.line_for(due, offer, lang)
+    if in_window:
+        ok = await send.send_text(
+            account_id=account_id,
+            session_id=session_id,
+            wa_id=wa_id,
+            text=line,
+            buttons=btn.buttons(["make:1", "next", "skip"], locale),
+        )
+    else:
+        ok = await send.send_template(
+            account_id=account_id,
+            wa_id=wa_id,
+            name=settings.wa_template_festival,
+            lang="hi" if lang == "hi" else "en",
+            params=fp.template_params(due, offer, brand_name),
+            button_ids=["make:1", "skip"],
+            rendered=line,
+        )
+    if ok:
+        with session_scope() as db:
+            sess = repo.latest_session(db, wa_id, account_id=account_id)
+            if sess is not None:
+                sess.state = {
+                    **(sess.state or {}),
+                    "suggestions": offer["ideas"],
+                    "suggestions_at": now.isoformat(),
+                }
+            brand = db.get(Brand, brand_id)
+            if brand is not None:
+                from app.insights.events import record
+
+                record(
+                    db,
+                    kind="suggested",
+                    account_id=brand.account_id,
+                    brand_id=brand.id,
+                    meta={
+                        "ideas": offer["ideas"],
+                        "festival_push": due.key,
+                        "paid_template": not in_window,
+                        "own_photo": bool(offer["free"]),
+                    },
+                )
+    log.info(
+        "festival_push_sent" if ok else "festival_push_suppressed",
+        brand_id=str(brand_id),
+        festival=due.name,
+        in_window=in_window,
+        own_photo=bool(offer["free"]),
+    )
+
+
 def _week_lineup(db, brand: Brand, locale: str) -> str | None:
     """Monday, once: last week's Instagram numbers, then the plan's line-up."""
     from datetime import datetime
@@ -666,6 +764,7 @@ _NUDGE = {
 HANDLERS = {
     "handle_message": handle_message,
     "daily_suggestion": daily_suggestion,
+    "festival_push": festival_push,
     "handle_image": handle_image,
     "transcribe_and_handle": transcribe_and_handle,
     "publish_scheduled": publish_scheduled,

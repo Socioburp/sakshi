@@ -67,6 +67,50 @@ async def send_text(
     return res.ok
 
 
+async def send_template(
+    *,
+    account_id: uuid.UUID,
+    wa_id: str,
+    name: str,
+    lang: str,
+    params: list[str],
+    button_ids: list[str],
+    rendered: str,
+) -> bool:
+    """A pre-approved template: the ONE send that does not need the 24h window.
+
+    It is also the one send that costs money (a marketing conversation), so it
+    is never used when a free in-window message would do -- callers check the
+    window first. An adapter that cannot send templates answers False; nothing
+    is ever downgraded to a free-form message outside the window, because Meta
+    would reject it and count it against the number's quality rating.
+    """
+    adapter = get_adapter()
+    msg = OutboundMessage(
+        to=wa_id,
+        kind="template",
+        text=rendered,
+        template_name=name,
+        template_lang=lang,
+        template_params=list(params),
+        buttons=[Button(id=b, title="") for b in button_ids],
+    )
+    try:
+        res = await adapter.send(msg)
+    except ValueError:
+        log.warning("template_unsupported_by_adapter", provider=adapter.name)
+        return False
+    record_outbound(
+        account_id=account_id,
+        session_id=None,
+        provider=adapter.name,
+        provider_message_id=res.provider_message_id,
+        kind="interactive",
+        text=rendered,
+    )
+    return res.ok
+
+
 async def send_video(
     *,
     account_id: uuid.UUID,

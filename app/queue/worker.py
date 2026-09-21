@@ -168,6 +168,12 @@ async def housekeeping(
             _sweep_insights()
         except Exception:  # noqa: BLE001
             log.exception("insights_sweep_failed")
+        try:
+            from app.insights import festival_push
+
+            festival_push.sweep()
+        except Exception:  # noqa: BLE001
+            log.exception("festival_sweep_failed")
         last_sweep = now
     return last_promote, last_reap, last_sweep
 

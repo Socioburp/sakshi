@@ -83,7 +83,9 @@ def touch_session(db: Session, account: Account, wa_id: str, inbound: bool) -> W
         .limit(1)
     )
     ts = now()
+    carried: dict = {}
     if sess and sess.window_expires_at and sess.window_expires_at < ts:
+        carried = _carry_over(sess.state or {}, ts)
         sess.closed_at = ts
         db.flush()
         sess = None
@@ -91,7 +93,7 @@ def touch_session(db: Session, account: Account, wa_id: str, inbound: bool) -> W
         # Same race as the account: two first messages, one live session.
         try:
             with db.begin_nested():
-                sess = WaSession(account_id=account.id, wa_id=wa_id, state={})
+                sess = WaSession(account_id=account.id, wa_id=wa_id, state=dict(carried))
                 db.add(sess)
                 db.flush()
         except IntegrityError:
@@ -110,6 +112,23 @@ def touch_session(db: Session, account: Account, wa_id: str, inbound: bool) -> W
         sess.last_outbound_at = ts
     db.flush()
     return sess
+
+
+# An idea pushed OUTSIDE the window (a festival template) is answered by a tap
+# that opens a brand-new session. Without this the tap's "Make it" would point
+# at nothing: the ideas lived on the session that just closed.
+PUSHED_IDEA_TTL = timedelta(hours=72)
+
+
+def _carry_over(state: dict, ts: datetime) -> dict:
+    ideas, at = state.get("suggestions"), state.get("suggestions_at")
+    if not ideas or not at:
+        return {}
+    try:
+        fresh = ts - datetime.fromisoformat(at) <= PUSHED_IDEA_TTL
+    except (TypeError, ValueError):
+        return {}
+    return {"suggestions": ideas, "suggestions_at": at} if fresh else {}
 
 
 def latest_session(
