@@ -54,12 +54,17 @@ def record(
         log.exception("creative_event_failed", kind=kind)
 
 
-def facts_of(brief_payload: dict[str, Any]) -> dict[str, Any]:
-    """The properties of a brief worth remembering as context for a vote."""
+def facts_of(brief_payload: dict[str, Any], *, version: int | None = None) -> dict[str, Any]:
+    """The properties of a brief worth remembering as context for a vote.
+
+    `version` is the brief row's, not the payload's: a vote on version 3 says
+    something different about the first result than a vote on version 1.
+    """
     fmt = brief_payload.get("format") or {}
     vd = brief_payload.get("visual_direction") or {}
     slides = brief_payload.get("slides") or []
     return {
+        "version": version,
         "template": brief_payload.get("template_id") or "centered_overlay",
         "aspect": fmt.get("aspect_ratio", "1:1"),
         "format": fmt.get("type", "single"),
@@ -85,5 +90,5 @@ def record_for_brief(
         account_id=brief.account_id,
         brand_id=brief.brand_id,
         brief_id=brief.id,
-        meta={**facts_of(brief.payload or {}), **(meta or {})},
+        meta={**facts_of(brief.payload or {}, version=brief.version), **(meta or {})},
     )

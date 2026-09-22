@@ -281,6 +281,10 @@ class Brief(Base):
     parent_brief_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("briefs.id", ondelete="SET NULL")
     )
+    # The first version of this creative: itself for a root, else the root its
+    # parent points at. "How many times has the owner asked for a change on
+    # THIS creative" is one indexed lookup, not a walk up parent_brief_id.
+    root_brief_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="draft", nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)

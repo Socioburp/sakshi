@@ -110,8 +110,18 @@ async def world(monkeypatch):
         w["refunded"] += amount
 
     monkeypatch.setattr(pipeline, "session_scope", scope)
-    monkeypatch.setattr(pipeline.repo, "save_brief", lambda db, **kw: types.SimpleNamespace(
-        id=uuid.uuid4(), payload=kw["payload"]))  # fmt: skip
+
+    def save_brief(db, **kw):
+        parent = kw.get("parent")
+        bid = uuid.uuid4()
+        return types.SimpleNamespace(
+            id=bid,
+            payload=kw["payload"],
+            version=(parent.version + 1) if parent else 1,
+            root_brief_id=(parent.root_brief_id if parent else bid),
+        )
+
+    monkeypatch.setattr(pipeline.repo, "save_brief", save_brief)
     monkeypatch.setattr(pipeline.events, "record", lambda *a, **k: None)
     monkeypatch.setattr(pipeline.credits, "charge", charge)
     monkeypatch.setattr(pipeline.credits, "refund", refund)

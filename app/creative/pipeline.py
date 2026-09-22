@@ -362,6 +362,7 @@ async def generate(
     brief: CreativeBrief,
     *,
     reuse: dict[int, tuple[str, str]] | None = None,
+    parent: uuid.UUID | None = None,
 ) -> dict:
     """Generate every slide of a brief.
 
@@ -369,6 +370,11 @@ async def generate(
     whose picture is being KEPT. That is how regenerating one slide of a
     carousel charges for one slide: the others are re-composited over the
     background they already have, exactly like a copy revision.
+
+    `parent` is the brief this one revises. A picture revision used to save a
+    fresh root, so after one "change the picture" nobody could say which
+    version the owner was looking at; with the parent the new brief is version
+    N+1 of the same creative, exactly as a copy revision is.
     """
     units = brief.units()
     group_id = uuid.uuid4()
@@ -438,26 +444,37 @@ async def generate(
         }
         billable = len(billable_positions)
 
+        # Re-loaded in the session that saves, so the SUPERSEDED stamp and
+        # the child row land in one transaction.
+        parent_row = db.get(Brief, parent) if parent is not None else None
         brief_row = repo.save_brief(
             db,
             account_id=ctx.account_id,
             brand_id=ctx.brand_id,
             payload=brief.model_dump(mode="json"),
             source_message_id=ctx.message_id,
+            parent=parent_row,
         )
         brief_id = brief_row.id
-        events.record(
-            db,
-            kind="created",
-            account_id=ctx.account_id,
-            brand_id=ctx.brand_id,
-            brief_id=brief_id,
-            meta={
-                **events.facts_of(brief_row.payload or {}),
-                "photo_slides": sorted(resolved),
-                "reused_slides": sorted(reuse),
-            },
-        )
+        version, root_brief_id = brief_row.version, brief_row.root_brief_id
+        revision_no = repo.revision_no(db, brief_id)
+        # A revision is the caller's 'regenerate' event, not a second
+        # 'created': profile.taste divides approvals by created rows, and a
+        # picture change used to count as one more creative the owner never
+        # approved.
+        if parent_row is None:
+            events.record(
+                db,
+                kind="created",
+                account_id=ctx.account_id,
+                brand_id=ctx.brand_id,
+                brief_id=brief_id,
+                meta={
+                    **events.facts_of(brief_row.payload or {}, version=version),
+                    "photo_slides": sorted(resolved),
+                    "reused_slides": sorted(reuse),
+                },
+            )
 
         w, h = brief.pixel_size()
         creative_ids: list[uuid.UUID] = []
@@ -607,6 +624,9 @@ async def generate(
         "shown_to_user": delivered,
         "credits_charged": charged,
         "credits_left": balance,
+        "version": version,
+        "revision_no": revision_no,
+        "root_brief_id": str(root_brief_id) if root_brief_id else str(brief_id),
         "note": "The owner can see it now. Ask if they want changes; keep it to one line.",
     }
     # What was KNOWN about this brand and used here, for the agent to say out
@@ -866,7 +886,7 @@ async def regenerate_image(
             brief_id=brief_id,
             meta={**events.facts_of(payload), "slide_position": slide_position},
         )
-    return await generate(ctx, brief, reuse=reuse)
+    return await generate(ctx, brief, reuse=reuse, parent=brief_id)
 
 
 # The retention loop. After a creative, the owner gets tomorrow's idea at
