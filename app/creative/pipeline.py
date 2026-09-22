@@ -36,6 +36,8 @@ entirely and composites over the owner's own photograph. That path is free.
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -701,23 +703,61 @@ async def generate(
     return out
 
 
-async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> dict:
-    """Copy-only revision. Reuses every stored background: no image call, no charge."""
+_UNSUPPORTED_HINT = (
+    "Nothing was made. A free revision can change only what the brief expresses: "
+    "headline, subhead, cta, caption (body, hashtags, language), alt_text, template_id, "
+    "and on a carousel the slides. Nothing renders a badge, a price tag, a logo size or a "
+    "text colour, so do not promise one. If the owner wants the PICTURE different, that is "
+    "regenerate_image (1 credit). Otherwise tell them in one line what can change and ask "
+    "which they want."
+)
+_NOTHING_CHANGED_HINT = (
+    "Nothing was made: the changes leave the creative exactly as it is (same words, same "
+    "layout, same caption). Re-read what the owner asked for and send the fields that "
+    "actually differ -- or, if their wish is about the picture, use regenerate_image."
+)
+
+
+async def recompose(
+    ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict, owner_request: str | None = None
+) -> dict:
+    """Copy-only revision. Reuses every stored background: no image call, no charge.
+
+    `owner_request` is the change in the owner's words, restated by the agent.
+    It is stored on the 'revise' event beside the diff of what was actually
+    changed, and remembered for the brand, so "what did they ask for and did
+    we do it" can be answered from the database later.
+    """
+    # Refused before anything is stored: a wish the brief cannot express, or a
+    # "change" that changes nothing. Either used to return ok:True with an
+    # identical picture, and the owner asked again.
+    unsupported = unsupported_changes(changes)
+    if unsupported:
+        return {
+            "ok": False,
+            "reason": "unsupported_change",
+            "unsupported": unsupported,
+            "hint": _UNSUPPORTED_HINT,
+        }
     # The new copy has to be settable before anything is stored. Done in its own
     # short session so the browser work does not hold a pooled connection.
-    draft, snap = None, None
     with session_scope() as db:
         parent, brand = db.get(Brief, brief_id), db.get(Brand, ctx.brand_id)
-        if parent is not None and brand is not None:
-            try:
-                draft = CreativeBrief.model_validate(_merge(parent.payload, changes))
-                snap = _snapshot(db, brand)
-            except Exception:  # noqa: BLE001 - reported properly by the validation below
-                draft = None
-    if draft is not None:
-        unfit = await layout_gate(draft, draft.units(), snap)
-        if unfit:
-            return unfit
+        if parent is None:
+            return {"ok": False, "reason": "unknown_brief"}
+        if brand is None:
+            return {"ok": False, "reason": "unknown_brand"}
+        try:
+            draft = CreativeBrief.model_validate(_merge(parent.payload, changes))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": "invalid_changes", "error": str(exc)[:400]}
+        diff = payload_diff(parent.payload or {}, draft.model_dump(mode="json"))
+        if not diff:
+            return {"ok": False, "reason": "nothing_changed", "hint": _NOTHING_CHANGED_HINT}
+        snap = _snapshot(db, brand)
+    unfit = await layout_gate(draft, draft.units(), snap)
+    if unfit:
+        return unfit
 
     with session_scope() as db:
         parent = db.get(Brief, brief_id)
@@ -741,12 +781,7 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
                 ),
             }
 
-        merged = _merge(parent.payload, changes)
-        try:
-            brief = CreativeBrief.model_validate(merged)
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "reason": "invalid_changes", "error": str(exc)[:400]}
-
+        brief = draft
         violations = check_brand_rules(brief, brand)
         if violations:
             return {"ok": False, "reason": "never_say_violation", "violations": violations}
@@ -767,16 +802,36 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
             account_id=ctx.account_id,
             brand_id=ctx.brand_id,
             payload=brief.model_dump(mode="json"),
+            source_message_id=ctx.message_id,
             parent=parent,
         )
         new_brief_id = new_brief.id
+        version, root_brief_id = new_brief.version, new_brief.root_brief_id
+        revision_no = repo.revision_no(db, new_brief_id)
         events.record(
             db,
             kind="revise",
             account_id=ctx.account_id,
             brand_id=ctx.brand_id,
             brief_id=parent.id,
-            meta={**events.facts_of(parent.payload or {}), "changed": sorted(changes)},
+            meta={
+                **events.facts_of(parent.payload or {}, version=parent.version),
+                "changed": sorted(changes),
+                "owner_request": owner_request,
+                "request_text": repo.request_text(db, ctx.message_id),
+                "revision_no": revision_no,
+                "new_brief_id": str(new_brief_id),
+                "root_brief_id": str(root_brief_id),
+                "diff": diff,
+            },
+        )
+        _remember_change(
+            db,
+            brand_id=ctx.brand_id,
+            kind="feedback",
+            owner_request=owner_request,
+            fields=sorted(diff),
+            brief_id=new_brief_id,
         )
         group_id = uuid.uuid4() if brief.is_carousel() else None
         w, h = brief.pixel_size()
@@ -813,7 +868,14 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
         "image_urls": list(urls),
         "shown_to_user": True,
         "credits_charged": 0,
-        "note": "Copy-only revision: same backgrounds reused, nothing charged.",
+        "applied": diff,
+        "version": version,
+        "revision_no": revision_no,
+        "root_brief_id": str(root_brief_id),
+        "note": (
+            "Copy-only revision: same backgrounds reused, nothing charged. `applied` is "
+            "exactly what changed -- confirm it to the owner in one line."
+        ),
     }
 
 
@@ -823,12 +885,17 @@ async def regenerate_image(
     brief_id: uuid.UUID,
     new_prompt: str | None,
     slide_position: int | None = None,
+    owner_request: str | None = None,
 ) -> dict:
     with session_scope() as db:
         parent = db.get(Brief, brief_id)
         if parent is None:
             return {"ok": False, "reason": "unknown_brief"}
-        payload = dict(parent.payload)
+        # A deep copy: the slide dicts below are rewritten in place, and the
+        # parent's payload is what the diff on the event is measured against.
+        parent_payload = copy.deepcopy(parent.payload)
+        parent_version = parent.version
+        payload = copy.deepcopy(parent.payload)
 
     if new_prompt:
         targets = payload.get("slides") or []
@@ -877,6 +944,11 @@ async def regenerate_image(
                 for c in prev:
                     if c.slide_position != slide_position and c.background_key:
                         reuse[c.slide_position] = (c.background_key, c.background_url or "")
+    result = await generate(ctx, brief, reuse=reuse, parent=brief_id)
+    # Recorded after the work so the event names the version it produced.
+    # The vote stands either way: the owner disliked the picture whether or
+    # not a new one could be made.
+    new_brief_id = result.get("brief_id") if result.get("ok") else None
     with session_scope() as db:
         events.record(
             db,
@@ -884,9 +956,30 @@ async def regenerate_image(
             account_id=ctx.account_id,
             brand_id=ctx.brand_id,
             brief_id=brief_id,
-            meta={**events.facts_of(payload), "slide_position": slide_position},
+            meta={
+                **events.facts_of(parent_payload, version=parent_version),
+                "slide_position": slide_position,
+                "new_prompt": new_prompt,
+                "owner_request": owner_request,
+                "request_text": repo.request_text(db, ctx.message_id),
+                "revision_no": result.get("revision_no"),
+                "new_brief_id": new_brief_id,
+                "root_brief_id": result.get("root_brief_id"),
+                "diff": payload_diff(parent_payload, brief.model_dump(mode="json")),
+                "ok": bool(result.get("ok")),
+                "reason": result.get("reason"),
+            },
         )
-    return await generate(ctx, brief, reuse=reuse, parent=brief_id)
+        if new_brief_id:
+            _remember_change(
+                db,
+                brand_id=ctx.brand_id,
+                kind="rejection",
+                owner_request=owner_request,
+                fields=[f"slide {slide_position} picture" if slide_position else "picture"],
+                brief_id=new_brief_id,
+            )
+    return result
 
 
 # The retention loop. After a creative, the owner gets tomorrow's idea at
@@ -1349,6 +1442,81 @@ def _merge(payload: dict, changes: dict) -> dict:
         else:
             merged[key] = value
     return merged
+
+
+# What a free revision can change: every field the brief expresses, and only
+# those. "badge", "price" or "logo_size" are wishes nothing renders; a version
+# that silently ignored one cost the owner a second change request to find out.
+REVISABLE = frozenset(CreativeBrief.model_fields)
+DIFF_VALUE_LIMIT = 120
+
+
+def unsupported_changes(changes: dict) -> list[str]:
+    return sorted(k for k in changes if k not in REVISABLE)
+
+
+def _short(value: Any) -> Any:
+    """A diff value the event row and the agent can read: strings and nested
+    objects are cut at DIFF_VALUE_LIMIT, everything else is kept as it is."""
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if isinstance(value, str) and len(value) > DIFF_VALUE_LIMIT:
+        return value[: DIFF_VALUE_LIMIT - 1] + "…"
+    return value
+
+
+def payload_diff(old: dict, new: dict) -> dict[str, list]:
+    """{field: [old, new]} for every brief field a revision actually changed.
+
+    Compared on the VALIDATED payloads, so a headline that only differs in
+    stray whitespace is the same headline. Nested objects (caption, format,
+    visual_direction) and carousel slides are compared one field at a time,
+    so the agent can say "slide 2's headline" rather than quote a list.
+    """
+    diff: dict[str, list] = {}
+
+    def fields(prefix: str, a: dict, b: dict) -> None:
+        for f in sorted(set(a) | set(b)):
+            if a.get(f) != b.get(f):
+                diff[f"{prefix}{f}"] = [_short(a.get(f)), _short(b.get(f))]
+
+    for key in sorted(set(old) | set(new)):
+        a, b = old.get(key), new.get(key)
+        if a == b:
+            continue
+        if key == "slides" and isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+            for sa, sb in zip(a, b, strict=True):
+                pos = sb.get("position") or sa.get("position")
+                fields(f"slides[{pos}].", sa, sb)
+        elif isinstance(a, dict) and isinstance(b, dict):
+            fields(f"{key}.", a, b)
+        else:
+            diff[key] = [_short(a), _short(b)]
+    return diff
+
+
+def _remember_change(
+    db, *, brand_id: uuid.UUID, kind: str, owner_request: str | None, fields: list[str], brief_id
+) -> None:
+    """The owner's reason, in memory, linked to the version it produced -- the
+    way a tap's vote is remembered in insights/votes. It used to reach memory
+    only if the model chose to call `remember`, and then without the brief.
+    Best effort: a memory that fails must never fail the revision."""
+    if not owner_request:
+        return
+    try:
+        from app.memory import embed
+
+        with db.begin_nested():
+            embed.remember(
+                db,
+                brand_id=brand_id,
+                kind=kind,
+                content=f"Owner asked: {owner_request} -> changed {', '.join(fields) or 'nothing'}",
+                source_ref=f"brief:{brief_id}",
+            )
+    except Exception:  # noqa: BLE001 - memory is an enhancement, never a gate
+        log.warning("change_memory_failed", kind=kind, brief_id=str(brief_id))
 
 
 class BrandAssetSnapshot:

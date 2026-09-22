@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from app.agent.tools import TOOLS, _owner_request
+from app.creative import pipeline
 from app.creative.brief import EXAMPLE, EXAMPLE_CAROUSEL, CreativeBrief
 from app.db import repo
 
@@ -88,6 +90,123 @@ def test_the_backfill_walks_parents_from_every_root():
     assert "WITH RECURSIVE" in mod.BACKFILL and "parent_brief_id IS NULL" in mod.BACKFILL
     assert "root_brief_id IS NULL" in mod.BACKFILL, "re-running it never rewrites a stitched row"
     assert mod.revision == "0014" and mod.down_revision == "0013"
+
+
+# --------------------------------------------------------------------------- #
+# a change is verified, a non-change refused
+# --------------------------------------------------------------------------- #
+def _dump(payload: dict) -> dict:
+    return CreativeBrief.model_validate(payload).model_dump(mode="json")
+
+
+def test_the_diff_names_every_field_that_changed_and_nothing_else():
+    old = _dump(EXAMPLE)
+    new = _dump(
+        {
+            **EXAMPLE,
+            "headline": "Aaj hi lein",
+            "caption": {**EXAMPLE["caption"], "hashtags": ["#oil"]},
+            "template_id": "split_card",
+        }
+    )
+    diff = pipeline.payload_diff(old, new)
+    assert set(diff) == {"headline", "caption.hashtags", "template_id"}
+    assert diff["headline"] == [EXAMPLE["headline"], "Aaj hi lein"]
+    assert diff["template_id"] == ["centered_overlay", "split_card"]
+
+
+def test_whitespace_that_validation_strips_is_not_a_change():
+    old = _dump(EXAMPLE)
+    new = _dump(pipeline._merge(EXAMPLE, {"headline": "  " + EXAMPLE["headline"] + "  "}))
+    assert pipeline.payload_diff(old, new) == {}
+
+
+def test_a_carousel_diff_names_the_slide():
+    old = _dump(EXAMPLE_CAROUSEL)
+    slides = [dict(s) for s in EXAMPLE_CAROUSEL["slides"]]
+    slides[1] = {**slides[1], "headline": "Second slide, new words"}
+    new = _dump({**EXAMPLE_CAROUSEL, "slides": slides})
+    diff = pipeline.payload_diff(old, new)
+    assert list(diff) == ["slides[2].headline"]
+
+
+def test_long_values_are_cut_so_an_event_row_stays_readable():
+    long = "x" * 400
+    diff = pipeline.payload_diff({"alt_text": "a"}, {"alt_text": long})
+    assert len(diff["alt_text"][1]) == pipeline.DIFF_VALUE_LIMIT
+
+
+def test_a_wish_the_brief_cannot_express_is_named():
+    assert pipeline.unsupported_changes({"badge": "NEW", "headline": "x", "price": 99}) == [
+        "badge",
+        "price",
+    ]
+    assert pipeline.unsupported_changes({"headline": "x", "caption": {}}) == []
+
+
+async def test_an_unsupported_change_is_refused_before_any_database_work(monkeypatch):
+    def no_db():
+        raise AssertionError("nothing may be loaded or stored for a refused change")
+
+    monkeypatch.setattr(pipeline, "session_scope", no_db)
+    res = await pipeline.recompose(
+        types.SimpleNamespace(brand_id=uuid.uuid4()),
+        brief_id=uuid.uuid4(),
+        changes={"logo_size": "big", "headline": "Fine"},
+        owner_request="make the logo bigger",
+    )
+    assert res["ok"] is False and res["reason"] == "unsupported_change"
+    assert res["unsupported"] == ["logo_size"]
+    assert "regenerate_image" in res["hint"] and "headline" in res["hint"]
+
+
+async def test_a_change_that_changes_nothing_is_refused_and_nothing_is_saved(monkeypatch):
+    from contextlib import contextmanager
+
+    parent = types.SimpleNamespace(id=uuid.uuid4(), payload=_dump(EXAMPLE), version=1)
+    saved = []
+
+    class Db:
+        def get(self, model, key):
+            return parent if model.__name__ == "Brief" else types.SimpleNamespace(id=key)
+
+    @contextmanager
+    def scope():
+        yield Db()
+
+    monkeypatch.setattr(pipeline, "session_scope", scope)
+    monkeypatch.setattr(pipeline.repo, "save_brief", lambda *a, **k: saved.append(k))
+    monkeypatch.setattr(pipeline, "layout_gate", None)  # must not be reached either
+    ctx = types.SimpleNamespace(brand_id=uuid.uuid4(), account_id=uuid.uuid4(), message_id=None)
+    for changes in ({}, {"headline": None}, {"headline": EXAMPLE["headline"]}):
+        res = await pipeline.recompose(ctx, brief_id=parent.id, changes=changes, owner_request="?")
+        assert res["ok"] is False and res["reason"] == "nothing_changed", changes
+        assert "regenerate_image" in res["hint"]
+    assert saved == []
+
+
+# --------------------------------------------------------------------------- #
+# the tool surface
+# --------------------------------------------------------------------------- #
+def test_the_owner_s_words_are_required_on_both_revision_tools():
+    for name in ("revise_creative", "regenerate_image"):
+        tool = next(t for t in TOOLS if t["name"] == name)
+        assert "owner_request" in tool["input_schema"]["required"], name
+        assert tool["input_schema"]["properties"]["owner_request"]["maxLength"] == 300
+
+
+def test_revise_no_longer_promises_a_badge_or_a_price():
+    revise = next(t for t in TOOLS if t["name"] == "revise_creative")
+    text = revise["description"]
+    assert "CTA, badge, price" not in text
+    assert "nothing renders a badge" in text and "applied" in text
+    assert set(revise["input_schema"]["properties"]["changes"]["properties"]) <= pipeline.REVISABLE
+
+
+def test_an_empty_owner_request_is_stored_as_nothing_asked():
+    assert _owner_request({"owner_request": "   "}) is None
+    assert _owner_request({}) is None
+    assert _owner_request({"owner_request": "x" * 400}) == "x" * 300
 
 
 # --------------------------------------------------------------------------- #
@@ -188,7 +307,7 @@ async def test_a_picture_revision_is_version_two_of_the_same_creative(owner, blo
     assert first["root_brief_id"] == first["brief_id"], "a root names itself"
 
     redo = await pipeline.regenerate_image(
-        ctx, brief_id=uuid.UUID(first["brief_id"]), new_prompt=None
+        ctx, brief_id=uuid.UUID(first["brief_id"]), new_prompt=None, owner_request="new picture"
     )
     assert redo["ok"], redo
     assert redo["version"] == 2 and redo["revision_no"] == 1
@@ -218,6 +337,7 @@ async def test_one_slide_of_a_carousel_is_a_revision_too(owner, blobs, chromium)
         brief_id=uuid.UUID(first["brief_id"]),
         new_prompt=None,
         slide_position=2,
+        owner_request="slide 2 looks dull",
     )
     assert redo["ok"] and redo["credits_charged"] == 1
     child = _brief(redo["brief_id"])
@@ -235,14 +355,18 @@ async def test_words_then_picture_then_words_is_version_four(owner, blobs, chrom
         ctx,
         brief_id=uuid.UUID(v1["brief_id"]),
         changes={"headline": "Aaj hi lein"},
+        owner_request="headline in Hindi",
     )
     assert v2["ok"], v2
-    v3 = await pipeline.regenerate_image(ctx, brief_id=uuid.UUID(v2["brief_id"]), new_prompt=None)
+    v3 = await pipeline.regenerate_image(
+        ctx, brief_id=uuid.UUID(v2["brief_id"]), new_prompt=None, owner_request="another picture"
+    )
     assert v3["ok"], v3
     v4 = await pipeline.recompose(
         ctx,
         brief_id=uuid.UUID(v3["brief_id"]),
         changes={"cta": "Order today"},
+        owner_request="change the button",
     )
     assert v4["ok"], v4
     assert (v2["version"], v3["version"], v4["version"]) == (2, 3, 4)
@@ -335,3 +459,101 @@ def test_the_creative_they_were_shown_survives_the_window_closing(owner):
 
         acct, wa, brief = _session_with_brief(db, account_id, brand_id, expired=True)
         assert repo.touch_session(db, acct, wa, inbound=True).active_brief_id is None
+
+
+def _fake_embeddings(monkeypatch):
+    from app.memory import embed
+
+    monkeypatch.setattr(
+        embed,
+        "embed_texts",
+        lambda texts, input_type="document": [[0.1] * embed.settings.embed_dim for _ in texts],
+    )
+
+
+async def test_the_owners_words_and_the_diff_are_on_the_revise_event(
+    owner, blobs, chromium, monkeypatch
+):
+    from app.db.models import BrandMemory, CreativeEvent, Message
+    from app.db.session import session_scope
+
+    _fake_embeddings(monkeypatch)
+    account_id, brand_id = owner
+    first = await pipeline.generate(
+        _ctx(account_id, brand_id), CreativeBrief.model_validate(EXAMPLE)
+    )
+    with session_scope() as db:
+        msg = Message(
+            account_id=account_id,
+            provider="mock",
+            direction="in",
+            kind="audio",
+            transcript="headline Hindi mein karo aur button Order today",
+        )
+        db.add(msg)
+        db.flush()
+        message_id = msg.id
+    ctx = _ctx(account_id, brand_id, message_id=message_id)
+    revised = await pipeline.recompose(
+        ctx,
+        brief_id=uuid.UUID(first["brief_id"]),
+        changes={"headline": "Aaj hi lein", "cta": "Order today"},
+        owner_request="headline in Hindi and the button should say Order today",
+    )
+    assert revised["ok"], revised
+    assert set(revised["applied"]) == {"headline", "cta"}
+    assert revised["applied"]["headline"] == [EXAMPLE["headline"], "Aaj hi lein"]
+    assert _brief(revised["brief_id"]).source_message_id == message_id
+    with session_scope() as db:
+        ev = (
+            db.query(CreativeEvent)
+            .filter(CreativeEvent.brand_id == brand_id, CreativeEvent.kind == "revise")
+            .one()
+        )
+        assert ev.brief_id == uuid.UUID(first["brief_id"])
+        m = ev.meta
+        assert m["owner_request"].startswith("headline in Hindi")
+        assert m["request_text"] == "headline Hindi mein karo aur button Order today"
+        assert m["revision_no"] == 1 and m["version"] == 1
+        assert m["new_brief_id"] == revised["brief_id"]
+        assert m["root_brief_id"] == first["brief_id"]
+        assert m["diff"] == revised["applied"]
+        mem = db.query(BrandMemory).filter(BrandMemory.brand_id == brand_id).one()
+        assert mem.kind == "feedback" and mem.source_ref == f"brief:{revised['brief_id']}"
+        assert mem.content.startswith("Owner asked: headline in Hindi")
+        assert "changed cta, headline" in mem.content
+
+
+async def test_the_regenerate_event_carries_the_prompt_the_words_and_the_new_version(
+    owner, blobs, chromium, monkeypatch
+):
+    from app.db.models import BrandMemory, CreativeEvent
+    from app.db.session import session_scope
+
+    _fake_embeddings(monkeypatch)
+    account_id, brand_id = owner
+    ctx = _ctx(account_id, brand_id)
+    first = await pipeline.generate(ctx, CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
+    redo = await pipeline.regenerate_image(
+        ctx,
+        brief_id=uuid.UUID(first["brief_id"]),
+        new_prompt="a brass thali of pickles on a stone counter, hard afternoon sun",
+        slide_position=2,
+        owner_request="slide 2 is too dark, show the pickles",
+    )
+    assert redo["ok"], redo
+    with session_scope() as db:
+        ev = (
+            db.query(CreativeEvent)
+            .filter(CreativeEvent.brand_id == brand_id, CreativeEvent.kind == "regenerate")
+            .one()
+        )
+        m = ev.meta
+        assert m["new_prompt"].startswith("a brass thali") and m["slide_position"] == 2
+        assert m["owner_request"] == "slide 2 is too dark, show the pickles"
+        assert m["new_brief_id"] == redo["brief_id"] and m["revision_no"] == 1
+        assert m["root_brief_id"] == first["brief_id"] and m["ok"] is True
+        assert list(m["diff"]) == ["slides[2].visual_direction"]
+        mem = db.query(BrandMemory).filter(BrandMemory.brand_id == brand_id).one()
+        assert mem.kind == "rejection" and mem.source_ref == f"brief:{redo['brief_id']}"
+        assert "slide 2 picture" in mem.content
