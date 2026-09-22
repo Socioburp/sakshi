@@ -47,10 +47,12 @@
      4.5:1 (SCRIM_JS and _make_legible in compose.py). None exists until a
      measurement asks for it, so a calm, dark photograph never gets one. The
      feather is twice the blur: at the edge of the words the plate is still at
-     ~97% of its strength instead of fading out under the last letter. #}
+     ~97% of its strength instead of fading out under the last letter. Both
+     come from compose.py (PLATE_FEATHER, PLATE_BLUR), wide and soft, so the
+     plate reads as a shadow the words sit in and not as a grey box. #}
   .scrim-text { position: absolute; z-index: -1; pointer-events: none;
-                border-radius: {{ (width*0.06)|round|int }}px;
-                filter: blur({{ (width*0.03)|round|int }}px); }
+                border-radius: {{ plate_feather }}px;
+                filter: blur({{ plate_blur }}px); }
   {# A mark that cannot separate from its ground gets a plate of its own, and
      an opaque logo file (a JPEG with its white background) sits on a rounded
      card of that same colour -- deliberate, not a bare rectangle with a

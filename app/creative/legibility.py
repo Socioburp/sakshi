@@ -36,8 +36,8 @@ ground actually behind each word -- photograph, gradient, plate, panel,
 whatever is there -- and holds it to WCAG 4.5:1. Where it falls short,
 `plate_alpha` says exactly how strong the plate under that cluster of words
 has to be, from the contrast target rather than from a cap chosen by eye.
-(That half uses numpy for the percentiles; it is already a dependency of the
-image path.)
+(That half uses numpy for the cell averages; it is already a dependency of
+the image path.)
 """
 
 from __future__ import annotations
@@ -238,15 +238,34 @@ MARK_CONTRAST = 3.0
 # photograph that one more plate round had been taking to 4.6. It is also the
 # tolerance at the very end, when every plate is as strong as it goes and a
 # value lands a hair under the bar through the same rounding.
+#
+# "Designed" is decided from the DOM -- the element sits inside a panel, a
+# band, the pill, something with a solid background of its own (FIT_JS reports
+# it as `solid`) -- and confirmed from the pixels (`is_flat`). The pixels
+# alone could not tell a seamless grey studio backdrop from a brand panel, and
+# a brand name over one shipped at 4.48:1 with no plate.
 MEASURE_SLACK = 0.03
 # A ground whose bright and dark ends are this close (relative luminance) is a
 # flat designed colour, not a picture. One 8-bit level at mid grey is ~0.005.
 FLAT_GROUND = 0.01
 # Light ink fails against the BRIGHT part of its ground and dark ink against
 # the dark part, so the ground is read at both ends and the worse one counts.
-# The 90th percentile, not the maximum: one specular highlight behind a serif
-# does not make a headline unreadable, a tenth of the ground does.
-GROUND_PERCENTILE = 0.90
+#
+# It is read line by line, in windows, and the worst window counts. It used to
+# be the 90th percentile of the whole element's box, and a tenth of the ground
+# is a lot: a white band 20px tall through the first line of a 130px headline
+# was 8% of the box, so white type shipped with the lower half of "Weekend"
+# dissolved into it and the report saying 18.75:1. Two window shapes, because
+# two things happen to type: a BLOB behind part of a line (a highlight, a
+# plate on the table) is read in cells of .3em -- about two stems of bold
+# display type, so a feature that fills one eats a letter -- and a BAND across
+# the line (a table edge, a window bar, a stripe of sun) is read in strips
+# .15em thick spanning the line, one axis at a time, so it weighs what it
+# covers of every letter it crosses. A speck of a few pixels averages away in
+# either, which is the one allowance a highlight gets.
+GROUND_CELL_EM = 0.3
+GROUND_STRIP_EM = 0.15
+GROUND_WINDOW_MIN = 3
 # The plate is aimed a little past the bar, so that the blur at its edge and
 # the resample to the delivery size cannot leave the measured frame a hair
 # under it and cost another round.
@@ -294,16 +313,48 @@ def _luminance_plane(frame, box: tuple[float, float, float, float]):
     return linear @ np.array([0.2126, 0.7152, 0.0722])
 
 
-def ground(frame, box: tuple[float, float, float, float]) -> dict[str, float]:
-    """How bright and how dark the ground inside `box` gets, as relative
-    luminance. `frame` is the rendered page with the ink hidden."""
+def _windows(plane, height: int, width: int):
+    """The mean of every `height` x `width` window of the plane, at every
+    position, so that a feature is weighed whole by some window wherever it
+    falls: a grid aligned to the box halved a band that straddled two of its
+    cells. An integral image makes the full sweep a few milliseconds. A plane
+    smaller than one window is filled out with its own edge pixels, so a thin
+    feature still weighs what it covers and no more."""
     import numpy as np
 
-    plane = _luminance_plane(frame, box)
-    return {
-        "bright": float(np.quantile(plane, GROUND_PERCENTILE)),
-        "dark": float(np.quantile(plane, 1 - GROUND_PERCENTILE)),
-    }
+    rows, cols = plane.shape
+    plane = np.pad(plane, ((0, max(0, height - rows)), (0, max(0, width - cols))), mode="edge")
+    integral = np.pad(plane, ((1, 0), (1, 0))).cumsum(axis=0).cumsum(axis=1)
+    y0 = np.arange(plane.shape[0] - height + 1)[:, None]
+    x0 = np.arange(plane.shape[1] - width + 1)[None, :]
+    y1, x1 = y0 + height, x0 + width
+    sums = integral[y1, x1] - integral[y0, x1] - integral[y1, x0] + integral[y0, x0]
+    return sums / (height * width)
+
+
+def windows_for(em: float) -> tuple[int, int]:
+    """(cell, strip) in pixels for type set at `em` pixels (or a mark that tall)."""
+    cell = max(GROUND_WINDOW_MIN, int(round(em * GROUND_CELL_EM)))
+    strip = max(GROUND_WINDOW_MIN, int(round(em * GROUND_STRIP_EM)))
+    return cell, strip
+
+
+def ground(frame, rows: list[tuple[float, float, float, float]], em: float) -> dict[str, float]:
+    """How bright and how dark the ground under this type gets, as relative
+    luminance: the extremes over every cell and every strip of every line box
+    in `rows`, for type (or a mark) `em` pixels tall. `frame` is the rendered
+    page with the ink hidden."""
+    cell, strip = windows_for(em)
+    bright, dark = 0.0, 1.0
+    for row in rows:
+        plane = _luminance_plane(frame, row)
+        for means in (
+            _windows(plane, cell, cell),
+            _windows(plane, strip, plane.shape[1]),
+            _windows(plane, plane.shape[0], strip),
+        ):
+            bright, dark = max(bright, float(means.max())), min(dark, float(means.min()))
+    return {"bright": bright, "dark": dark}
 
 
 def contrast_on(ink: float, opacity: float, stats: dict[str, float]) -> float:
@@ -347,9 +398,16 @@ def plate_alpha(ink: float, stats: dict[str, float], current: float, target: flo
 
 
 def is_flat(stats: dict[str, float]) -> bool:
-    """A designed solid ground -- a panel, a pill -- as opposed to a photograph
-    or a gradient, which vary across the box."""
+    """The pixels of a solid ground -- a panel, a pill -- as opposed to a
+    photograph or a gradient, which vary across the box. Necessary for the
+    measurement slack, not sufficient: see `designed`."""
     return stats["bright"] - stats["dark"] <= FLAT_GROUND
+
+
+def designed(solid: bool, stats: dict[str, float]) -> bool:
+    """A ground that gets the measurement slack: the DOM says the words sit on
+    something with a solid background of its own, and the pixels agree."""
+    return solid and is_flat(stats)
 
 
 def bar_for(cls: str) -> float:

@@ -24,10 +24,14 @@
   {# Anchored to the floor and auto height: the card grows upward with the
      words and the framed photograph gives way (reflow() in FIT_JS), down to
      38% of the frame. Pinning top AND bottom made it a fixed box. #}
+  {# The card carries the ground's own colour: it changes nothing a reader
+     sees, and it tells FIT_JS the words sit on a designed ground (`solid`),
+     not on the photograph. #}
   .card { position: absolute; left: {{ inset_x }}px; right: {{ inset_x }}px;
           bottom: {{ pad_bottom }}px;
           min-height: {{ height - pad_bottom - inset_top - photo_h - gap }}px;
           max-height: {{ height - pad_bottom - inset_top - gap - (height*0.38)|round|int }}px;
+          background: {{ brand.primary }};
           display: flex; flex-direction: column; }
   .headline { font-size: {{ (width * hf)|round|int }}px; text-shadow: none; max-width: 96%;
               letter-spacing: 0; }

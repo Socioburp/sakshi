@@ -182,6 +182,65 @@ async def test_white_type_on_a_white_photograph_still_reads(chromium, template):
         )
 
 
+async def test_a_bright_band_through_one_line_of_the_headline_is_measured(chromium):
+    """A white band 20px tall behind the first line of a 130px headline was 8%
+    of the headline's box: the 90th percentile never saw it, the report said
+    18.75:1, and the lower half of 'Weekend' dissolved into the band. The
+    ground is now read in .3em cells, line by line, and the worst cell counts."""
+    import numpy as np
+
+    brief = _brief(
+        "centered_overlay", "Weekend Sale", "Cold-pressed, ghar jaisa shudh", "Order now"
+    )
+    laid = await compose.check_layout(brief, brief.units()[0], _brand())
+    box = _ink(laid, "headline")["box"]
+    w, h = brief.pixel_size()
+    top = round(box["t"] + 0.28 * (box["b"] - box["t"]))
+    photo = Image.new("RGB", (w, h), (20, 22, 26))
+    ImageDraw.Draw(photo).rectangle([0, top, w, top + 20], fill=(255, 255, 255))
+    buf = io.BytesIO()
+    photo.save(buf, "PNG")
+    png, report = await compose.compose_with_report(
+        brief, brief.units()[0], _brand(), buf.getvalue(), "image/png"
+    )
+    assert [p["anchor"] for p in report["legibility"]["plates"]] == ["headline"]
+    assert report["legibility"]["contrast"]["headline"] >= legibility.TEXT_CONTRAST
+    # Independently: on the delivered frame the band behind the letters is dark
+    # enough for white type -- the pixels in the band's rows that are not ink.
+    with Image.open(io.BytesIO(png)) as im:
+        rows = np.asarray(
+            im.convert("RGB").crop((round(box["l"]), top + 4, round(box["r"]), top + 16))
+        )
+    lum = (rows / 255.0) ** 2.2 @ np.array([0.2126, 0.7152, 0.0722])
+    ground = float(np.median(lum[lum < 0.85]))
+    assert legibility.contrast_ratio(1.0, ground) >= legibility.TEXT_CONTRAST - 0.1, ground
+
+
+def test_the_ground_is_read_in_cells_the_size_of_a_letter():
+    """A bright feature that fills a cell is measured whole wherever it falls;
+    a speck averages away inside its cell."""
+    import numpy as np
+
+    def read(plane):
+        frame = Image.fromarray((plane * 255).astype("uint8"))
+        return legibility.ground(frame, [(0, 0, plane.shape[1], plane.shape[0])], 100)
+
+    assert legibility.windows_for(100) == (30, 15) and legibility.windows_for(130) == (39, 20)
+    assert legibility.windows_for(4) == (legibility.GROUND_WINDOW_MIN,) * 2
+    band = np.full((120, 600), 0.01)
+    band[43:58, :] = 1.0  # a 15px band across the line, on no grid at all
+    assert read(band)["bright"] > 0.95
+    bar = np.full((120, 600), 0.01)
+    bar[:, 217:232] = 1.0  # a 15px bar down through the line
+    assert read(bar)["bright"] > 0.95
+    blob = np.full((120, 600), 0.01)
+    blob[41:71, 301:331] = 1.0  # a 30px blob behind one letter
+    assert read(blob)["bright"] > 0.95
+    speck = np.full((120, 600), 0.01)
+    speck[60:64, 300:304] = 1.0
+    assert read(speck)["bright"] < 0.05
+
+
 async def test_a_dark_photograph_is_left_alone(chromium):
     brief = _brief("centered_overlay", "Weekend Sale", "Cold-pressed", "Order now")
     _, report = await compose.compose_with_report(
@@ -223,6 +282,90 @@ async def test_a_frame_that_cannot_be_made_legible_is_refused_with_its_numbers(
     assert "contrast:headline" in err.value.violations
     assert 1.0 < err.value.measured["headline"] < legibility.TEXT_CONTRAST
     assert str(err.value.measured["headline"]) in str(err.value)
+
+
+async def test_a_refusal_reports_what_no_plate_could_fix_not_what_one_would_have(
+    chromium, monkeypatch
+):
+    """The CTA sits on its own pill, so no plate can help it -- and the loop
+    used to stop the moment it fell short, before the headline's plate was
+    laid, so the refusal said 'headline 1.43:1' about a headline one round
+    would have fixed. Held to 8:1, the pill's label falls short and the
+    headline over white does not, because it is plated first."""
+    monkeypatch.setattr(legibility, "TEXT_CONTRAST", 8.0)
+    brief = _brief("centered_overlay", "Weekend Sale", "Cold-pressed", "Order now")
+    with pytest.raises(compose.LegibilityError) as err:
+        await compose.compose(
+            brief, brief.units()[0], _brand(), _flat((255, 255, 255)), "image/png"
+        )
+    assert set(err.value.measured) == {"cta"}, err.value.measured
+
+
+async def test_a_plate_lands_over_the_ground_it_was_laid_for_in_every_layout(chromium):
+    """top_band's headline lives in .band, which was not positioned: the plate
+    went into .col at z-index -1, BENEATH the band's own fill, and changed
+    nothing -- the pass would have spent its rounds on an invisible plate and
+    refused a valid job."""
+    for template in sorted(compose.TEMPLATES):
+        brief = _brief(template, "Weekend Sale", "Cold-pressed", "Order now")
+        w, h = brief.pixel_size()
+        browser = await compose.get_browser()
+        page = await browser.new_page(viewport={"width": w, "height": h})
+        try:
+            html = compose.render_html(
+                brief,
+                brief.units()[0],
+                _brand(),
+                compose.as_data_uri(_flat((20, 20, 20)), "image/png"),
+            )
+            report = await compose._layout(page, brief, brief.units()[0], _brand(), html)
+            feather = w * compose.PLATE_FEATHER
+            for item in report["inks"]:
+                if item["cls"] == "cta":
+                    continue  # its ground is its own pill; no plate is ever laid for it
+                await page.evaluate(compose.SCRIM_JS, {"k": None, "plates": [], "marks": []})
+                before = legibility.ground(
+                    await compose._frame(page, (0, 0, w, h), "no-type"), item["rows"], item["px"]
+                )
+                box = item["box"]
+                plate = {"anchor": item["cls"], "colour": "#FFFFFF", "alpha": 0.9, "box": [
+                    box["l"] - feather, box["t"] - feather, box["r"] + feather, box["b"] + feather,
+                ]}  # fmt: skip
+                await page.evaluate(compose.SCRIM_JS, {"k": None, "plates": [plate], "marks": []})
+                after = legibility.ground(
+                    await compose._frame(page, (0, 0, w, h), "no-type"), item["rows"], item["px"]
+                )
+                assert after["dark"] > before["bright"] + 0.3, (
+                    template,
+                    item["cls"],
+                    before,
+                    after,
+                )
+        finally:
+            await page.close()
+
+
+async def test_a_flat_studio_backdrop_is_a_photograph_and_gets_no_slack(chromium, monkeypatch):
+    """A seamless grey backdrop measures as flat as a brand panel, so the
+    panel's measurement slack let a brand name over it ship at 4.48:1 with no
+    plate. Whether a ground is designed is read from the DOM: the headline
+    sits in the band, the brand name sits on the picture. With the slack
+    opened wide, the band's type is excused and the name over the photograph
+    is still plated to the bar."""
+    monkeypatch.setattr(legibility, "MEASURE_SLACK", 0.5)
+    brief = _brief(
+        "top_band", "Weekend Sale", "Cold-pressed, ghar jaisa shudh", "Order now", "story"
+    )
+    _, report = await compose.compose_with_report(
+        brief, brief.units()[0], _brand(), _flat((128, 128, 128)), "image/png"
+    )
+    assert _ink(report, "headline")["solid"] and _ink(report, "cta")["solid"]
+    assert not _ink(report, "brandline")["solid"]
+    assert [p["anchor"] for p in report["legibility"]["plates"]] == ["brandline"]
+    assert report["legibility"]["contrast"]["brandline"] >= legibility.TEXT_CONTRAST
+    assert legibility.designed(True, {"bright": 0.19, "dark": 0.185})
+    assert not legibility.designed(False, {"bright": 0.19, "dark": 0.185})
+    assert not legibility.designed(True, {"bright": 0.42, "dark": 0.11})
 
 
 async def test_a_panel_ink_that_only_just_clears_the_bar_is_not_refused_by_the_measurement(
@@ -445,6 +588,30 @@ def test_copy_crowding_the_mark_is_still_a_copy_problem():
     assert not pipeline._about_the_mark("logo_clearspace:subhead")
     assert not pipeline._about_the_mark("clipped:headline")
     assert not pipeline._about_the_mark("overflow:panel")
+    # A container spilling follows whatever spilled; on its own it is copy.
+    assert pipeline._blame(["overflow:panel", "clipped:brandline"]) == (True, ["clipped:brandline"])
+    assert pipeline._blame(["overflow:panel", "clipped:headline"]) == (
+        False, ["overflow:panel", "clipped:headline"]
+    )  # fmt: skip
+    assert pipeline._blame(["overflow:content"]) == (False, ["overflow:content"])
+    assert pipeline._blame(["outside:card", "unsafe:logo"]) == (True, ["unsafe:logo"])
+
+
+@pytest.mark.parametrize("template", ["split_card", "poster_stack", "frame_card"])
+async def test_a_name_too_wide_for_the_panel_is_not_blamed_on_the_copy_either(chromium, template):
+    """One 45-letter word for a name overflows the panel, the card or the
+    content column, and 'overflow:panel' counted as a copy violation: the
+    slide was 'copy', the agent was told to shorten a headline that had
+    nothing to do with it, and shortening could never help."""
+    brand = _brand("Venkateshwaratradersandgeneralstoresbengaluru")
+    brief = _brief(template, "Weekend Sale", "Fresh stock", "Order now")
+    res = await pipeline.layout_gate(brief, brief.units(), brand)
+    assert res["reason"] == "brand_mark_does_not_fit" and res["charged"] == 0
+    slide = res["slides"][0]
+    assert slide["about"] == "brand_mark"
+    assert "the copy is too long for the layout" not in slide["problems"]
+    assert "a word in the brand name is wider than the layout" in slide["problems"]
+    assert "Shorten the headline" not in res["hint"] and "update_brand" in res["hint"]
 
 
 # --------------------------------------------------------------------------- #
@@ -504,23 +671,98 @@ async def test_the_reported_box_holds_every_pixel_of_ink(chromium, headline):
     assert rows.max() <= box["b"] + 1 and rows.max() >= box["b"] - 4, "the box is the ink"
 
 
+@pytest.mark.parametrize(
+    "headline",
+    ["ਵਿਸਾਖੀ ਦੀਆਂ ਲੱਖ ਲੱਖ ਵਧਾਈਆਂ", "দুর্গাপূজার শুভেচ্ছা", "महाशिवरात्रि"],
+    ids=["punjabi", "bengali", "hindi"],
+)
+@pytest.mark.parametrize("template", ["lower_third", "split_card", "poster_stack"])
+async def test_the_headbar_of_indic_type_stays_inside_the_safe_zone(chromium, template, headline):
+    """The horizontal extent came from Range rects, which are advance boxes:
+    the shirorekha of Gurmukhi, Bengali and Devanagari type starts a pixel or
+    two left of the first letter's box, and 10-38 px of every such headline
+    sat in the strip the safe zone keeps clear while `unsafe` held. The ink
+    overhang is measured and the block padded by it, like the ascenders."""
+    import numpy as np
+
+    brief = _brief(template, headline)
+    png, report = await compose.compose_with_report(
+        brief, brief.units()[0], _brand("Kadamba"), _flat((20, 20, 20)), "image/png"
+    )
+    box = _ink(report, "headline")["box"]
+    pad = compose.padding_for(*brief.pixel_size())["pad_x"]
+    assert box["l"] >= pad - 0.5, box
+    with Image.open(io.BytesIO(png)) as im:
+        bright = np.asarray(im.convert("L")) > 140
+    rows = bright[round(box["t"]) : round(box["b"]), :]
+    assert not rows[:, :pad].any(), "ink left of the safe zone"
+    assert rows[:, pad : pad + 3].any(), "the type still starts at the safe zone"
+
+
 # --------------------------------------------------------------------------- #
 # 7. copy the faces cannot set
 # --------------------------------------------------------------------------- #
-async def test_a_character_no_face_of_ours_covers_is_a_violation(chromium):
-    brief = _brief("lower_third", "Sale 大 today", None, "Order ส now")
+async def test_a_character_no_face_of_ours_covers_is_a_violation(chromium, monkeypatch):
+    """The page's own check, the second gate. The brief refuses these first
+    (below); the page must still refuse them on its own, because it is what
+    stands between a brand NAME the brief never sees and a box on the frame."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="U\\+5927"):
+        _brief("lower_third", "Sale 大 today", None, "Order ส now")
+    real = compose.render_html
+
+    def past_the_brief(*args, **kwargs):
+        html = real(*args, **kwargs)
+        return html.replace(">Weekend Sale<", ">Sale 大 today<").replace(
+            ">Order now<", ">Order ส now<"
+        )
+
+    monkeypatch.setattr(compose, "render_html", past_the_brief)
+    brief = _brief("lower_third", "Weekend Sale", None, "Order now")
     with pytest.raises(compose.LayoutError) as err:
         await compose.check_layout(brief, brief.units()[0], _brand())
     assert "tofu:headline:U+5927" in err.value.violations
     assert "tofu:cta:U+0E2A" in err.value.violations
     res = await pipeline.layout_gate(brief, brief.units(), _brand())
     assert res["reason"] == "copy_does_not_fit" and "U+" in res["hint"]
+    monkeypatch.setattr(compose, "render_html", real)
+    brief = _brief("lower_third", "Weekend Sale", None, "Order now")
+    res = await pipeline.layout_gate(brief, brief.units(), _brand("大 Stores"))
+    assert res["reason"] == "brand_mark_does_not_fit"
+    assert res["slides"][0]["detail"] == ["tofu:brandline:U+5927"]
 
 
 async def test_the_rupee_sign_and_ordinary_punctuation_are_covered(chromium):
-    brief = _brief("split_card", "Flat ₹249 — today only!", "50% off, “fresh” & hot", "Pay ₹249")
+    brief = _brief(
+        "split_card", "Flat ₹249 — today only!", "50% off, “fresh” & hot… ½ price ™ ©", "Pay ₹249 •"
+    )
     report = await compose.check_layout(brief, brief.units()[0], _brand())
     assert report["violations"] == []
+
+
+async def test_the_brief_and_the_compositor_agree_on_the_arrow(chromium):
+    """Same character, same answer at both gates: the brief refuses 'Order
+    now →' before anything is laid out, and the page -- given it anyway --
+    refuses it as tofu. It used to pass the first and fail the second, and
+    the agent was told to shorten the copy."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="U\\+2192"):
+        _brief("lower_third", "Weekend Sale", None, "Order now →")
+    brief = _brief("lower_third", "Weekend Sale", None, "Order now")
+    slide = brief.units()[0]
+    w, h = brief.pixel_size()
+    browser = await compose.get_browser()
+    page = await browser.new_page(viewport={"width": w, "height": h})
+    try:
+        html = compose.render_html(brief, slide, _brand(), compose._BLANK_BG)
+        html = html.replace(">Order now<", ">Order now →<", 1)
+        with pytest.raises(compose.LayoutError) as err:
+            await compose._layout(page, brief, slide, _brand(), html)
+        assert err.value.violations == ["tofu:cta:U+2192"]
+    finally:
+        await page.close()
 
 
 async def test_urdu_is_laid_out_from_the_right(chromium):

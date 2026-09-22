@@ -285,6 +285,29 @@ def _about_the_mark(violation: str) -> bool:
     return subject.split(":", 1)[0] in ("brandline", "logo")
 
 
+# The boxes FIT_JS checks for overflow. A violation on one of these names no
+# element: it says something INSIDE spilled, and which thing that was is what
+# the element-level violations say.
+_CONTAINERS = frozenset({"content", "panel", "band", "card"})
+
+
+def _knock_on(violation: str) -> bool:
+    """A container spilling because of what is in it. It follows the element
+    that spilled and never decides on its own: a one-word shop name too wide
+    for split_card's panel produced 'overflow:panel' beside the brandline's
+    own violations, and that one word made the slide a copy problem -- the
+    agent was told to shorten a headline that had nothing to do with it."""
+    kind, _, subject = violation.partition(":")
+    return kind in ("overflow", "outside") and subject in _CONTAINERS
+
+
+def _blame(violations: list[str]) -> tuple[bool, list[str]]:
+    """(the mark alone is at fault, the violations worth describing)."""
+    own = [v for v in violations if not _knock_on(v)]
+    mark_only = bool(own) and all(_about_the_mark(v) for v in own)
+    return mark_only, own if mark_only else violations
+
+
 async def layout_gate(brief: CreativeBrief, units: list[Slide], brand_snapshot) -> dict | None:
     """The deterministic guarantees, checked before any money moves.
 
@@ -302,9 +325,9 @@ async def layout_gate(brief: CreativeBrief, units: list[Slide], brand_snapshot) 
     problems, faces = [], []
     for slide, res in zip(units, results, strict=True):
         if isinstance(res, compose.LayoutError):
-            mark_only = all(_about_the_mark(v) for v in res.violations)
+            mark_only, described = _blame(res.violations)
             words = []
-            for v in res.violations:
+            for v in described:
                 kind = v.split(":", 1)[0]
                 if _about_the_mark(v):
                     words.append(_MARK_WORDS.get(kind, _MARK_DEFAULT))

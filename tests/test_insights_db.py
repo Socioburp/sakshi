@@ -425,6 +425,36 @@ async def test_category_picks_the_brand_kit_once_and_look_can_be_changed(owner):
         assert b.fonts["heading"] == "Manrope" and b.template_prefs["signature"] == "bar"
 
 
+async def test_a_palette_is_stored_as_hex_whatever_form_the_agent_wrote_it_in(owner):
+    """'rgb(18,59,46)', 'darkgreen' and '#123' render faithfully in CSS and
+    used to be read as mid grey by the contrast maths -- black type on the
+    brand's own green panel, rescued with white plates, shipped as 4.7:1."""
+    from app.agent import tools
+    from app.agent.context import ToolContext
+    from app.db.models import Brand
+    from app.db.session import session_scope
+    from app.telemetry.stages import trace
+
+    account_id, brand_id = owner
+    t = trace(account_id=account_id).__enter__()
+    ctx = ToolContext(account_id, brand_id, None, "", t)
+    res = await tools.dispatch(
+        ctx,
+        "update_brand",
+        {"palette": {"primary": "rgb(18, 59, 46)", "accent": " #e52 ", "ink": "white"}},
+    )
+    assert res["ok"] and "palette" in res["updated"]
+    with session_scope() as db:
+        palette = db.get(Brand, brand_id).palette
+        assert palette["primary"] == "#123B2E"
+        assert palette["accent"] == "#EE5522" and palette["ink"] == "#FFFFFF"
+    res = await tools.dispatch(ctx, "update_brand", {"palette": {"accent": "brand orange"}})
+    assert res["ok"] is False and res["reason"] == "unreadable_colour"
+    assert res["colours"] == ["accent='brand orange'"] and "#123B2E" in res["hint"]
+    with session_scope() as db:
+        assert db.get(Brand, brand_id).palette["accent"] == "#EE5522", "nothing was saved"
+
+
 # --------------------------------------------------------------------------- #
 # Instagram Insights
 # --------------------------------------------------------------------------- #

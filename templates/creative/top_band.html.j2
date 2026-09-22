@@ -10,7 +10,11 @@
   {# The base's full-bleed layers are replaced by a column: band, then photo. #}
   .bg, .scrim, .grain { display: none; }
   .col { position: absolute; inset: 0; display: flex; flex-direction: column; }
-  .band { flex: 0 0 auto; min-height: {{ (height*0.30)|round|int }}px;
+  {# Positioned, so that a plate the legibility pass lays under the band's
+     type is hosted BY the band and paints over its background. Unpositioned,
+     the plate went into .col beneath the band's own fill, changed nothing,
+     and the pass would have spent its rounds on an invisible plate. #}
+  .band { position: relative; flex: 0 0 auto; min-height: {{ (height*0.30)|round|int }}px;
           max-height: {{ (height*0.58)|round|int }}px;
           background: {{ brand.primary }}; display: flex; flex-direction: column;
           justify-content: flex-end;

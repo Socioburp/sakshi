@@ -18,7 +18,7 @@ from sqlalchemy import select
 from app.agent import buttons
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import brandkit, pipeline
+from app.creative import brandkit, compose, pipeline
 from app.creative.brief import CreativeBrief, Grounding, check_brand_rules
 from app.db import repo
 from app.db.models import (
@@ -762,7 +762,22 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
                 merged = list(dict.fromkeys([*(getattr(brand, key) or []), *value]))
                 setattr(brand, key, merged)
             elif key == "palette":
-                brand.palette = {**(brand.palette or {}), **value}
+                # Stored as '#RRGGBB' and nothing else, so the stylesheet and
+                # the contrast maths can never read one colour two ways.
+                colours = {role: compose.normalise_colour(v) for role, v in dict(value).items()}
+                bad = [f"{role}={value[role]!r}" for role, c in colours.items() if c is None]
+                if bad:
+                    return {
+                        "ok": False,
+                        "reason": "unreadable_colour",
+                        "colours": bad,
+                        "hint": (
+                            "Nothing was saved. Give each palette colour as a hex code like "
+                            "'#123B2E' (a CSS name or rgb(...) is also read) and call the "
+                            "tool again."
+                        ),
+                    }
+                brand.palette = {**(brand.palette or {}), **colours}
             else:
                 setattr(brand, key, value)
             changed.append(key)

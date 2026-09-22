@@ -281,13 +281,45 @@ def _font_name(value: Any, default: str) -> str:
 MIN_CONTRAST = 4.5
 _LIGHT, _DARK, _BLACK = "#FFFFFF", "#141414", "#000000"
 _HEX6 = re.compile(r"^#[0-9A-Fa-f]{6}$")
+# What a brand gets for a colour it never stated (or stated in a form nothing
+# can read): a near-black panel, white ink, one warm accent.
+DEFAULT_PALETTE = {
+    "primary": "#111111",
+    "secondary": "#FFFFFF",
+    "accent": "#E4572E",
+    "ink": "#FFFFFF",
+}
+
+
+def normalise_colour(value: Any) -> str | None:
+    """`value` as '#RRGGBB', or None when it is not a colour.
+
+    Every colour is brought to this one form at the boundary, because the
+    stylesheet and the contrast maths used to read the palette differently:
+    CSS renders 'rgb(18,59,46)', 'darkgreen', '#123' and ' #123B2E' faithfully,
+    while the maths saw "not #RRGGBB" and quietly used mid grey. That put pure
+    black type on the brand's own dark green panel, then laid WHITE plates
+    over the panel to rescue it, and shipped the smear as 4.7:1. An alpha
+    channel is dropped: a brand colour is a colour, not a tint.
+    """
+    from PIL import ImageColor
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        rgb = ImageColor.getrgb(text)
+    except ValueError:
+        return None
+    return "#{:02X}{:02X}{:02X}".format(*rgb[:3])
 
 
 def _luminance(colour: str) -> float:
-    c = colour if _HEX6.match(colour or "") else "#808080"
+    if not _HEX6.match(colour or ""):
+        raise ValueError(f"not a normalised colour: {colour!r}")
     out = []
     for i in (1, 3, 5):
-        v = int(c[i : i + 2], 16) / 255
+        v = int(colour[i : i + 2], 16) / 255
         out.append(v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4)
     return 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
 
@@ -308,8 +340,22 @@ def readable_on(ground: str, wanted: str) -> str:
     return best if contrast(best, ground) >= MIN_CONTRAST else _BLACK
 
 
+def _palette(brand: Any) -> dict[str, str]:
+    """The brand's colours, every one of them '#RRGGBB'. One that cannot be
+    read is replaced by the default for its role and logged -- never used as
+    written by the stylesheet and as mid grey by the maths."""
+    stated = dict(getattr(brand, "palette", {}) or {})
+    palette = {}
+    for role, default in DEFAULT_PALETTE.items():
+        colour = normalise_colour(stated.get(role))
+        if colour is None and stated.get(role):
+            log.warning("palette_colour_unreadable", role=role, value=str(stated[role])[:40])
+        palette[role] = colour or default
+    return palette
+
+
 def _brand_context(brand: Any) -> dict[str, Any]:
-    palette = dict(getattr(brand, "palette", {}) or {})
+    palette = _palette(brand)
     faces = dict(getattr(brand, "fonts", {}) or {})
     analysis = dict(getattr(brand, "logo_analysis", {}) or {})
     # A wordmark and an emblem are not the same shape and must not be sized the
@@ -324,10 +370,7 @@ def _brand_context(brand: Any) -> dict[str, Any]:
         "name": getattr(brand, "name", ""),
         # Prefer the inlined data URI; fall back to the remote URL, then to text.
         "logo_url": getattr(brand, "logo_src", None) or getattr(brand, "logo_url", None),
-        "primary": palette.get("primary", "#111111"),
-        "secondary": palette.get("secondary", "#FFFFFF"),
-        "accent": palette.get("accent", "#E4572E"),
-        "ink": palette.get("ink", "#FFFFFF"),
+        **palette,
         # Set per layout in render_html: the brand's ink where it can be read,
         # a readable ink where it cannot. See `readable_on`.
         "ink_photo": _LIGHT,
@@ -414,6 +457,9 @@ def render_html(
         width=w,
         height=h,
         **padding_for(w, h),
+        # The plate's edge, from the same figures _make_legible sizes it with.
+        plate_feather=round(w * PLATE_FEATHER),
+        plate_blur=round(w * PLATE_BLUR),
         # The CTA belongs to the post, and on a carousel it earns its place on
         # the last slide only -- repeating it on every slide reads as a template.
         scrim_boost=scrim_boost,
@@ -448,8 +494,12 @@ def render_html(
 #             logo_not_loaded      the mark would render as a hole
 #
 # Text is measured from its REAL INK, grapheme by grapheme. Horizontally that is
-# a Range per grapheme: an <h1> is as wide as its container however short the
-# words are, and that is not what a reader sees. Vertically it is the canvas's
+# a Range per grapheme -- an <h1> is as wide as its container however short
+# the words are, and that is not what a reader sees -- widened by what the
+# canvas's actualBoundingBox says the glyph's ink overhangs its advance box:
+# the shirorekha of Devanagari, Bengali and Gurmukhi type starts a pixel or two
+# left of the first letter's box, and measured from the Range alone it sat in
+# the strip the safe zone exists to keep clear. Vertically it is the same
 # actualBoundingBox for each grapheme hung from the line's baseline -- not the
 # block box, which at line-height .98 is SHORTER than the letters (a "y" hung
 # 15px below the safe zone with nothing to notice) and not the Range's height,
@@ -460,7 +510,7 @@ def render_html(
 # Because the block box is not the ink, FIT also SETTLES each text element
 # every time its size changes: it opens the leading when the ink of two lines
 # would touch (shrinking cannot cure that -- the ink shrinks with the gap), and
-# it pads the block top and bottom by exactly what the ink overshoots, so the
+# it pads the block on every side by exactly what the ink overshoots, so the
 # layout positions the letters and not an abstraction of them.
 FIT_JS = r"""
 (cfg) => {
@@ -488,7 +538,11 @@ FIT_JS = r"""
     if (!m) {
       pen.font = face;
       const t = pen.measureText(g);
-      m = {a: t.actualBoundingBoxAscent / REF, d: t.actualBoundingBoxDescent / REF};
+      // a, d: ink above and below the baseline. l, r: ink beyond the advance
+      // box on either side (never negative: ink inside the box is the box).
+      m = {a: t.actualBoundingBoxAscent / REF, d: t.actualBoundingBoxDescent / REF,
+           l: Math.max(0, t.actualBoundingBoxLeft) / REF,
+           r: Math.max(0, t.actualBoundingBoxRight - t.width) / REF};
       inkCache.set(key, m);
     }
     return m;
@@ -530,8 +584,8 @@ FIT_JS = r"""
               lines.push(line);
             }
             const ink = glyphInk(face, upper ? g.toUpperCase() : g);
-            const glyph = {l: Math.min(...rects.map(r => r.left)) - S.left,
-                           r: Math.max(...rects.map(r => r.right)) - S.left,
+            const glyph = {l: Math.min(...rects.map(r => r.left)) - S.left - ink.l * px,
+                           r: Math.max(...rects.map(r => r.right)) - S.left + ink.r * px,
                            a: ink.a * px, d: ink.d * px};
             line.glyphs.push(glyph);
             line.l = Math.min(line.l, glyph.l); line.r = Math.max(line.r, glyph.r);
@@ -580,12 +634,15 @@ FIT_JS = r"""
       m = measure(el);
     }
     const cs = getComputedStyle(el);
-    const padT = parseFloat(cs.paddingTop) || 0, padB = parseFloat(cs.paddingBottom) || 0;
-    const wantT = Math.max(0, Math.ceil(m.block.t + padT - m.box.t));
-    const wantB = Math.max(0, Math.ceil(m.box.b - (m.block.b - padB)));
-    if (wantT !== padT || wantB !== padB) {
-      el.style.paddingTop = wantT + 'px';
-      el.style.paddingBottom = wantB + 'px';
+    const pad = {top: parseFloat(cs.paddingTop) || 0, bottom: parseFloat(cs.paddingBottom) || 0,
+                 left: parseFloat(cs.paddingLeft) || 0, right: parseFloat(cs.paddingRight) || 0};
+    const over = {top: Math.max(0, Math.ceil(m.block.t + pad.top - m.box.t)),
+                  bottom: Math.max(0, Math.ceil(m.box.b - (m.block.b - pad.bottom))),
+                  left: Math.max(0, Math.ceil(m.block.l + pad.left - m.box.l)),
+                  right: Math.max(0, Math.ceil(m.box.r - (m.block.r - pad.right)))};
+    if (Object.keys(over).some(side => over[side] !== pad[side])) {
+      for (const side of Object.keys(over))
+        el.style['padding-' + side] = over[side] + 'px';
       version++;
     }
   };
@@ -768,8 +825,17 @@ FIT_JS = r"""
   for (const p of parts) sizes[p.cls] = {px: p.px, design: p.design, steps: p.steps};
 
   // What the legibility pass needs to measure the rendered frame: where the
-  // ink of every piece of type is, and what colour it really is once every
-  // opacity above it has been multiplied in.
+  // ink of every piece of type is, line by line, what colour it really is
+  // once every opacity above it has been multiplied in, and whether it sits
+  // on something with a solid background of its own (a panel, a band, the
+  // pill) rather than on the photograph.
+  const solidBehind = (el) => {
+    for (let n = el; n && n !== stage; n = n.parentElement) {
+      const bg = getComputedStyle(n).backgroundColor.match(/[\d.]+/g);
+      if (bg && (bg.length < 4 || parseFloat(bg[3]) >= 0.999)) return true;
+    }
+    return false;
+  };
   const inks = [];
   for (const cls of [...TEXT, 'cta']) {
     for (const el of all('.' + cls)) {
@@ -781,12 +847,16 @@ FIT_JS = r"""
         opacity *= parseFloat(getComputedStyle(n).opacity);
       inks.push({cls, box: m.box, color: cs.color, opacity, px: m.px,
                  leading: Math.round(m.pitch / m.px * 100) / 100,
-                 lines: m.lines.map(n => n.text.trim())});
+                 lines: m.lines.map(n => n.text.trim()),
+                 rows: m.lines.map(n => [n.l, n.base - n.a, n.r, n.base + n.d]),
+                 solid: solidBehind(el)});
     }
   }
   const boxes = {};
   for (const e of elements()) boxes[e.cls] = e.box;
-  return {violations: violations(), sizes, boxes, inks, canvas: [W, H]};
+  const mark = document.querySelector('img.logo');
+  return {violations: violations(), sizes, boxes, inks, canvas: [W, H],
+          logo_solid: mark ? solidBehind(mark) : false};
 }
 """
 
@@ -1123,8 +1193,14 @@ _CSS_RGB = re.compile(r"rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+
 # at the foot, and one plate for "the text" was a dark slab over the middle of
 # the photograph, exactly where the product is and no words are.
 CLUSTER_GAP = 0.07
-# How far a plate reaches past the ink it serves; twice .scrim-text's blur.
-PLATE_FEATHER = 0.06
+# How far a plate reaches past the ink it serves; twice .scrim-text's blur, so
+# the plate is still at ~97% under the last letter. Wide and soft rather than
+# tight and hard: at .06 with a .03 blur the plate on a white photograph was
+# a grey box with the words in it -- legible, and the first thing the owner
+# would ask to have removed. At .10 with a .05 blur the same strength reads
+# as a shadow the words sit in, and the picture shows through its edge.
+PLATE_FEATHER = 0.10
+PLATE_BLUR = 0.05
 # The logo's plate stays inside its clear space (LOGO_CLEAR), which FIT_JS has
 # already proven empty and on the canvas.
 MARK_PLATE_PAD = 0.8 * LOGO_CLEAR
@@ -1214,6 +1290,7 @@ async def _make_legible(
 
     alphas = [0.0] * len(groups)
     logo = report["boxes"].get("logo")
+    logo_solid = bool(report.get("logo_solid"))
     looks: dict | None = None
     mark: dict | None = None
     feather = w * PLATE_FEATHER
@@ -1239,12 +1316,12 @@ async def _make_legible(
         short, stats_for = {}, {}
         for item in report["inks"]:
             ink, opacity = _ink_of(item)
-            stats = legibility.ground(ground, _edges(item["box"]))
+            stats = legibility.ground(ground, item["rows"], item["px"])
             found[item["cls"]] = legibility.contrast_on(ink, opacity, stats)
             stats_for[item["cls"]] = stats
             # A designed ground (panel, pill) gets the measurement slack; a
             # photograph or gradient is held to the bar and plated.
-            slack = legibility.MEASURE_SLACK if legibility.is_flat(stats) else 0.0
+            slack = legibility.MEASURE_SLACK if legibility.designed(item["solid"], stats) else 0.0
             if found[item["cls"]] < legibility.TEXT_CONTRAST - slack:
                 short[item["cls"]] = found[item["cls"]]
 
@@ -1260,9 +1337,9 @@ async def _make_legible(
                     mark = _mark_plate(logo, looks["edge"], 1.0)
                     changed = True
             if not looks["opaque"]:
-                stats = legibility.ground(ground, box)
+                stats = legibility.ground(ground, [box], box[3] - box[1])
                 found["logo"] = legibility.contrast_on(looks["luminance"], 1.0, stats)
-                slack = legibility.MEASURE_SLACK if legibility.is_flat(stats) else 0.0
+                slack = legibility.MEASURE_SLACK if legibility.designed(logo_solid, stats) else 0
                 if found["logo"] < legibility.MARK_CONTRAST - slack:
                     short["logo"] = found["logo"]
 
@@ -1274,8 +1351,10 @@ async def _make_legible(
                 "plates": plates,
                 "mark_plate": mark,
             }
-        if attempt == LEGIBILITY_ROUNDS or "cta" in short:
-            # The CTA's ground is its own pill: no plate can change it.
+        if attempt == LEGIBILITY_ROUNDS or (short and set(short) <= {"cta"}):
+            # The CTA's ground is its own pill: no plate can change it. The
+            # other plates are still laid first, so a refusal reports what a
+            # plate could NOT fix, not a headline number one round would have.
             break
         for n, group in enumerate(groups):
             # Every ground in this group was measured under the plate as it is

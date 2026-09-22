@@ -56,6 +56,47 @@ def test_contrast_maths_is_the_wcag_formula():
     assert compose.readable_on("#123B2E", "not-a-colour") == compose._LIGHT
 
 
+def test_a_palette_colour_is_read_the_way_the_stylesheet_renders_it():
+    """CSS renders '#123', 'rgb(18,59,46)', 'darkgreen' and ' #123B2E ' as the
+    colours they are; the contrast maths saw "not #RRGGBB" and used mid grey,
+    so the brand's white ink became black on its own green panel and the
+    legibility pass laid white plates over the panel to rescue it. Every
+    colour is brought to one form at the boundary; nothing falls back to
+    grey in silence."""
+    for form in (
+        "#123B2E",
+        "#123b2e",
+        " #123B2E ",
+        "#123B2EFF",
+        "rgb(18, 59, 46)",
+        "rgb(18,59,46)",
+    ):
+        assert compose.normalise_colour(form) == "#123B2E", form
+    assert compose.normalise_colour("#123") == "#112233"
+    assert compose.normalise_colour("darkgreen") == "#006400"
+    assert compose.normalise_colour("white") == "#FFFFFF"
+    for junk in ("brand orange", "", None, "#12", "#GGGGGG", 12):
+        assert compose.normalise_colour(junk) is None, junk
+    with pytest.raises(ValueError):
+        compose._luminance("darkgreen")
+    for palette in (
+        {"primary": "rgb(18,59,46)", "accent": "rgb(228,87,46)", "ink": "rgb(255,255,255)"},
+        {"primary": "darkgreen", "accent": "orangered", "ink": "white"},
+        {"primary": " #123B2E ", "accent": "#E4572E", "ink": "#FFFFFF"},
+    ):
+        ctx = compose._brand_context(_brand(palette))
+        assert (
+            ctx["ink"] == "#FFFFFF" and ctx["primary"].startswith("#") and len(ctx["primary"]) == 7
+        )
+        for template in sorted(compose.CTA_ON_PANEL):
+            brief = CreativeBrief.model_validate({**EXAMPLE, "template_id": template})
+            got = _colours(compose.render_html(brief, brief.units()[0], _brand(palette), "data:,"))
+            assert got["headline"] == "#FFFFFF", (palette, template, got)
+    # An unreadable colour gets the default for its role, never mid grey.
+    ctx = compose._brand_context(_brand({"primary": "brand green", "ink": "#FFFFFF"}))
+    assert ctx["primary"] == compose.DEFAULT_PALETTE["primary"]
+
+
 @pytest.mark.parametrize("palette", PALETTES, ids=list(PALETTES))
 @pytest.mark.parametrize("template", sorted(compose.TEMPLATES))
 def test_type_can_always_be_read_against_what_it_sits_on(template, palette):
