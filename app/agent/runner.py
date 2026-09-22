@@ -22,7 +22,7 @@ from app.channels.base import Button
 from app.channels.whatsapp.session_window import seconds_left
 from app.config import settings
 from app.db import repo
-from app.db.models import Account, Brand, Message, WaSession
+from app.db.models import Account, Brand, Brief, Message, WaSession
 from app.db.session import session_scope
 from app.logging import get_logger
 from app.memory import grounding as memory_grounding
@@ -235,6 +235,30 @@ async def run_turn(*, message_id: uuid.UUID, trace: Trace) -> dict[str, Any]:
         return {"ok": False, "reason": "turn_failed", "error": str(exc)[:300]}
 
 
+def rung_rule(k: int) -> str:
+    """The rule for THIS turn, from how many change requests the creative has
+    already had. The owner's demand: the first result needs no revision, a
+    second version is the last, a third is the best we can make and final."""
+    if k == 0:
+        return (
+            "Rung rule: no change has been asked for yet. If they ask for one now, the "
+            "version you make must be the last they need -- read the whole conversation "
+            "for every complaint, fix all of them in ONE call, and confirm what changed."
+        )
+    rule = (
+        f"Rung rule: {k} change request{'s' if k > 1 else ''} already. If they ask for "
+        "another, it is the FINAL version -- maximum care: restate every outstanding wish "
+        "back to them in one line before making it, then make all of them in ONE call. It "
+        "is the last change we make on this creative."
+    )
+    if k >= 2:
+        rule += (
+            " Say so plainly, and offer a fresh creative (create_creative) instead of a "
+            "fourth version."
+        )
+    return rule
+
+
 def _current_brief_block(db, wa_session: WaSession | None) -> str:
     if wa_session is None or not wa_session.active_brief_id:
         return ""
@@ -247,10 +271,17 @@ def _current_brief_block(db, wa_session: WaSession | None) -> str:
         if approved
         else "NOT yet approved -- publish will refuse until they tap"
     )
+    # The rung comes from the lineage in the database, never from session
+    # state: the window closes overnight and the count must not reset with it.
+    brief = db.get(Brief, wa_session.active_brief_id)
+    version = brief.version if brief is not None else 1
+    k = repo.revision_no(db, wa_session.active_brief_id)
     return (
         f"## Current creative\n"
         f"brief_id: {wa_session.active_brief_id}\n"
         f"slides: {len(rows)} -- status: {status}\n"
+        f"Version {version} of this creative; change requests so far: {k}.\n"
+        f"{rung_rule(k)}\n"
         "Use this brief_id for revise_creative, regenerate_image, request_approval and "
         "publish_to_instagram. Do not create a new creative when they are asking for a "
         "change to this one."

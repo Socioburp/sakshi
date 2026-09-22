@@ -557,3 +557,56 @@ async def test_the_regenerate_event_carries_the_prompt_the_words_and_the_new_ver
         mem = db.query(BrandMemory).filter(BrandMemory.brand_id == brand_id).one()
         assert mem.kind == "rejection" and mem.source_ref == f"brief:{redo['brief_id']}"
         assert "slide 2 picture" in mem.content
+
+
+# --------------------------------------------------------------------------- #
+# the ladder is visible to the agent
+# --------------------------------------------------------------------------- #
+def test_the_prompt_teaches_the_ladder():
+    from app.agent.prompts import SYSTEM
+
+    body = SYSTEM.split("## Changes", 1)[1].split("## ", 1)[0]
+    assert "## Changes" in SYSTEM and SYSTEM.index("## Changes") > SYSTEM.index("cheaper tool")
+    for phrase in (
+        "WHOLE conversation",
+        "ONE call",
+        "ONE clarifying question",
+        "Never two",
+        "`owner_request`",
+        "`applied`",
+        "last they need",
+        "FINAL version",
+        "restate every outstanding wish",
+        "fresh creative instead of a fourth version",
+    ):
+        assert phrase in body, phrase
+
+
+def test_the_rung_rule_hardens_with_every_change_request():
+    from app.agent.runner import rung_rule
+
+    assert "last they need" in rung_rule(0) and "FINAL" not in rung_rule(0)
+    assert "FINAL version" in rung_rule(1) and "restate every outstanding wish" in rung_rule(1)
+    assert "fresh creative" not in rung_rule(1)
+    assert "fresh creative (create_creative)" in rung_rule(2) and "2 change requests" in rung_rule(
+        2
+    )
+    assert "fourth version" in rung_rule(3)
+
+
+def test_the_current_creative_block_counts_from_the_database(monkeypatch):
+    from app.agent import runner
+
+    rows = _chain(3)
+    db = _Rows(*rows)
+    monkeypatch.setattr(
+        runner.repo,
+        "creatives_for_brief",
+        lambda db_, bid: [types.SimpleNamespace(approved_at=None)],
+    )
+    sess = types.SimpleNamespace(active_brief_id=rows[-1].id, state={})
+    block = runner._current_brief_block(db, sess)
+    assert "Version 3 of this creative; change requests so far: 2." in block
+    assert "FINAL version" in block and "fresh creative" in block
+    assert str(rows[-1].id) in block and "NOT yet approved" in block
+    assert runner._current_brief_block(db, types.SimpleNamespace(active_brief_id=None)) == ""
