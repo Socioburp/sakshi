@@ -225,6 +225,34 @@ async def test_a_frame_that_cannot_be_made_legible_is_refused_with_its_numbers(
     assert str(err.value.measured["headline"]) in str(err.value)
 
 
+async def test_a_panel_ink_that_only_just_clears_the_bar_is_not_refused_by_the_measurement(
+    chromium,
+):
+    """White on #767676 is 4.54:1 -- a pass, by the same formula the frame is
+    then measured with. Reading it back off 8-bit pixels must not flip it."""
+    palette = {"primary": "#767676", "accent": "#E4572E", "ink": "#FFFFFF"}
+    assert 4.5 <= compose.contrast("#FFFFFF", "#767676") < 4.6
+    brief = _brief("split_card", "Weekend Sale", "Cold-pressed", "Order now")
+    _, report = await compose.compose_with_report(
+        brief, brief.units()[0], _brand(palette=palette), _flat((120, 130, 110)), "image/png"
+    )
+    found = report["legibility"]["contrast"]
+    assert report["legibility"]["plates"] == []
+    assert min(found.values()) >= legibility.TEXT_CONTRAST - legibility.MEASURE_SLACK, found
+
+
+def test_the_slack_is_for_designed_grounds_only():
+    """A panel or a pill that passed on paper is not plated over a rounding
+    error; a photograph or gradient a hair under the bar IS -- the plate is
+    ours to strengthen, and one more round took 4.48 to 4.6."""
+    panel = {"bright": 0.1897, "dark": 0.1845}  # #777777 vs #767676: one 8-bit level
+    photo = {"bright": 0.42, "dark": 0.11}
+    assert legibility.is_flat(panel) and not legibility.is_flat(photo)
+    assert legibility.bar_for("logo") == legibility.MARK_CONTRAST
+    assert legibility.bar_for("headline") == legibility.TEXT_CONTRAST
+    assert 0 < legibility.MEASURE_SLACK <= 0.05
+
+
 def test_the_plate_is_computed_from_the_contrast_target():
     white_paper = {"bright": 1.0, "dark": 1.0}
     alpha = legibility.plate_alpha(1.0, white_paper, 0.0, legibility.TEXT_CONTRAST)

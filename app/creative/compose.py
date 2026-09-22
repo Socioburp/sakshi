@@ -1242,7 +1242,10 @@ async def _make_legible(
             stats = legibility.ground(ground, _edges(item["box"]))
             found[item["cls"]] = legibility.contrast_on(ink, opacity, stats)
             stats_for[item["cls"]] = stats
-            if found[item["cls"]] < legibility.TEXT_CONTRAST:
+            # A designed ground (panel, pill) gets the measurement slack; a
+            # photograph or gradient is held to the bar and plated.
+            slack = legibility.MEASURE_SLACK if legibility.is_flat(stats) else 0.0
+            if found[item["cls"]] < legibility.TEXT_CONTRAST - slack:
                 short[item["cls"]] = found[item["cls"]]
 
         changed = False
@@ -1257,10 +1260,10 @@ async def _make_legible(
                     mark = _mark_plate(logo, looks["edge"], 1.0)
                     changed = True
             if not looks["opaque"]:
-                found["logo"] = legibility.contrast_on(
-                    looks["luminance"], 1.0, legibility.ground(ground, box)
-                )
-                if found["logo"] < legibility.MARK_CONTRAST:
+                stats = legibility.ground(ground, box)
+                found["logo"] = legibility.contrast_on(looks["luminance"], 1.0, stats)
+                slack = legibility.MEASURE_SLACK if legibility.is_flat(stats) else 0.0
+                if found["logo"] < legibility.MARK_CONTRAST - slack:
                     short["logo"] = found["logo"]
 
         if not short and not changed:
@@ -1290,6 +1293,15 @@ async def _make_legible(
             on_dark = legibility.contrast_ratio(looks["luminance"], _luminance(_DARK))
             colour = _LIGHT if on_white >= on_dark else _DARK
             mark = _mark_plate(logo, colour, 1.0 if mark else MARK_PLATE_ALPHA)
+    if all(v >= legibility.bar_for(cls) - legibility.MEASURE_SLACK for cls, v in short.items()):
+        # Every plate is as strong as it goes and what is left is rounding:
+        # 4.48 read off 8-bit pixels is not a frame the owner can tell from 4.5.
+        log.info("legibility_within_slack", template=template, measured=short)
+        return {
+            "contrast": {cls: round(ratio, 2) for cls, ratio in found.items()},
+            "plates": plates,
+            "mark_plate": mark,
+        }
     log.error("legibility_refused", template=template, position=position, measured=short)
     raise LegibilityError(short, position=position)
 

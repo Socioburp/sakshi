@@ -36,6 +36,8 @@ ground actually behind each word -- photograph, gradient, plate, panel,
 whatever is there -- and holds it to WCAG 4.5:1. Where it falls short,
 `plate_alpha` says exactly how strong the plate under that cluster of words
 has to be, from the contrast target rather than from a cap chosen by eye.
+(That half uses numpy for the percentiles; it is already a dependency of the
+image path.)
 """
 
 from __future__ import annotations
@@ -224,6 +226,22 @@ def scrim_boost(image: bytes, template: str | None = None) -> tuple[float, dict]
 TEXT_CONTRAST = 4.5
 # WCAG 1.4.11 for a graphical object: the logo against what it sits on.
 MARK_CONTRAST = 3.0
+# A brand ink that readable_on() passed at exactly 4.50:1 on its panel is read
+# back off the frame through 8-bit pixels and a second implementation of the
+# same formula. That round trip must never turn a pass into a refusal.
+#
+# The slack is for DESIGNED grounds only -- a panel, the pill -- where the
+# colour passed on paper and a plate is the wrong tool (a dark blur on a flat
+# brand colour). Over a photograph or a gradient the bar is held exactly: the
+# gradient and the plate are ours, so a shortfall there is fixed, not excused.
+# Applying it before plating shipped a brand name at 4.48:1 over a white
+# photograph that one more plate round had been taking to 4.6. It is also the
+# tolerance at the very end, when every plate is as strong as it goes and a
+# value lands a hair under the bar through the same rounding.
+MEASURE_SLACK = 0.03
+# A ground whose bright and dark ends are this close (relative luminance) is a
+# flat designed colour, not a picture. One 8-bit level at mid grey is ~0.005.
+FLAT_GROUND = 0.01
 # Light ink fails against the BRIGHT part of its ground and dark ink against
 # the dark part, so the ground is read at both ends and the worse one counts.
 # The 90th percentile, not the maximum: one specular highlight behind a serif
@@ -326,6 +344,16 @@ def plate_alpha(ink: float, stats: dict[str, float], current: float, target: flo
         have = _encoded(stats["dark"])
         keep = min(1.0, (1 - _encoded(limit)) / max(1 - have, 1e-6))
     return round(min(LOCAL_MAX, max(current, 1 - (1 - current) * keep)), 3)
+
+
+def is_flat(stats: dict[str, float]) -> bool:
+    """A designed solid ground -- a panel, a pill -- as opposed to a photograph
+    or a gradient, which vary across the box."""
+    return stats["bright"] - stats["dark"] <= FLAT_GROUND
+
+
+def bar_for(cls: str) -> float:
+    return MARK_CONTRAST if cls == "logo" else TEXT_CONTRAST
 
 
 def plate_colour(ink: float) -> str:
