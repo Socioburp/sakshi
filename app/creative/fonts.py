@@ -14,6 +14,7 @@ painting a stand-in.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
@@ -57,6 +58,76 @@ def vendored() -> frozenset[str]:
 
 def local_href() -> str | None:
     return f"{LOCAL_HOST}/fonts.css" if vendored() else None
+
+
+_FACE = re.compile(r"@font-face\s*\{(.*?)\}", re.DOTALL)
+_FAMILY = re.compile(r"font-family:\s*['\"]?([^;'\"]+)")
+_RANGE = re.compile(r"unicode-range:\s*([^;]+)")
+_SPAN = re.compile(r"^U\+([0-9A-F?]+)(?:-([0-9A-F]+))?$", re.IGNORECASE)
+
+
+@lru_cache(maxsize=1)
+def vendored_ranges() -> dict[str, tuple[tuple[int, int], ...]]:
+    """Every code-point span each vendored family declares it can set, read
+    off fonts.css -- the same declarations the browser consults. A face with
+    no unicode-range claims everything."""
+    if not vendored():
+        return {}
+    out: dict[str, list[tuple[int, int]]] = {}
+    for block in _FACE.findall((LOCAL_DIR / "fonts.css").read_text(encoding="utf-8")):
+        family = _FAMILY.search(block)
+        if not family:
+            continue
+        spans = out.setdefault(family.group(1).strip(), [])
+        declared = _RANGE.search(block)
+        if not declared:
+            spans.append((0, 0x10FFFF))
+            continue
+        for part in declared.group(1).split(","):
+            m = _SPAN.match(part.strip())
+            if not m:
+                continue
+            lo = int(m.group(1).replace("?", "0"), 16)
+            hi = int(m.group(2), 16) if m.group(2) else int(m.group(1).replace("?", "F"), 16)
+            spans.append((lo, hi))
+    return {family: tuple(spans) for family, spans in out.items()}
+
+
+# Characters that set no glyph: whitespace, joiners, the soft hyphen and the
+# byte-order mark. The same list FIT_JS skips when it looks for tofu.
+def _invisible(cp: int) -> bool:
+    return (
+        cp <= 0x20
+        or cp in (0xA0, 0xAD, 0x2060, 0xFEFF)
+        or 0x2000 <= cp <= 0x200F
+        or 0x2028 <= cp <= 0x202F
+    )
+
+
+def unsettable(text: str) -> list[str]:
+    """The characters of `text` that no vendored face in its stack declares.
+
+    The stack is what the compositor will actually build for this text (see
+    `css_stack`): a Noto face for each script in it, then plain Noto Sans,
+    which every brand's fallback ends in and whose Latin coverage is a
+    superset of every brand face's. '→' is not in it -- Google Fonts' Latin
+    subset carries ↑ and ↓ only -- so a CTA of 'Order now →' passed the brief
+    and was refused by the compositor as tofu, with the agent told the copy
+    did not fit. Empty when nothing is vendored: there is nothing to judge by.
+    """
+    ranges = vendored_ranges()
+    if not ranges:
+        return []
+    families = [*script_families(text), "Noto Sans"]
+    spans = [span for family in families for span in ranges.get(family, ())]
+    found: list[str] = []
+    for ch in text:
+        cp = ord(ch)
+        if _invisible(cp) or ch in found:
+            continue
+        if not any(lo <= cp <= hi for lo, hi in spans):
+            found.append(ch)
+    return found
 
 
 HEADING_WEIGHTS = "600;700;800"

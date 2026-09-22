@@ -21,6 +21,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.creative import fonts
+
 AspectRatio = Literal["1:1", "4:5", "9:16"]
 Intent = Literal[
     "promo",
@@ -79,6 +81,12 @@ _QUOTED = re.compile(
 # own, and nothing measured them. So they are stopped HERE, before any layout
 # or charge, with a message the agent can act on. Emoji are welcome in
 # caption.body, which Instagram sets, not us.
+#
+# These blocks are named so the refusal can be, and because a few of their
+# code points ARE declared by an Indic face's symbols subset (a flag, a
+# control character) and would otherwise slip through the coverage check
+# below. Everything else -- an arrow, a maths sign, a geometric shape -- is
+# refused by `fonts.unsettable`, straight from what the vendored faces declare.
 _PICTOGRAPHS = (
     (0x2300, 0x23FF),  # technical pictographs: watch, hourglass, alarm clock
     (0x2600, 0x27BF),  # miscellaneous symbols and dingbats: stars, hearts, ticks
@@ -103,16 +111,23 @@ def _unsettable(text: str) -> list[str]:
         control = unicodedata.category(ch) in ("Cc", "Cf", "Co", "Cs") and ch not in _JOINERS
         if (pictograph or control) and ch not in found:
             found.append(ch)
+    for ch in fonts.unsettable(text):
+        if ch not in found:
+            found.append(ch)
     return found
 
 
 def settable_copy(field: str, value: str | None) -> str | None:
     """Copy as the compositor will set it: whitespace collapsed (a newline in a
-    headline is a space to the browser anyway), and refused when it carries a
-    character no face of ours has."""
+    headline is a space to the browser anyway), refused when it carries a
+    character no face of ours has, and refused when a headline has nothing
+    left -- a slide whose headline was three spaces used to be composed and
+    charged with no headline at all."""
     if value is None:
         return None
     text = " ".join(value.split())
+    if field == "headline" and not text:
+        raise ValueError("headline is empty once whitespace is removed.")
     bad = _unsettable(text)
     if bad:
         shown = ", ".join(
@@ -122,7 +137,8 @@ def settable_copy(field: str, value: str | None) -> str | None:
         raise ValueError(
             f"{field} contains characters the brand's typefaces cannot set: {shown}. "
             f"Rewrite the {field} in plain words and punctuation -- no emoji, pictographs, "
-            f"dingbat symbols or invisible control characters. Emoji are fine in caption.body."
+            f"arrows, dingbat symbols or invisible control characters. "
+            f"Emoji are fine in caption.body."
         )
     return text
 
@@ -285,10 +301,7 @@ class CreativeBrief(BaseModel):
     @field_validator("headline", "subhead", "cta")
     @classmethod
     def copy_can_be_set(cls, v: str | None, info) -> str | None:
-        text = settable_copy(info.field_name, v)
-        if info.field_name == "headline" and not text:
-            raise ValueError("headline is empty once whitespace is removed.")
-        return text
+        return settable_copy(info.field_name, v)
 
     @model_validator(mode="after")
     def carousel_consistency(self) -> CreativeBrief:
