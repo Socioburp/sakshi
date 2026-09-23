@@ -358,6 +358,11 @@ def _no_logo_line(brand: Any) -> str:
     return ""
 
 
+# Six is what a person can hold. A longer list reads as a wall the model skims,
+# and the rules that matter (layout, light) are the first ones written.
+MAX_SEEDED_RULES = 6
+
+
 def _brand_block(brand: Any) -> str:
     def val(attr, default=""):
         v = getattr(brand, attr, None)
@@ -440,11 +445,6 @@ def _brand_block(brand: Any) -> str:
             "and call `update_brand` -- do not interrogate them for it.)"
         )
     return "\n".join(lines)
-
-
-# Six is what a person can hold. A longer list read as a wall the model skims,
-# and the rules that matter (layout, light) are the first ones written.
-MAX_SEEDED_RULES = 6
 
 
 ONBOARDING_HINT = (

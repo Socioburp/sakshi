@@ -74,6 +74,10 @@ DRIVE_FOLDER_IN_URL = re.compile(r"/folders/([A-Za-z0-9_-]{8,})")
 DRIVE_ID_PARAM = re.compile(r"[?&]id=([A-Za-z0-9_-]{8,})")
 DRIVE_PAGE = 200
 HTTP_TIMEOUT = 60.0
+# A photograph is a few megabytes. Anything this size is a scan, a PSD exported
+# with every layer or a mistake, and reading it is how a run that should take
+# two minutes runs out of memory on someone's laptop instead.
+MAX_FILE_BYTES = 40_000_000
 
 
 class SourceError(RuntimeError):
@@ -190,10 +194,13 @@ def read_drive(url: str) -> list[SourceFile]:
             f"folder {folder_id} lists {len(listing)} item(s) and none of them is an image. "
             "Sub-folders are not read: point the command at the folder the files are in."
         )
-    return [
-        SourceFile(name=f["name"], data=drive_fetch(f["id"], settings.google_api_key))
-        for f in sorted(files, key=lambda f: f["name"])
-    ]
+    out = []
+    for f in sorted(files, key=lambda f: f["name"]):
+        if int(f.get("size") or 0) > MAX_FILE_BYTES:
+            print(f"  skipped  {f['name']}  (over {MAX_FILE_BYTES // 1_000_000}MB, not downloaded)")
+            continue
+        out.append(SourceFile(name=f["name"], data=drive_fetch(f["id"], settings.google_api_key)))
+    return out
 
 
 def read_folder(spec: str) -> list[SourceFile]:
@@ -203,7 +210,13 @@ def read_folder(spec: str) -> list[SourceFile]:
     paths = sorted(p for p in root.iterdir() if p.is_file() and _looks_like_image(p.name, None))
     if not paths:
         raise SourceError(f"{root} holds no images ({', '.join(sorted(IMAGE_SUFFIXES))}).")
-    return [SourceFile(name=p.name, data=p.read_bytes()) for p in paths]
+    out = []
+    for p in paths:
+        if p.stat().st_size > MAX_FILE_BYTES:
+            print(f"  skipped  {p.name}  (over {MAX_FILE_BYTES // 1_000_000}MB, not read)")
+            continue
+        out.append(SourceFile(name=p.name, data=p.read_bytes()))
+    return out
 
 
 def read_source(spec: str) -> list[SourceFile]:

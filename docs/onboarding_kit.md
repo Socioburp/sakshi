@@ -142,7 +142,8 @@ Read it like this:
 - **stored** — it is in, and the label in brackets is what the system thinks
   it is. A wrong label is worth fixing: it is what the free photo lane matches
   the owner's words against.
-- **skipped** — already there, or the same file twice in the folder. Normal.
+- **skipped** — already there, the same file twice in the folder, or over 40MB
+  (that is a scan or a layered export, not a photograph). Normal.
 - **REFUSED** — nothing was stored for it. The reason is written to be
   forwarded to the client more or less as it stands.
 - **Brand kit** — what the reference set decided. The counts in braces show

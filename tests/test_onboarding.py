@@ -332,7 +332,10 @@ class _Drive:
             return _Resp(content=self.files[url.rsplit("/", 1)[1]])
         if self.status >= 400:
             return _Resp(self.status)
-        listing = [{"id": n, "name": n, "mimeType": "image/jpeg"} for n in self.files]
+        listing = [
+            {"id": n, "name": n, "mimeType": "image/jpeg", "size": str(len(d))}
+            for n, d in self.files.items()
+        ]
         listing.append({"id": "notes.txt", "name": "notes.txt", "mimeType": "text/plain"})
         return _Resp(payload={"files": listing})
 
@@ -646,3 +649,19 @@ async def test_a_dry_run_writes_nothing_at_all(tmp_path, monkeypatch, capsys):
 
 async def _describe_photo(data, mime):
     return {"kind": "product", "label": "cold pressed coconut oil 500ml", "cut_out_ok": True}
+
+
+def test_a_file_too_big_to_be_a_photograph_is_skipped_not_loaded(tmp_path, monkeypatch):
+    """One enormous export in a folder must not take a two-minute run out of
+    memory on the laptop it is being run from -- and on Drive it must not even
+    be downloaded."""
+    big, small = _image(), _image(size=(700, 700))
+    assert len(big) > len(small)
+    monkeypatch.setattr(onboard, "MAX_FILE_BYTES", (len(big) + len(small)) // 2)
+
+    local = onboard.read_source(_folder(tmp_path / "p", {"huge.jpg": big, "ok.jpg": small}))
+    assert [f.name for f in local] == ["ok.jpg"]
+
+    monkeypatch.setattr(onboard.settings, "google_api_key", "test-key")
+    monkeypatch.setattr(onboard.httpx, "Client", _Drive({"huge.jpg": big, "ok.jpg": small}))
+    assert [f.name for f in onboard.read_source(DRIVE_URL)] == ["ok.jpg"]
