@@ -345,3 +345,34 @@ async def test_redoing_one_slide_records_that_one_slide_changed(world, monkeypat
     assert redo["ok"] and redo["slides_ok"] == 3, redo
     (ev,) = [r for r in recorded if r["kind"] == "regenerate"]
     assert list(ev["meta"]["diff"]) == ["slides[2].visual_direction"]
+
+
+async def test_a_revision_the_provider_refused_to_send_is_not_reported_as_shown(world, monkeypatch):
+    """recompose used to drop _show()'s verdict and hard-code shown_to_user
+    True, so when the send was refused (window closed, provider rejected it)
+    the agent told the owner "here is the new version" about a picture that
+    never arrived. generate() reports the same case honestly; so must this."""
+    _clean(monkeypatch)
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert first["ok"] and first["shown_to_user"] is True
+
+    async def refused(url, caption=""):
+        return False
+
+    monkeypatch.setattr(world["ctx"], "show", refused)
+    res = await pipeline.recompose(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        changes={"headline": "Aaj hi lein"},
+        owner_request="Hindi headline",
+    )
+    assert res["ok"] is True and res["applied"] == {
+        "headline": [EXAMPLE["headline"], "Aaj hi lein"]
+    }
+    assert res["shown_to_user"] is False
+    assert "NOT deliver" in res["note"] and "Do not describe it" in res["note"]
+    revised = [
+        r for r in world["rows"].values()
+        if getattr(r, "brief_id", None) == uuid.UUID(res["brief_id"])
+    ]  # fmt: skip
+    assert [r.status for r in revised] == ["ready"], "made and kept; only the send was refused"

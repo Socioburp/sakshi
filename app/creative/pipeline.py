@@ -865,13 +865,13 @@ async def recompose(
     if refused:
         return refused
     urls = [str(u) for u in results]
-    await _show(ctx, brief, urls)
-    return {
+    delivered = await _show(ctx, brief, urls)
+    out = {
         "ok": True,
         "brief_id": str(new_brief_id),
         "creative_ids": [str(cid) for _, cid, _ in pairs],
         "image_urls": urls,
-        "shown_to_user": True,
+        "shown_to_user": delivered,
         "credits_charged": 0,
         "applied": diff,
         "version": version,
@@ -882,6 +882,17 @@ async def recompose(
             "exactly what changed -- confirm it to the owner in one line."
         ),
     }
+    if not delivered:
+        # The same honesty generate() keeps: a revision whose send was refused
+        # (window closed, provider rejected it) used to be reported as shown,
+        # and the owner was told "here is the new version" about a picture
+        # that never arrived. The version exists and is free; say that.
+        out["note"] = (
+            "The revision was made but WhatsApp did NOT deliver it (send failed or the "
+            "24h window is closed). Tell the owner in one line that it is ready and "
+            "will be sent as soon as they reply. Do not describe it."
+        )
+    return out
 
 
 async def regenerate_image(
