@@ -2331,7 +2331,10 @@ def _resolve_photos(
     candidates = list(
         db.scalars(
             select(BrandAsset)
-            .where(BrandAsset.brand_id == brand_id, BrandAsset.kind != "logo")
+            .where(
+                BrandAsset.brand_id == brand_id,
+                BrandAsset.kind.notin_(("logo", "reference")),
+            )
             .order_by(BrandAsset.created_at.desc())
             .limit(60)
         )

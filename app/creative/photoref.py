@@ -35,8 +35,13 @@ import re
 from typing import Any, Protocol
 
 # Photos of the real business. "logo" is excluded: the mark is composited as a
-# lockup, never used as a background.
-USABLE_KINDS = {"product", "shop", "team", "other"}  # = ck_brand_assets_kind minus logo
+# lockup, never used as a background. "reference" is excluded too: those are
+# finished creatives our own designers made at onboarding, complete with their
+# own headline and their own logo. Compositing over one puts two headlines and
+# two marks on the same post; it is read for STYLE by refstyle.py and never
+# used as a picture. This is a whitelist on purpose -- a kind nobody has
+# thought about yet is not a photograph until someone says it is.
+USABLE_KINDS = {"product", "shop", "team", "other"}
 
 # Below this, upscaling shows before the creative does.
 MIN_SHORT_EDGE = 800
