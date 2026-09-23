@@ -857,15 +857,20 @@ async def recompose(
             pairs.append((slide, c.id, old.background_key))
         brand_snapshot = _snapshot(db, brand)
 
-    urls = await asyncio.gather(
-        *(_recompose_one(ctx, brief, slide, cid, key, brand_snapshot) for slide, cid, key in pairs)
+    results = await asyncio.gather(
+        *(_recompose_one(ctx, brief, slide, cid, key, brand_snapshot) for slide, cid, key in pairs),
+        return_exceptions=True,
     )
-    await _show(ctx, brief, list(urls))
+    refused = _contain_revision(pairs, results)
+    if refused:
+        return refused
+    urls = [str(u) for u in results]
+    await _show(ctx, brief, urls)
     return {
         "ok": True,
         "brief_id": str(new_brief_id),
         "creative_ids": [str(cid) for _, cid, _ in pairs],
-        "image_urls": list(urls),
+        "image_urls": urls,
         "shown_to_user": True,
         "credits_charged": 0,
         "applied": diff,
@@ -1407,6 +1412,55 @@ async def _show(ctx: ToolContext, brief: CreativeBrief, urls: list[str]) -> bool
     if not ok:
         log.error("creative_not_delivered", account_id=str(ctx.account_id), urls=len(urls))
     return ok
+
+
+_LEGIBILITY_HINT = (
+    "Nothing was sent. The words fit the layout, but on THIS photograph they cannot be made "
+    "to read: the plates behind the type are as strong as they go and the contrast is still "
+    "short. Shorter copy will not cure it. Offer the owner a layout that sets the words on a "
+    "solid panel instead of over the picture (template_id split_card, free), or a different "
+    "picture (regenerate_image, 1 credit)."
+)
+
+
+def _contain_revision(
+    pairs: list[tuple[Slide, uuid.UUID, str]], results: list
+) -> dict[str, Any] | None:
+    """The tool result for a revision whose render was refused, or None.
+
+    The layout gate measures on a blank background, so it cannot see what
+    compose measures on the real photograph: type that will not separate from
+    what is behind it (compose.LegibilityError), or a browser that went away.
+    Such a refusal used to escape recompose as a raw exception -- the agent got
+    a stack trace, the owner got silence, and the new Creative rows stayed
+    'composing' for ever. A revision is one answer to one request, so one
+    refused slide refuses the whole version: nothing is sent, the slides that
+    raised are marked failed, and the version they already have is untouched.
+    """
+    failures: list[str] = []
+    legibility = True
+    for (slide, cid, _), res in zip(pairs, results, strict=True):
+        if not isinstance(res, BaseException):
+            continue
+        log.error(
+            "revision_slide_failed",
+            creative_id=str(cid),
+            position=slide.position,
+            error=str(res)[:300],
+        )
+        _mark_failed(cid, str(res))
+        failures.append(f"slide {slide.position}: {res}")
+        legibility = legibility and isinstance(res, compose.LegibilityError)
+    if not failures:
+        return None
+    if legibility:
+        return {
+            "ok": False,
+            "reason": "legibility",
+            "errors": failures[:3],
+            "hint": _LEGIBILITY_HINT,
+        }
+    return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
 
 
 def _mark_failed(creative_id: uuid.UUID, error: str, *, cost_micros: int = 0) -> None:
