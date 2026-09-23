@@ -19,7 +19,7 @@ from app.agent import buttons
 from app.agent.context import ToolContext
 from app.billing import credits
 from app.creative import brandkit, compose, pipeline
-from app.creative.brief import CreativeBrief, Grounding, check_brand_rules
+from app.creative.brief import CreativeBrief, Grounding, check_brand_rules, settable_copy
 from app.db import repo
 from app.db.models import (
     Brand,
@@ -748,6 +748,23 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         for key, value in args.items():
             if key not in settable or value in (None, "", [], {}):
                 continue
+            if key == "name":
+                # The name is set in type on every creative that has no logo,
+                # so it is held to the same bar as copy: a name saved with an
+                # emoji in it refused every render the brand asked for after.
+                try:
+                    value = settable_copy("name", str(value))
+                except ValueError as exc:
+                    return {
+                        "ok": False,
+                        "reason": "name_cannot_be_set",
+                        "error": str(exc)[:300],
+                        "hint": (
+                            "Nothing was saved. The brand name is set in type on every "
+                            "creative, so it can carry only characters the typefaces can set: "
+                            "save it without the emoji or symbol and call the tool again."
+                        ),
+                    }
             if key in ("no_logo", "daily_nudge"):
                 brand.template_prefs = {**(brand.template_prefs or {}), key: bool(value)}
             elif key == "substantiated":

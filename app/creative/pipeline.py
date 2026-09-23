@@ -269,6 +269,37 @@ _FONT_HINT = (
     "more with the same brief; if it fails again, tell the owner there is a technical "
     "problem on our end and that they have not been charged."
 )
+# A brand name with an emoji in it is not a LONG name, and the agent told the
+# owner "your name is too long" for "Sri Stores ✨" -- so the hint names the
+# character instead, and the one action that cures it.
+_MARK_TOFU_HINT = (
+    "Nothing was made and nothing was charged. The COPY IS FINE -- do not shorten or "
+    "rewrite it. With no logo on file the brand NAME is set on every creative, and the name "
+    "contains {chars} which the brand's typefaces cannot set. The name is not too long: "
+    "remove that character (write it in plain words if it means something) and save the "
+    "name with update_brand(name=...), or ask the owner to send their logo; then call the "
+    "tool again with the same copy."
+)
+
+
+def _tofu_in_name(problems: list[dict]) -> list[str]:
+    """The characters, as 'U+XXXX (x)', that FIT_JS could not set in the brand
+    name -- from the 'tofu:brandline:U+....' details of the refused slides."""
+    seen: list[str] = []
+    for p in problems:
+        for detail in p.get("detail") or []:
+            kind, _, rest = detail.partition(":")
+            subject, _, code = rest.partition(":")
+            if kind != "tofu" or subject != "brandline" or not code.startswith("U+"):
+                continue
+            try:
+                ch = chr(int(code[2:], 16))
+            except ValueError:
+                continue
+            shown = f"{code} ({ch!r})" if ch.isprintable() else code
+            if shown not in seen:
+                seen.append(shown)
+    return seen
 
 
 def _about_the_mark(violation: str) -> bool:
@@ -359,12 +390,13 @@ async def layout_gate(brief: CreativeBrief, units: list[Slide], brand_snapshot) 
         return None
     log.warning("layout_gate_refused", slides=[p["slide"] for p in problems])
     if all(p["about"] == "brand_mark" for p in problems):
+        tofu = _tofu_in_name(problems)
         return {
             "ok": False,
             "reason": "brand_mark_does_not_fit",
             "charged": 0,
             "slides": problems,
-            "hint": _MARK_HINT,
+            "hint": _MARK_TOFU_HINT.format(chars=", ".join(tofu)) if tofu else _MARK_HINT,
         }
     hint = _COPY_HINT
     if any(d.startswith("tofu:") for p in problems for d in p["detail"]):

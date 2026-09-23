@@ -165,11 +165,12 @@ MIN_SHAPE_CONTRAST = 2.0
 # to the export size, which gives visibly crisper stems, cleaner counters in
 # 32px body type and a cleaner logo edge. It used to ship at 1 because 2x was
 # measured at 1.1s -> 4.7s per slide -- but most of that was not the render: it
-# was the fit search running on a 2x page and the resampled PNG being written
-# with optimize=True (1.3s on its own) for a PNG that only ever goes to
-# export_jpeg. Now the layout proof stays at 1x (geometry is identical at any
-# device scale), only the one delivered screenshot is 2x, and the intermediate
-# PNG is written fast.
+# was the resampled PNG being written with optimize=True (1.3s on its own) for
+# a PNG that only ever goes to export_jpeg. Now the pre-charge layout proof
+# (check_layout) runs at 1x, where geometry is identical at any device scale;
+# compose() re-runs the same fit on the 2x page it screenshots, because the
+# page it measures must be the page it ships, and the intermediate PNG is
+# written fast.
 #
 # Measured on the same machine, same lower_third slide with a logo, together
 # with the legibility pass (two more 1x screenshots of the frame):

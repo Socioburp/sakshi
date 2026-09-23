@@ -567,6 +567,44 @@ async def test_a_name_that_cannot_be_set_is_not_blamed_on_the_copy(chromium):
     assert "Shorten the headline" not in res["hint"]
 
 
+async def test_an_emoji_in_the_brand_name_is_named_not_called_too_long(chromium):
+    """'Sri Stores ✨' refused every render as tofu:brandline, and the hint
+    said the name was too long -- the agent asked for a SHORTER name, the
+    owner sent 'Sri ✨', and it was refused again. The hint names the
+    character and the one call that cures it."""
+    brief = _brief("lower_third", "Weekend Sale", "Fresh stock", "Order now")
+    res = await pipeline.layout_gate(brief, brief.units(), _brand("Sri Stores 大"))
+    assert res["reason"] == "brand_mark_does_not_fit" and res["charged"] == 0
+    assert "U+5927 ('大')" in res["hint"] and "update_brand(name=" in res["hint"]
+    rest = res["hint"].replace("not too long", "")
+    assert "not too long" in res["hint"] and "too long" not in rest
+    assert pipeline._tofu_in_name([{"detail": ["tofu:brandline:U+200B"]}]) == ["U+200B"]
+    assert pipeline._tofu_in_name([{"detail": ["too_many_lines:brandline"]}]) == []
+
+
+async def test_update_brand_refuses_a_name_the_faces_cannot_set(monkeypatch):
+    """The same bar at the door: a name is copy set on every creative, so a
+    name with a pictograph is refused where a headline with one is."""
+    import types
+    from contextlib import contextmanager
+
+    from app.agent import tools as T
+
+    brand = types.SimpleNamespace(name="Old", template_prefs={}, palette={}, category="food")
+
+    @contextmanager
+    def scope():
+        yield types.SimpleNamespace(get=lambda model, key: brand)
+
+    monkeypatch.setattr(T, "session_scope", scope)
+    ctx = types.SimpleNamespace(brand_id="b")
+    res = await T._update_brand(ctx, {"name": "Sri Stores ✨"})
+    assert res["ok"] is False and res["reason"] == "name_cannot_be_set"
+    assert "U+2728" in res["error"] and brand.name == "Old", "nothing was saved"
+    res = await T._update_brand(ctx, {"name": "  Sri   Stores "})
+    assert res["ok"] and brand.name == "Sri Stores", "whitespace collapsed, as it is set"
+
+
 async def test_a_typeface_that_did_not_load_is_not_blamed_on_the_copy(chromium, monkeypatch):
     monkeypatch.setattr(compose.settings, "compose_require_fonts", True)
     brand = _brand()
