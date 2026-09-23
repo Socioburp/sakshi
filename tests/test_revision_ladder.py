@@ -479,12 +479,22 @@ def test_the_backfill_stitches_a_chain_written_before_the_column(owner):
         )
         db.add(leaf)
         db.flush()
-        ids = (root.id, mid.id, leaf.id)
+        # A picture revision saved by the old bug: version 1, no parent. The
+        # link was never written, so the backfill cannot honestly stitch it.
+        stray = Brief(account_id=account_id, brand_id=brand_id, payload=EXAMPLE)
+        db.add(stray)
+        db.flush()
+        ids = (root.id, mid.id, leaf.id, stray.id)
         assert all(db.get(Brief, i).root_brief_id is None for i in ids)
         db.execute(sql_text(mod.BACKFILL))
         db.expire_all()
-        assert [db.get(Brief, i).root_brief_id for i in ids] == [root.id] * 3
+        assert [db.get(Brief, i).root_brief_id for i in ids] == [root.id] * 3 + [stray.id]
         assert repo.revision_no(db, leaf.id) == 2
+        assert repo.revision_no(db, stray.id) == 0, "a root of its own, not a crash"
+        # Re-running it is harmless: a stitched row is never rewritten.
+        db.execute(sql_text(mod.BACKFILL))
+        db.expire_all()
+        assert db.get(Brief, leaf.id).root_brief_id == root.id
 
 
 def _session_with_brief(db, account_id, brand_id, *, approved=False, expired=False):
