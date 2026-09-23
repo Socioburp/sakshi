@@ -14,10 +14,13 @@ model the client gets a creative with two headlines on it.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import io
 import json
 import sys
+import types
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -540,3 +543,106 @@ def test_the_seeded_rules_stay_short_enough_to_read():
     system = prompts.build_system(brand)
     assert "rule 5" in system and "rule 6" not in system
     assert prompts.MAX_SEEDED_RULES == 6
+
+
+def test_an_owner_who_asks_for_another_look_is_not_left_with_the_seeded_family():
+    """The family belongs to the look. Left behind, it would keep pointing at a
+    layout the look they just asked for does not use."""
+    brand = _Brand(palette={"primary": "#123B2E"})
+    brandkit.seed_from_references(brand, refstyle.aggregate([_ref(layout="frame_card")] * 3))
+    assert brand.template_prefs["family"][0] == "frame_card"
+
+    brandkit.apply(brand, "bold")
+    assert "family" not in brand.template_prefs
+    assert brand.template_prefs["look"] == "bold"
+    # What the set actually showed is still true of their own posts.
+    assert brand.template_prefs["lessons"]
+
+
+# --------------------------------------------------------------------------- #
+# the whole run, with only the database and R2 faked
+# --------------------------------------------------------------------------- #
+class _FakeDb:
+    def __init__(self, brand, rows):
+        self.brand = brand
+        self.rows = rows
+
+    def get(self, model, key):
+        return self.brand
+
+    def scalars(self, stmt):
+        return types.SimpleNamespace(all=lambda: [])
+
+    def add(self, row):
+        self.rows.append(row)
+
+    def flush(self):
+        pass
+
+
+def _fake_session(brand, rows):
+    @contextmanager
+    def scope():
+        yield _FakeDb(brand, rows)
+
+    return scope
+
+
+def _run_args(tmp_path, dry_run):
+    products = _folder(tmp_path / "p", {"coconut_oil-500ml.jpg": _image()})
+    refs = _folder(tmp_path / "r", {"post1.jpg": _image(colour=(90, 120, 100))})
+    return argparse.Namespace(brand=BRAND, refs=refs, products=products, dry_run=dry_run)
+
+
+async def test_a_brand_with_no_model_still_gets_its_photos_and_is_told_why_not_the_style(
+    tmp_path, monkeypatch, capsys
+):
+    """Our team's photos are most of the value and need no vision model at all.
+    A run that refused them because the style pass could not run would leave the
+    client with nothing on the day they paid."""
+    brand = _Brand(palette={"primary": "#123B2E"})
+    brand.template_prefs = {}
+    rows: list = []
+    monkeypatch.setattr(onboard, "session_scope", _fake_session(brand, rows))
+    monkeypatch.setattr(onboard.r2, "put", lambda key, data, mime=None: f"https://cdn.test/{key}")
+    monkeypatch.setattr(onboard.settings, "anthropic_api_key", "")
+    monkeypatch.setattr(onboard.settings, "anthropic_model", "")
+
+    code = await onboard.run(_run_args(tmp_path, dry_run=False))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "the style pass was skipped" in out
+    assert [r.kind for r in rows] == ["product", "reference"]
+    # The kit is not guessed at from nothing: it stays as it was.
+    assert brand.template_prefs == {}
+    assert "unchanged (no reference creative was read)" in out
+
+
+async def test_a_dry_run_writes_nothing_at_all(tmp_path, monkeypatch, capsys):
+    brand = _Brand(palette={"primary": "#123B2E"})
+    brand.template_prefs = {}
+    rows: list = []
+    monkeypatch.setattr(onboard, "session_scope", _fake_session(brand, rows))
+    monkeypatch.setattr(onboard.settings, "anthropic_api_key", "k")
+    monkeypatch.setattr(onboard.settings, "anthropic_model", "m")
+
+    async def _describe(data):
+        return _ref(layout="frame_card", light="moody")
+
+    def _no(*a, **kw):
+        raise AssertionError("a dry run must not touch R2")
+
+    monkeypatch.setattr(onboard.refstyle, "describe", _describe)
+    monkeypatch.setattr(onboard.logo_analysis, "describe_photo", _describe_photo)
+    monkeypatch.setattr(onboard.r2, "put", _no)
+
+    code = await onboard.run(_run_args(tmp_path, dry_run=True))
+    out = capsys.readouterr().out
+    assert code == 0 and rows == []
+    assert brand.template_prefs == {}
+    # ...but it still shows the kit it would set, which is what a dry run is for.
+    assert "frame_card" in out and "DRY RUN" in out
+
+
+async def _describe_photo(data, mime):
+    return {"kind": "product", "label": "cold pressed coconut oil 500ml", "cut_out_ok": True}

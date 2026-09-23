@@ -152,12 +152,19 @@ def apply(brand, look_key: str | None = None) -> Look:
     from app.creative import shotplan
 
     shoot = shotplan.pick_style(look.key, str(getattr(brand, "name", "") or ""))
-    brand.template_prefs = {
+    prefs = {
         **(brand.template_prefs or {}),
         "look": look.key,
         "signature": look.signature,
         "shoot": shoot,
     }
+    # The preferred family belongs to the look. A family seeded from an
+    # onboarding reference set survives a category guess -- nothing calls this
+    # with a look once one is set -- but not an owner who asks for a different
+    # look outright: leaving it would point them at a layout their new look
+    # does not use. seed_from_references sets it again, after this.
+    prefs.pop("family", None)
+    brand.template_prefs = prefs
     return look
 
 
