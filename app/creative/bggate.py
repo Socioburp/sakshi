@@ -107,12 +107,22 @@ PROMPT = (
 
 INSPECT_ATTEMPTS = 3
 INSPECT_LONG_EDGE = 1024
+# Enough for the JSON and a short note, and no more: the inspector is asked
+# for a verdict, not an essay, and output tokens are the expensive half.
+INSPECT_MAX_TOKENS = 300
 
 
 @dataclass(slots=True)
 class Verdict:
     reasons: list[str] = field(default_factory=list)
     notes: str = ""
+    # What the inspector charged for this look. Vision calls used to be free
+    # in the ledger and nowhere else: resp.usage was read and dropped, so a
+    # creative's cost_micros told the owner the picture cost $0.29 when the
+    # gate around it had spent more on top. Every caller adds this on.
+    cost_micros: int = 0
+    # Only a scored rubric fills this in (see `scored` on parse/inspect).
+    score: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -142,8 +152,15 @@ def _thumbnail(image: bytes) -> bytes:
         return out.getvalue()
 
 
-def parse(text: str) -> Verdict:
-    """Strict: every key must be present and boolean, or there is no verdict."""
+def parse(text: str, keys: tuple[str, ...] = REASONS, *, scored: bool = False) -> Verdict:
+    """Strict: every key must be present and boolean, or there is no verdict.
+
+    `keys` is the rubric being answered -- this module's REASONS by default,
+    finalgate's own list when the finished composite is what was looked at.
+    `scored` additionally requires an integer 0-100, so a judge that answers
+    "score": "pretty good" is an outage, not a pass. Strictness is the whole
+    design: a gate that shrugs is a gate that is not there.
+    """
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
         raise InspectionUnavailable(f"no JSON in the inspector's answer: {text[:120]!r}")
@@ -151,19 +168,48 @@ def parse(text: str) -> Verdict:
         data: dict[str, Any] = json.loads(text[start : end + 1])
     except json.JSONDecodeError as exc:
         raise InspectionUnavailable(f"unparseable verdict: {text[:120]!r}") from exc
-    missing = [k for k in REASONS if not isinstance(data.get(k), bool)]
+    missing = [k for k in keys if not isinstance(data.get(k), bool)]
     if missing:
         raise InspectionUnavailable(f"verdict is missing {missing}")
-    return Verdict([k for k in REASONS if data[k]], str(data.get("notes") or "")[:200])
+    score = None
+    if scored:
+        score = data.get("score")
+        # bool is an int in Python, and "score": true is not a score.
+        if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 100:
+            raise InspectionUnavailable(f"verdict has no score in 0-100: {score!r}")
+    return Verdict(
+        [k for k in keys if data[k]],
+        str(data.get("notes") or "")[:200],
+        score=score,
+    )
 
 
-async def _ask(image: bytes) -> str:
+def cost_micros(usage: Any) -> int:
+    """What one inspection cost, in micro-dollars, from the reply's own usage.
+
+    Priced off the settings rather than a constant because the inspector model
+    is a setting: the same code runs against whichever id ANTHROPIC_MODEL
+    names. An outage, or an SDK that reports no usage, costs 0 here rather
+    than guessing -- an invented number on the ledger is worse than a missing
+    one.
+    """
+    if usage is None:
+        return 0
+    read = int(getattr(usage, "input_tokens", 0) or 0)
+    wrote = int(getattr(usage, "output_tokens", 0) or 0)
+    return round(
+        read * settings.inspector_input_micros_per_ktok / 1000
+        + wrote * settings.inspector_output_micros_per_ktok / 1000
+    )
+
+
+async def _ask(image: bytes, prompt: str = PROMPT) -> tuple[str, int]:
     from anthropic import AsyncAnthropic
 
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
     resp = await client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=300,
+        max_tokens=INSPECT_MAX_TOKENS,
         messages=[
             {
                 "role": "user",
@@ -176,16 +222,33 @@ async def _ask(image: bytes) -> str:
                             "data": base64.b64encode(image).decode(),
                         },
                     },
-                    {"type": "text", "text": PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }
         ],
     )
-    return "".join(b.text for b in resp.content if b.type == "text")
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    return text, cost_micros(getattr(resp, "usage", None))
 
 
-async def inspect(image: bytes) -> Verdict:
-    """Look at one generated background. Raises InspectionUnavailable, never guesses."""
+async def inspect(
+    image: bytes,
+    *,
+    prompt: str = PROMPT,
+    keys: tuple[str, ...] = REASONS,
+    scored: bool = False,
+) -> Verdict:
+    """Look at one image against one rubric. Raises InspectionUnavailable, never guesses.
+
+    The defaults are this module's own: the generated BACKGROUND, before any
+    text or mark is laid on it. finalgate passes its own prompt and keys to
+    look at the finished composite through the same client, the same retries
+    and the same refusal to guess.
+
+    An attempt the model answered cost money even when the answer was
+    unusable, so the spend accumulates across attempts and rides home on the
+    Verdict.
+    """
     if not available():
         raise InspectionUnavailable(
             "no vision model configured (ANTHROPIC_API_KEY / ANTHROPIC_MODEL); generated "
@@ -193,9 +256,14 @@ async def inspect(image: bytes) -> Verdict:
         )
     small = await asyncio.to_thread(_thumbnail, image)
     last: Exception | None = None
+    spent = 0
     for attempt in range(1, INSPECT_ATTEMPTS + 1):
         try:
-            return parse(await _ask(small))
+            text, cost = await _ask(small, prompt)
+            spent += cost
+            verdict = parse(text, keys, scored=scored)
+            verdict.cost_micros = spent
+            return verdict
         except Exception as exc:  # noqa: BLE001 - API error or unusable answer: ask again
             last = exc
             log.warning("inspection_retry", attempt=attempt, error=repr(exc)[:200])

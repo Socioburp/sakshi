@@ -14,9 +14,15 @@ import json
 import types
 
 import pytest
+from PIL import Image
 
-from app.creative import compose, compositeqa, legibility
+from app.creative import bggate, compose, compositeqa, finalgate, legibility
 from app.creative.brief import EXAMPLE, CreativeBrief
+
+
+async def _noop(*a, **k):
+    """Retry backoff, skipped: these tests pin the refusal, not the waiting."""
+
 
 CANVAS = [1080, 1350]
 FULL = [0, 0, 1080, 1350]
@@ -495,3 +501,166 @@ async def test_ordinary_copy_on_an_ordinary_photograph_passes(chromium, template
         focus=subject,
     )
     assert a.ok, f"{template}/{kind}: {a.faults} {a.notes}"
+
+
+# --------------------------------------------------------------------------- #
+# the vision gate on the exported JPEG: strict, or there is no verdict
+# --------------------------------------------------------------------------- #
+def _answer(score=88, notes="", **flags) -> str:
+    """The inspector's reply, in the shape finalgate demands. Copied from
+    tests/test_background_gate.py's _answer so the two gates are pinned the
+    same way -- they share a client, retries and a refusal to guess."""
+    body = {k: False for k in finalgate.KEYS} | flags
+    body |= {"score": score, "notes": notes}
+    return "Here you go:\n```json\n" + json.dumps(body) + "\n```"
+
+
+def test_a_clean_composite_passes_and_carries_its_score():
+    verdict = bggate.parse(_answer(score=91), finalgate.KEYS, scored=True)
+    assert verdict.ok and verdict.score == 91
+
+
+def test_a_flag_rejects_the_composite():
+    verdict = bggate.parse(_answer(text_cut_off=True, artefacts=True), finalgate.KEYS, scored=True)
+    assert verdict.reasons == ["text_cut_off", "artefacts"] and not verdict.ok
+
+
+def test_a_non_boolean_flag_is_not_a_pass():
+    with pytest.raises(bggate.InspectionUnavailable, match="missing"):
+        bggate.parse(_answer(logo_problem="maybe"), finalgate.KEYS, scored=True)
+
+
+def test_a_missing_key_is_not_a_pass():
+    body = {k: False for k in finalgate.KEYS if k != "looks_unfinished"}
+    body |= {"score": 90, "notes": ""}
+    with pytest.raises(bggate.InspectionUnavailable, match="looks_unfinished"):
+        bggate.parse(json.dumps(body), finalgate.KEYS, scored=True)
+
+
+@pytest.mark.parametrize("score", [-1, 101, "high", None, 88.5, True])
+def test_a_score_that_is_not_an_integer_0_to_100_is_not_a_pass(score):
+    """A judge that answers "score": true would otherwise pass as 1 -- bool is
+    an int in Python, and that is exactly the kind of shrug a fail-closed gate
+    exists to refuse."""
+    body = {k: False for k in finalgate.KEYS} | {"score": score, "notes": ""}
+    with pytest.raises(bggate.InspectionUnavailable, match="score"):
+        bggate.parse(json.dumps(body), finalgate.KEYS, scored=True)
+
+
+def test_a_missing_score_is_not_a_pass():
+    body = {k: False for k in finalgate.KEYS} | {"notes": ""}
+    with pytest.raises(bggate.InspectionUnavailable, match="score"):
+        bggate.parse(json.dumps(body), finalgate.KEYS, scored=True)
+
+
+def test_the_background_gates_own_rubric_still_needs_no_score():
+    """The refactor is meant to be invisible to the gate that was already
+    there: same call, same defaults, same verdict."""
+    body = {k: False for k in bggate.REASONS} | {"watermark": True, "notes": "a logo"}
+    verdict = bggate.parse(json.dumps(body))
+    assert verdict.reasons == ["watermark"] and verdict.score is None
+
+
+def test_the_composite_rubric_is_the_one_that_was_asked_for():
+    assert set(finalgate.KEYS) == {
+        "text_cut_off",
+        "text_hard_to_read",
+        "text_covers_subject",
+        "subject_cut_off",
+        "logo_problem",
+        "stray_text_in_photo",
+        "artefacts",
+        "looks_unfinished",
+    }
+    for key in finalgate.KEYS:
+        assert key in finalgate.prompt_for()
+    assert finalgate.PICTURE_REASONS < set(finalgate.KEYS)
+
+
+def test_the_supplied_copy_reaches_the_inspector():
+    """Without it the inspector cannot tell the headline it is meant to see
+    from lettering the image model invented, which is the one fault no
+    measurement can catch."""
+    prompt = finalgate.prompt_for("Weekend Sale", "ghar jaisa shudh", "Order now", "Kadamba")
+    for word in ("Weekend Sale", "ghar jaisa shudh", "Order now", "Kadamba"):
+        assert word in prompt
+    assert "not the supplied copy" in prompt
+
+
+def test_a_regeneration_prompt_keeps_the_picture_wording_and_adds_the_layout():
+    """One vocabulary: the picture faults reuse the background gate's own
+    sentences, and the layout sentence is the one the first prompt used."""
+    out = finalgate.corrected(
+        "a brass diya on marble",
+        ["artefacts", "text_covers_subject"],
+        template="lower_third",
+    )
+    assert bggate.CORRECTIONS["visible_artefacts"] in out
+    assert finalgate.CORRECTIONS["text_covers_subject"] in out
+    assert out != "a brass diya on marble" and len(out) > 100
+
+
+def test_a_correction_is_added_once():
+    once = finalgate.corrected("a diya", ["artefacts", "artefacts"])
+    assert once.count(finalgate.CORRECTIONS["artefacts"]) == 1
+    assert finalgate.corrected(once, ["artefacts"]) == once
+    assert finalgate.corrected("a diya", []) == "a diya"
+
+
+def test_the_gate_fails_closed_without_a_vision_model(monkeypatch):
+    monkeypatch.setattr(bggate.settings, "anthropic_api_key", "")
+    assert finalgate.available() is False
+
+
+async def test_an_inspector_that_cannot_be_reached_fails_closed(monkeypatch):
+    monkeypatch.setattr(bggate.settings, "anthropic_api_key", "k")
+    monkeypatch.setattr(bggate.settings, "anthropic_model", "m")
+    monkeypatch.setattr(bggate, "INSPECT_ATTEMPTS", 1)
+
+    async def down(image, prompt=""):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(bggate, "_ask", down)
+    monkeypatch.setattr(bggate.asyncio, "sleep", _noop)
+    buf = io.BytesIO()
+    Image.new("RGB", (1080, 1350), (20, 20, 20)).save(buf, "JPEG")
+    with pytest.raises(bggate.InspectionUnavailable, match="failed"):
+        await finalgate.inspect(buf.getvalue())
+
+
+# --------------------------------------------------------------------------- #
+# what the inspector charged is on the ledger
+# --------------------------------------------------------------------------- #
+class _Usage:
+    def __init__(self, read, wrote):
+        self.input_tokens, self.output_tokens = read, wrote
+
+
+def test_an_inspection_is_priced_from_the_replys_own_usage():
+    """bggate read resp.usage and dropped it, so a creative's cost_micros told
+    the owner the picture cost $0.29 when the gates around it had spent more."""
+    cost = bggate.cost_micros(_Usage(1200, 60))
+    assert cost == round(1200 * 3000 / 1000 + 60 * 15000 / 1000) == 4500
+
+
+def test_a_reply_with_no_usage_costs_nothing_rather_than_a_guess():
+    assert bggate.cost_micros(None) == 0
+
+
+async def test_the_spend_of_every_attempt_rides_home_on_the_verdict(monkeypatch):
+    """A retry the model answered cost money even though the answer was
+    unusable. Charging only for the attempt that worked loses the rest."""
+    monkeypatch.setattr(bggate.settings, "anthropic_api_key", "k")
+    monkeypatch.setattr(bggate.settings, "anthropic_model", "m")
+    monkeypatch.setattr(bggate.asyncio, "sleep", _noop)
+    replies = iter([("not json at all", 1_000), (_answer(score=80), 4_500)])
+
+    async def ask(image, prompt=""):
+        return next(replies)
+
+    monkeypatch.setattr(bggate, "_ask", ask)
+    buf = io.BytesIO()
+    Image.new("RGB", (1080, 1350), (20, 20, 20)).save(buf, "JPEG")
+    verdict = await finalgate.inspect(buf.getvalue(), headline="Weekend Sale")
+    assert verdict.ok and verdict.score == 80
+    assert verdict.cost_micros == 5_500, "both calls are on the ledger"

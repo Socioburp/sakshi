@@ -134,6 +134,33 @@ class Settings(BaseSettings):
     # a prompt that fails three times is a prompt problem, not bad luck. The cap
     # stops the RETRYING -- it never lowers the settings of a call. 0 = no cap.
     imagegen_gate_budget_micros: int = 900_000
+    # The final check: the deterministic composite QA and the vision gate that
+    # follows it both run on the EXPORTED JPEG of every delivered slide, on
+    # every lane -- generated, owner photo, product studio, reused and
+    # recomposed. Nothing is stored 'ready' or sent until both have passed.
+    # Off only where there is no inspector to call (the test suite fakes it
+    # the way it fakes the background gate); a creative made with it off is a
+    # creative nobody looked at, which is the hole this closes.
+    composite_gate_enabled: bool = True
+    # How many times one slide may be re-composed into another layout to fix
+    # what the final check found. Each is ~1s of Chromium and NO vendor call,
+    # which is the point: the owner buys a second picture only when no
+    # arrangement of the one they have is good enough. Two is enough to reach
+    # a layout of the other kind from any starting layout.
+    composite_free_variants: int = 2
+    # ...and how many corrected regenerations the picture may be worth after
+    # that. Only the GENERATED lane ever spends this: an owner's photograph, a
+    # product studio built from one and a reused background are never
+    # re-bought, because the owner did not ask us to replace their picture.
+    # Held inside imagegen_gate_budget_micros like every other vendor call.
+    composite_paid_retries: int = 1
+    # What the inspector costs, in micro-dollars per thousand tokens, for the
+    # ledger only. The model is a setting (ANTHROPIC_MODEL), so its price has
+    # to be one too. The defaults are Sonnet-class list prices: $3/Mtok in,
+    # $15/Mtok out. A 819x1024 JPEG is ~1.2k input tokens, so one look costs
+    # about $0.008 -- under 3% of a $0.2883 picture.
+    inspector_input_micros_per_ktok: int = 3000
+    inspector_output_micros_per_ktok: int = 15000
     # Seconds of silence after which the owner is told the job is still going.
     # A metric to watch and a message to send -- never a limit on the output.
     slow_notice_s: int = 60
