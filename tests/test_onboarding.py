@@ -591,6 +591,10 @@ def _fake_session(brand, rows):
     return scope
 
 
+async def _describe_photo(data, mime):
+    return {"kind": "product", "label": "cold pressed coconut oil 500ml", "cut_out_ok": True}
+
+
 def _run_args(tmp_path, dry_run):
     products = _folder(tmp_path / "p", {"coconut_oil-500ml.jpg": _image()})
     refs = _folder(tmp_path / "r", {"post1.jpg": _image(colour=(90, 120, 100))})
@@ -645,10 +649,6 @@ async def test_a_dry_run_writes_nothing_at_all(tmp_path, monkeypatch, capsys):
     assert brand.template_prefs == {}
     # ...but it still shows the kit it would set, which is what a dry run is for.
     assert "frame_card" in out and "DRY RUN" in out
-
-
-async def _describe_photo(data, mime):
-    return {"kind": "product", "label": "cold pressed coconut oil 500ml", "cut_out_ok": True}
 
 
 def test_a_file_too_big_to_be_a_photograph_is_skipped_not_loaded(tmp_path, monkeypatch):
