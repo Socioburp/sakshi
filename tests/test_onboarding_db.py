@@ -98,11 +98,14 @@ def test_a_reference_creative_is_never_a_candidate_photo(brand):
     from app.creative.pipeline import _resolve_photos
     from app.db.session import session_scope
 
-    brief = CreativeBrief.model_validate(EXAMPLE)
+    # Words with meaning in them: photoref throws away "weekend" and "sale", so
+    # the stock example headline matches nothing and would prove nothing.
+    brief = CreativeBrief.model_validate({**EXAMPLE, "headline": "Kaju katli box, fresh today"})
+    label = "kaju katli box"
     with session_scope() as db:
-        ref = _asset(db, brand, "reference", brief.headline, f"onboarding/{brand}/reference/b.jpg")
+        ref = _asset(db, brand, "reference", label, f"onboarding/{brand}/reference/b.jpg")
         _asset(db, brand, "logo", "Logo", f"onboarding/{brand}/photo/logo.jpg")
-        photo = _asset(db, brand, "product", brief.headline, f"onboarding/{brand}/photo/c.jpg")
+        photo = _asset(db, brand, "product", label, f"onboarding/{brand}/photo/c.jpg")
 
         # The reference's label is the headline itself, so on words alone it
         # would outscore the product photo and take the slide.
