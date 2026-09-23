@@ -100,6 +100,17 @@ CORRECTIONS: dict[str, str] = {
     ),
 }
 
+# The deterministic checker's codes answer to the same sentences. A regeneration
+# is asked for by whichever of the two refused the frame, and a prompt that
+# corrected only the inspector's half would buy a second picture with the
+# measured fault still in it.
+CORRECTIONS |= {
+    "contrast_below_bar": CORRECTIONS["text_hard_to_read"],
+    "scrim_saturated": CORRECTIONS["text_hard_to_read"],
+    "text_over_subject": CORRECTIONS["text_covers_subject"],
+    "subject_cut_by_window": CORRECTIONS["subject_cut_off"],
+}
+
 
 def prompt_for(
     headline: str = "",

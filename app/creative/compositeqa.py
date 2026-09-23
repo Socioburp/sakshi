@@ -273,6 +273,8 @@ def assess(
     metrics.contrast = dict(legible.get("contrast") or {})
     metrics.scrim_saturated = _saturated(legible)
 
+    # Summed rather than unioned because FIT_JS has already refused any render
+    # whose elements overlap each other, so no pixel is counted twice.
     inks = ink_boxes(report)
     if _area(win_box):
         over = sum(_overlap(ink, win_box) for ink in inks)

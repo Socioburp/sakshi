@@ -1045,3 +1045,46 @@ async def test_a_revision_the_final_check_refuses_tells_the_agent_what_to_do(wor
     assert "another photo" in res["hint"] or "different layout" in res["hint"]
     assert world["images"] == [], "nothing of a refused revision reaches the owner"
     assert len(world["provider"].requests) == 1, "and it never bought its way out"
+
+
+async def test_the_inspector_is_shown_the_bytes_the_client_receives(world, monkeypatch):
+    """Not the PNG before export, and not a re-render: the exported JPEG
+    itself. A check on a proxy for the deliverable cannot see the faults the
+    export introduces, and this package exists because nothing had ever looked
+    at what the client actually gets."""
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"]
+    ((shown, copy),) = world["inspected"]
+    stored = [v for k, v in world["blobs"].items() if k.endswith("composed.jpg")]
+    assert len(stored) == 1
+    assert shown == stored[0][0], "the same bytes, not a second render of them"
+    with Image.open(io.BytesIO(shown)) as im:
+        assert im.format == "JPEG"
+    # ...and it was told what the card is supposed to say.
+    assert copy["headline"] == EXAMPLE["headline"]
+    assert copy["cta"] == EXAMPLE["cta"] and copy["brand"] == "Kadamba Naturals"
+
+
+def test_the_inspector_sees_a_1024px_copy_and_the_deliverable_is_untouched():
+    """Scaled for the inspector only. The 1080x1350 JPEG that ships is never
+    the thing that was resized."""
+    buf = io.BytesIO()
+    Image.new("RGB", (1080, 1350), (90, 110, 100)).save(buf, "JPEG", quality=93)
+    original = buf.getvalue()
+    small = bggate._thumbnail(original)
+    with Image.open(io.BytesIO(small)) as im:
+        assert max(im.size) == bggate.INSPECT_LONG_EDGE == 1024
+        assert im.size == (819, 1024), "the 4:5 post, long edge 1024"
+        assert im.format == "JPEG"
+    assert len(small) < len(original)
+
+
+def test_a_measured_fault_corrects_the_prompt_too():
+    """A regeneration is asked for by whichever half refused the frame. A
+    prompt that answered only the inspector would buy a second picture with
+    the measured fault still in it."""
+    out = finalgate.corrected("a brass diya on marble", ["contrast_below_bar"])
+    assert out != "a brass diya on marble"
+    assert finalgate.CORRECTIONS["text_hard_to_read"] in out
+    for code in ("contrast_below_bar", "scrim_saturated", "text_over_subject"):
+        assert code in finalgate.CORRECTIONS, code
