@@ -133,7 +133,7 @@ def test_the_generation_frame_matches_the_window_within_two_pixels_and_every_lim
 
 
 @pytest.mark.parametrize("kind", ["single", "story"])
-@pytest.mark.parametrize("template", WINDOWED)
+@pytest.mark.parametrize("template", sorted(compose.TEMPLATES))
 async def test_a_picture_generated_for_the_window_lands_in_it_whole(chromium, template, kind):
     """frame_card cut a bottle generated for the full 4:5 frame to a green
     stripe: cap and base gone. Generated for the measured window, the cap is
@@ -150,6 +150,13 @@ async def test_a_picture_generated_for_the_window_lands_in_it_whole(chromium, te
     assert out["photo_window"] == list(win)
     im = Image.open(io.BytesIO(png)).convert("RGB")
     assert im.size == (w, h)
+    assert compose.image_size(compose.export_jpeg(png, (w, h))) == (w, h)
+    if template in FULL_BLEED:
+        # The window is the canvas and the frame its exact ratio: nothing to
+        # crop. The pixels under a full-bleed layout's own scrim (a .76 black
+        # foot on lower_third) are the layout's, so the probe stops here.
+        assert win == (0, 0, w, h) and gen.crop_for(size, (w, h)) == 0.0
+        return
     x = (win[0] + win[2]) // 2
     wh = win[3] - win[1]
     assert _near(im.getpixel((x, win[1] + int(wh * 0.09))), (30, 30, 30)), "the cap is visible"
@@ -160,7 +167,6 @@ async def test_a_picture_generated_for_the_window_lands_in_it_whole(chromium, te
     for py in (win[1] + int(wh * 0.02), win[3] - int(wh * 0.04)):
         px = im.getpixel((x, py))
         assert px[0] > px[1] > px[2] and not _near(px, (60, 100, 60), 40), ("margin", py, px)
-    assert compose.image_size(compose.export_jpeg(png, (w, h))) == (w, h)
 
 
 async def test_a_generated_picture_of_another_shape_is_refused_not_cropped(chromium):
