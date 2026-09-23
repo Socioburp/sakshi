@@ -36,17 +36,31 @@ class _Rows:
     def get(self, model, key):
         return self.rows.get(key)
 
+    def flush(self):
+        pass
+
+
+_ACCOUNT, _BRAND = uuid.uuid4(), uuid.uuid4()
+
 
 def _chain(n: int, *, broken_at: int | None = None):
     """n briefs, each the child of the one before. `broken_at` leaves that
     version's parent link unset -- the picture-revision bug this package fixes."""
     rows, parent = [], None
     for i in range(1, n + 1):
+        parent_id = None if (parent is None or broken_at == i) else parent.id
         row = types.SimpleNamespace(
             id=uuid.uuid4(),
-            parent_brief_id=None if (parent is None or broken_at == i) else parent.id,
+            account_id=_ACCOUNT,
+            brand_id=_BRAND,
+            payload=dict(EXAMPLE),
+            status="draft",
+            parent_brief_id=parent_id,
+            root_brief_id=(parent.root_brief_id if parent_id else None),
             version=i,
         )
+        if row.root_brief_id is None:
+            row.root_brief_id = row.id
         rows.append(row)
         parent = row
     return rows
@@ -207,6 +221,59 @@ def test_an_empty_owner_request_is_stored_as_nothing_asked():
     assert _owner_request({"owner_request": "   "}) is None
     assert _owner_request({}) is None
     assert _owner_request({"owner_request": "x" * 400}) == "x" * 300
+
+
+# --------------------------------------------------------------------------- #
+# approval closes the loop
+# --------------------------------------------------------------------------- #
+def test_the_approve_vote_records_which_rung_it_was_won_on(monkeypatch):
+    from app.insights import votes
+
+    recorded: list[dict] = []
+    monkeypatch.setattr(votes, "record", lambda db, **kw: recorded.append(kw))
+    rows = _chain(3)
+    db = _Rows(*rows)
+
+    votes.approve(db, str(rows[-1].id), remember=False)
+    votes.approve(db, str(rows[0].id), remember=False)
+
+    third, first = (r["meta"] for r in recorded)
+    assert third["revisions_before_approval"] == 2 and third["first_time_right"] is False
+    assert third["version"] == 3 and third["root_brief_id"] == str(rows[0].id)
+    assert first["revisions_before_approval"] == 0 and first["first_time_right"] is True
+    assert first["version"] == 1 and first["root_brief_id"] == str(rows[0].id)
+    assert all(r["kind"] == "approve" for r in recorded)
+
+
+def test_a_root_written_before_the_column_still_names_itself_on_approval(monkeypatch):
+    from app.insights import votes
+
+    recorded: list[dict] = []
+    monkeypatch.setattr(votes, "record", lambda db, **kw: recorded.append(kw))
+    (root,) = _chain(1)
+    root.root_brief_id = None  # a pre-0014 row the backfill has not reached
+    votes.approve(_Rows(root), str(root.id), remember=False)
+    assert recorded[0]["meta"]["root_brief_id"] == str(root.id)
+
+
+def test_approval_lands_on_the_brief_not_only_on_its_slides(monkeypatch):
+    rows = _chain(2)
+    slides = [
+        types.SimpleNamespace(approved_at=None, approved_via=None, status="ready") for _ in range(2)
+    ]
+    monkeypatch.setattr(repo, "creatives_for_brief", lambda db, bid: slides)
+    db = _Rows(*rows)
+
+    stranger = uuid.uuid4()
+    assert repo.mark_approved(db, brief_id=str(rows[-1].id), via="button", account_id=stranger) == 0
+    assert rows[-1].status == "draft", "a stranger's tap approves nothing"
+
+    assert repo.mark_approved(db, brief_id=str(rows[-1].id), via="button", account_id=_ACCOUNT) == 2
+    assert rows[-1].status == "approved" and all(s.status == "approved" for s in slides)
+    assert rows[0].status == "draft", "only the version they tapped on"
+    assert repo.mark_approved(db, brief_id=str(rows[-1].id), via="button", account_id=_ACCOUNT) == 0
+    assert rows[-1].status == "approved", "a second tap changes nothing"
+    assert repo.mark_approved(db, brief_id="not-a-uuid", via="button") == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -557,6 +624,49 @@ async def test_the_regenerate_event_carries_the_prompt_the_words_and_the_new_ver
         mem = db.query(BrandMemory).filter(BrandMemory.brand_id == brand_id).one()
         assert mem.kind == "rejection" and mem.source_ref == f"brief:{redo['brief_id']}"
         assert "slide 2 picture" in mem.content
+
+
+async def test_approval_after_one_change_is_recorded_as_not_first_time_right(
+    owner, blobs, chromium
+):
+    """The webhook's path on a 'Post to Instagram' tap: repo.mark_approved,
+    then votes.approve. The 'approve' event is where "was the first result
+    good enough" is answered, so it must say which rung it was won on."""
+    from app.db.models import CreativeEvent
+    from app.db.session import session_scope
+    from app.insights import votes
+
+    account_id, brand_id = owner
+    ctx = _ctx(account_id, brand_id)
+    v1 = await pipeline.generate(ctx, CreativeBrief.model_validate(EXAMPLE))
+    v2 = await pipeline.recompose(
+        ctx,
+        brief_id=uuid.UUID(v1["brief_id"]),
+        changes={"headline": "Aaj hi lein"},
+        owner_request="headline in Hindi",
+    )
+    assert v2["ok"], v2
+    with session_scope() as db:
+        stamped = repo.mark_approved(
+            db, brief_id=v2["brief_id"], via="button", account_id=account_id
+        )
+        assert stamped == 1
+        votes.approve(db, v2["brief_id"], remember=False)
+
+    root, leaf = _brief(v1["brief_id"]), _brief(v2["brief_id"])
+    assert (root.status, leaf.status) == ("superseded", "approved")
+    with session_scope() as db:
+        ev = (
+            db.query(CreativeEvent)
+            .filter(CreativeEvent.brand_id == brand_id, CreativeEvent.kind == "approve")
+            .one()
+        )
+        assert ev.brief_id == leaf.id
+        m = ev.meta
+        assert m["revisions_before_approval"] == 1 and m["first_time_right"] is False
+        assert m["version"] == 2 and m["root_brief_id"] == v1["brief_id"]
+        assert m["template"] == "centered_overlay", "the taste facts are still there"
+        assert [b.status for b in repo.lineage(db, leaf.id)] == ["superseded", "approved"]
 
 
 # --------------------------------------------------------------------------- #

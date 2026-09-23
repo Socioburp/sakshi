@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import Brief
+from app.db.repo import revision_no
 from app.insights.events import facts_of, record
 from app.logging import get_logger
 
@@ -62,13 +63,25 @@ def approve(db: Session, brief_id: str, *, remember: bool = True) -> None:
     b = _brief(db, brief_id)
     if b is None:
         return
+    # Which rung the approval was won on. "The first result must need no
+    # revision" is only a demand until it is measured: this is the row that
+    # says whether version 1 was good enough, or how many times the owner had
+    # to send it back first. Counted from the lineage, not from anything the
+    # session remembers, so a window that closed overnight cannot reset it.
+    k = revision_no(db, b.id)
     record(
         db,
         kind="approve",
         account_id=b.account_id,
         brand_id=b.brand_id,
         brief_id=b.id,
-        meta=facts_of(b.payload or {}),
+        meta={
+            **facts_of(b.payload or {}, version=b.version),
+            "revisions_before_approval": k,
+            "first_time_right": k == 0,
+            # A root written before migration 0014 backfilled it still names itself.
+            "root_brief_id": str(b.root_brief_id or b.id),
+        },
     )
     if remember:
         _remember(db, b, "style_anchor", _approval_text(b))
@@ -88,7 +101,7 @@ def change_words(db: Session, brief_id: str, account_id: uuid.UUID) -> None:
         account_id=b.account_id,
         brand_id=b.brand_id,
         brief_id=b.id,
-        meta=facts_of(b.payload or {}),
+        meta=facts_of(b.payload or {}, version=b.version),
     )
 
 
@@ -104,7 +117,7 @@ def change_picture(
         account_id=b.account_id,
         brand_id=b.brand_id,
         brief_id=b.id,
-        meta=facts_of(b.payload or {}),
+        meta=facts_of(b.payload or {}, version=b.version),
     )
     if remember:
         _remember(db, b, "rejection", _rejection_text(b))

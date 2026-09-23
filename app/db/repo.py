@@ -294,10 +294,9 @@ def mark_approved(
         bid = uuid.UUID(brief_id)
     except (ValueError, AttributeError):
         return 0
-    if account_id is not None:
-        brief = db.get(Brief, bid)
-        if brief is None or brief.account_id != account_id:
-            return 0
+    brief = db.get(Brief, bid)
+    if brief is None or (account_id is not None and brief.account_id != account_id):
+        return 0
     rows = creatives_for_brief(db, bid)
     stamped = 0
     for row in rows:
@@ -306,6 +305,12 @@ def mark_approved(
             row.approved_via = via
             row.status = "approved"
             stamped += 1
+    if stamped:
+        # The lineage's outcome gets one home: root -> superseded -> ... ->
+        # the version they tapped on. Approval used to live only on the slide
+        # rows, so "which version did they finally accept" meant joining
+        # creatives back to briefs and hoping the statuses agreed.
+        brief.status = "approved"
     db.flush()
     return stamped
 
