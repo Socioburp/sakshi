@@ -500,32 +500,43 @@ async def run(args: argparse.Namespace) -> int:
     if args.dry_run:
         return 1 if (products.rejected or references.rejected) else 0
 
+    # The files and the brand kit go in first, in their own transaction. The
+    # memories are written after, in another: embedding talks to Voyage, and a
+    # Voyage outage inside the same transaction would roll back the whole
+    # import and leave the brand with nothing after a twenty-minute upload.
     with session_scope() as db:
         for item in products.stored + fresh_references:
             store(db, brand_id, item)
-        written = skipped_memories = 0
-        for item, ref in described:
-            if memory_ref(item) in known_refs:
-                skipped_memories += 1
-                continue
-            if not settings.voyage_api_key:
-                continue
-            embed.remember(
-                db,
-                brand_id=brand_id,
-                kind="style_anchor",
-                content=ref.as_prose(brand_name),
-                meta={**ref.as_meta(), "file": item.name},
-                source_ref=memory_ref(item),
-            )
-            written += 1
         if kit is not None:
-            brand = db.get(Brand, brand_id)
-            decided = brandkit.seed_from_references(brand, kit)
+            decided = brandkit.seed_from_references(db.get(Brand, brand_id), kit)
+
+    written = skipped_memories = 0
+    memory_failed = ""
+    if settings.voyage_api_key:
+        try:
+            with session_scope() as db:
+                for item, ref in described:
+                    if memory_ref(item) in known_refs:
+                        skipped_memories += 1
+                        continue
+                    embed.remember(
+                        db,
+                        brand_id=brand_id,
+                        kind="style_anchor",
+                        content=ref.as_prose(brand_name),
+                        meta={**ref.as_meta(), "file": item.name},
+                        source_ref=memory_ref(item),
+                    )
+                    written += 1
+        except Exception as exc:  # noqa: BLE001 - the import stands; say what is missing
+            written = 0
+            memory_failed = str(exc)[:200]
 
     _line("Written")
     print(f"  {len(products.stored)} product photo(s), {len(fresh_references)} reference(s)")
-    if settings.voyage_api_key:
+    if memory_failed:
+        print(f"  0 style anchor(s): {memory_failed}. Re-run to write them; nothing duplicates.")
+    elif settings.voyage_api_key:
         print(f"  {written} style anchor(s) in brand_memory, {skipped_memories} already there")
     elif described:
         print(
@@ -536,7 +547,7 @@ async def run(args: argparse.Namespace) -> int:
         print(f"  brand kit: look {decided['look']}, shoot {decided['shoot']}")
         print(f"  palette: {decided['palette']}")
         print(f"  {len(decided['lessons'])} standing rule(s) on the brand")
-    return 1 if (products.rejected or references.rejected) else 0
+    return 1 if (products.rejected or references.rejected or memory_failed) else 0
 
 
 def main() -> int:

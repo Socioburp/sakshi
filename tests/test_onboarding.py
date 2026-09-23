@@ -486,3 +486,57 @@ def test_a_reference_already_on_file_is_read_again_until_it_has_a_style_anchor(t
         src, brand_id=BRAND, known_keys={item.key}, known_refs={onboard.memory_ref(item)}
     )
     assert third.stored == [] and third.skipped[0].reason == "already stored and already read"
+
+
+# --------------------------------------------------------------------------- #
+# what the agent is told about the seeded set
+# --------------------------------------------------------------------------- #
+def _seeded_brand():
+    brand = _Brand(palette={"primary": "#123B2E", "ink": "#FFFFFF"})
+    brandkit.seed_from_references(
+        brand, refstyle.aggregate([_ref(layout="frame_card", light="moody")] * 3)
+    )
+    brand.never_say = ["cures", "100% natural"]
+    brand.languages = ["hi", "en"]
+    return brand
+
+
+def test_the_seeded_rules_are_in_the_prompt_and_are_not_similarity_gated():
+    """They are the visual twin of never_say. Retrieval ranks memories against the
+    owner's message, and "their posts set the words on a solid panel" resembles
+    nothing an owner ever types, so a retrieved version would never be seen --
+    on exactly the creatives that have no other guidance: the first ones."""
+    from app.agent import prompts
+
+    brand = _seeded_brand()
+    system = prompts.build_system(brand, memory_block="", extra="")
+    for rule in brand.template_prefs["lessons"]:
+        assert rule in system
+    assert "standing instruction" in system
+    # Beside never_say, in the same block, both hard.
+    assert "NEVER use these words" in system
+    # And the layout family our own team used, not the one the category guessed.
+    assert "Preferred layouts: frame_card" in system
+
+
+def test_the_prompt_says_nothing_of_the_kind_for_a_brand_with_no_reference_set():
+    from app.agent import prompts
+
+    brand = _Brand(palette={"primary": "#123B2E"})
+    brand.never_say = []
+    brand.languages = []
+    brand.template_prefs = {"look": "warm"}
+    system = prompts.build_system(brand)
+    assert "standing instruction" not in system
+
+
+def test_the_seeded_rules_stay_short_enough_to_read():
+    """A longer list reads as a wall and gets skimmed; the rules that matter are
+    written first."""
+    from app.agent import prompts
+
+    brand = _seeded_brand()
+    brand.template_prefs = {**brand.template_prefs, "lessons": [f"rule {i}" for i in range(12)]}
+    system = prompts.build_system(brand)
+    assert "rule 5" in system and "rule 6" not in system
+    assert prompts.MAX_SEEDED_RULES == 6

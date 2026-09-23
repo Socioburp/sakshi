@@ -59,6 +59,7 @@ def build(
     grounding: Any = None,
     photo_labels: dict[int, str | None] | None = None,
     usual_template: str | None = None,
+    seeded_family: str | None = None,
     palette: dict | None = None,
     generated: bool = False,
 ) -> list[dict[str, str]]:
@@ -67,6 +68,8 @@ def build(
     photo_labels   slide position -> label of the owner's OWN photo used there
     usual_template the layout their approved posts share (None until there is
                    a signature to speak of)
+    seeded_family  the layout the reference set our team made for this brand
+                   uses (None for a brand that was never onboarded with one)
     generated      at least one picture came from the image model
     """
     facts: list[dict[str, str]] = []
@@ -112,8 +115,19 @@ def build(
         facts.append(
             {"kind": "usual_layout", "fact": "set in the layout their approved posts share"}
         )
+    # 5. The layout of the set our own designers made for them at onboarding --
+    # claimed only when this creative actually used it, and only while they have
+    # no approved signature of their own. Their history outranks our seed the
+    # moment it exists, and saying both would be two ways of saying one thing.
+    elif seeded_family and brief.template_id == seeded_family:
+        facts.append(
+            {
+                "kind": "reference_style",
+                "fact": "built in the style of the first set our team made for them",
+            }
+        )
 
-    # 5. Their exact colours, given to the photographer (generated pictures only).
+    # 6. Their exact colours, given to the photographer (generated pictures only).
     if generated:
         hexes = [
             str((palette or {}).get(k) or "").upper()

@@ -722,6 +722,9 @@ async def generate(
             if pos in shipped and ref in assets
         },
         usual_template=usual_template,
+        seeded_family=next(
+            iter((getattr(brand_snapshot, "template_prefs", None) or {}).get("family") or []), None
+        ),
         palette=dict(getattr(brand_snapshot, "palette", {}) or {}),
         generated=bool(shipped & billable_positions),
     )
