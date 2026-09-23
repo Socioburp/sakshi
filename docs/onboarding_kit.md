@@ -151,8 +151,9 @@ Read it like this:
   did.
 
 **Exit codes**, for anyone scripting this: `0` everything landed, `1` the run
-finished but something was refused, `2` nothing was imported at all (bad
-folder, missing key, unknown brand).
+finished but something was refused or could not be written (read the summary
+and re-run once it is fixed), `2` nothing was imported at all (bad folder,
+missing key, unknown brand).
 
 ---
 

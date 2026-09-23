@@ -36,9 +36,10 @@ files: every file is identified by the hash of its own bytes, so a second run
 stores only what is new and says what it skipped.
 
 Exit codes: 0 everything landed; 1 the run finished but something was refused
-(a photo too small or too soft, a reference the style pass could not read);
-2 nothing was imported (bad folder, missing key, unknown brand) -- so a
-half-import never passes for a success in a shell script or a checklist.
+or could not be written (a photo too small or too soft, a reference the style
+pass could not read, memories Voyage would not embed); 2 nothing was imported
+(bad folder, missing key, unknown brand) -- so a half-import never passes for
+a success in a shell script or a checklist.
 """
 
 from __future__ import annotations
