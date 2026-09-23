@@ -22,6 +22,18 @@ log = get_logger(__name__)
 AUDIO_KINDS = {"audio"}
 IMAGE_KINDS = {"image"}
 
+
+def is_picture(msg: InboundMessage) -> bool:
+    """A photo, however it was sent. The quality note asks owners for the
+    original 'as a document' -- and a document with an image mime used to be
+    handed to the agent as '[document]' and never stored, so the better file
+    was silently unused and the soft one shipped."""
+    if msg.kind in IMAGE_KINDS:
+        return True
+    mime = (msg.media.mime if msg.media else "") or ""
+    return msg.kind == "document" and mime.lower().startswith("image/")
+
+
 APPROVE_PREFIX = "approve:"
 
 
@@ -88,15 +100,13 @@ def ingest(msg: InboundMessage) -> uuid.UUID | None:
         else:
             if msg.kind in AUDIO_KINDS:
                 kind = "transcribe_and_handle"
-            elif msg.kind in IMAGE_KINDS:
+            elif is_picture(msg):
                 kind = "handle_image"
             else:
                 kind = "handle_message"
             # An owner who said "no logo" sends product photos, not a logo.
             no_logo = bool(brand and (brand.template_prefs or {}).get("no_logo"))
-            is_logo_candidate = (
-                msg.kind in IMAGE_KINDS and not (brand and brand.logo_url) and not no_logo
-            )
+            is_logo_candidate = is_picture(msg) and not (brand and brand.logo_url) and not no_logo
             payload = {
                 "message_id": str(message_id),
                 "account_id": str(account_id),

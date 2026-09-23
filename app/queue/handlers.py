@@ -143,6 +143,10 @@ async def handle_image(payload: dict) -> None:
         )
         with t.stage("media_download"):
             image, mime = await adapter.download_media(ref)
+        # Upright once, here: a phone stores a portrait as landscape pixels
+        # plus a rotation flag, and every consumer downstream (the compositor,
+        # the cut-out, the reel, the stored size) reads the same pixels.
+        image, mime, dims = await asyncio.to_thread(photo_quality.upright, image, mime)
 
         with session_scope() as db:
             brand = repo.default_brand(db, account_id)
@@ -166,7 +170,8 @@ async def handle_image(payload: dict) -> None:
         with session_scope() as db:
             m = db.get(Message, message_id)
             caption = (m.text or "").strip() if m is not None else ""
-        dims = _image_size(image) if not is_logo else None
+        if is_logo:
+            dims = None
         kind, label = "logo", "Logo"
         quality_note = ""
         if not is_logo:
@@ -263,19 +268,6 @@ async def handle_image(payload: dict) -> None:
             palette=(analysis.palette if analysis else None),
         )
         await run_turn(message_id=message_id, trace=t)
-
-
-def _image_size(data: bytes) -> tuple[int, int] | None:
-    """Pixel size of an inbound photo. Only the header is decoded."""
-    try:
-        from io import BytesIO
-
-        from PIL import Image
-
-        with Image.open(BytesIO(data)) as im:
-            return im.size
-    except Exception:  # noqa: BLE001
-        return None
 
 
 async def publish_scheduled(payload: dict) -> None:

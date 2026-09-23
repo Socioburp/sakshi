@@ -74,6 +74,39 @@ class PhotoQuality:
         }.get(self.verdict, "")
 
 
+# A re-encoded phone JPEG is written at this quality: at 95 with no chroma
+# subsampling a second JPEG generation is not visible; at the phone's own
+# 80-ish it is, on every edge of the product.
+UPRIGHT_JPEG_QUALITY = 95
+
+
+def upright(image_bytes: bytes, mime: str | None) -> tuple[bytes, str, tuple[int, int] | None]:
+    """The photo with its EXIF rotation applied to the pixels, once, at ingest.
+
+    Returns (bytes, mime, (width, height)). A photo with no rotation flag is
+    returned as it came, byte for byte; one with a flag is re-encoded upright
+    with the flag dropped, so every consumer -- the compositor, the cut-out
+    lane, the reel, the stored width and height -- sees the same pixels. Used
+    whole, a flagged photo shipped sideways and was cropped on the unrotated
+    pixels. Unreadable bytes come back unchanged with no size.
+    """
+    try:
+        im = Image.open(io.BytesIO(image_bytes))
+        im.load()
+    except Exception:  # noqa: BLE001
+        return image_bytes, mime or "image/jpeg", None
+    orientation = im.getexif().get(0x0112, 1)
+    if orientation in (None, 1):
+        return image_bytes, mime or ("image/png" if im.format == "PNG" else "image/jpeg"), im.size
+    turned = ImageOps.exif_transpose(im)
+    out = io.BytesIO()
+    if im.format == "PNG" or (mime or "").endswith("png"):
+        turned.save(out, "PNG", compress_level=1)
+        return out.getvalue(), "image/png", turned.size
+    turned.convert("RGB").save(out, "JPEG", quality=UPRIGHT_JPEG_QUALITY, subsampling=0)
+    return out.getvalue(), "image/jpeg", turned.size
+
+
 def _laplacian(gray: np.ndarray) -> np.ndarray:
     g = gray.astype(np.float32)
     return -4.0 * g[1:-1, 1:-1] + g[:-2, 1:-1] + g[2:, 1:-1] + g[1:-1, :-2] + g[1:-1, 2:]

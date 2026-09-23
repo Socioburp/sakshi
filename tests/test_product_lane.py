@@ -97,6 +97,124 @@ def test_a_product_standing_on_the_bottom_edge_is_fine(monkeypatch):
     assert cut.ok and cut.borders_touched == 1
 
 
+@pytest.mark.parametrize("side", ["left", "right", "top"])
+def test_a_product_sliced_by_the_left_right_or_top_edge_is_refused(monkeypatch, side):
+    """One touched edge used to pass whichever edge it was, and a bottle cut
+    by the side of the photo was stood mid-canvas with a straight cut edge.
+    Only a bottom contact is a plausible base."""
+    offset = {"left": (-0.31, 0.0), "right": (0.31, 0.0), "top": (0.0, -0.21)}[side]
+    _fake_remove(monkeypatch, _box_mask(0.4, 0.6, offset=offset))
+    cut = P.cutout(_photo())
+    assert not cut.ok and "edge" in cut.reason and cut.edges == (side,), cut.edges
+    assert cut.bbox != (0, 0, 0, 0), "the box is still known, for the whole-photo crop"
+
+
+def test_a_bottom_contact_must_be_a_base_not_a_point(monkeypatch):
+    """A product standing on the bottom edge is fine; a mask that reaches the
+    bottom at one thin point (a strap, a stem) is a cut, not a base."""
+
+    def stem(size):
+        w, h = size
+        m = Image.new("L", size, 0)
+        d = ImageDraw.Draw(m)
+        d.rectangle([w * 0.3, h * 0.3, w * 0.7, h * 0.7], fill=255)
+        d.rectangle([w * 0.49, h * 0.7, w * 0.51, h], fill=255)
+        return m
+
+    _fake_remove(monkeypatch, stem)
+    cut = P.cutout(_photo())
+    assert not cut.ok and cut.edges == ("bottom_point",)
+    _fake_remove(monkeypatch, _box_mask(0.4, 0.6, offset=(0.0, 0.2)))
+    assert P.cutout(_photo()).edges == ("bottom",)
+
+
+def test_erosion_is_capped_so_thin_parts_survive_and_a_lossy_refinement_is_refused(monkeypatch):
+    """A 4000px photo was eroded 4px a side, which took chains, hooks and
+    handles with it. Erosion is at most 2px at full resolution, and a mask
+    that loses more than 3% of itself to refinement is refused rather than
+    shipped missing a piece."""
+    big = Image.new("L", (3000, 3000), 255)
+    assert P._refine(big, scale=3000 / P.INFER_EDGE).getpixel((3, 1500)) > 250, "2px erosion"
+    assert P._refine(big, scale=1.0).getpixel((1, 1500)) > 250, "1px at full resolution"
+
+    def chain(size):
+        # a solid body plus a 7px chain: at 1600px the chain survives 2px erosion
+        w, h = size
+        m = Image.new("L", size, 0)
+        d = ImageDraw.Draw(m)
+        d.rectangle([w * 0.3, h * 0.4, w * 0.7, h * 0.8], fill=255)
+        d.rectangle([w * 0.5 - 3, h * 0.15, w * 0.5 + 3, h * 0.4], fill=255)
+        return m
+
+    _fake_remove(monkeypatch, chain)
+    cut = P.cutout(_photo(1600, 1600))
+    assert cut.ok, cut.reason
+    assert cut.refine_loss < P.MAX_REFINE_LOSS
+    assert cut.rgba.getchannel("A").getpixel((cut.rgba.width // 2, 40)) > 128, "the chain is there"
+
+    def comb(size):
+        # a solid body with twenty 6px teeth: decisive edges (not soft), but
+        # 2px of erosion takes two thirds of every tooth
+        w, h = size
+        m = Image.new("L", size, 0)
+        d = ImageDraw.Draw(m)
+        d.rectangle([w * 0.3, h * 0.5, w * 0.7, h * 0.8], fill=255)
+        for x in range(int(w * 0.3), int(w * 0.7), 24):
+            d.rectangle([x, h * 0.2, x + 5, h * 0.5], fill=255)
+        return m
+
+    _fake_remove(monkeypatch, comb)
+    cut = P.cutout(_photo(1600, 1600))
+    assert not cut.ok and "thin part" in cut.reason and cut.refine_loss > P.MAX_REFINE_LOSS
+
+
+def test_a_small_cutout_is_never_enlarged_past_the_cap():
+    """A product 3% of the frame was blown up ~3x to fill its zone. Above
+    1.25x it is shown smaller in its space instead."""
+    cut = Image.new("RGBA", (120, 180), (200, 30, 30, 255))
+    canvas = P.backdrop(1080, 1350, {}, floor=0.7)
+    _, box = P.place(cut, canvas, (0, 0, 1080, 1000))
+    assert (box[2] - box[0], box[3] - box[1]) == (150, 225), "exactly 1.25x"
+    assert box[3] == 1000 - round(1080 * P.PLACE_MARGIN), "standing on the floor of its space"
+
+
+def test_the_studio_is_the_window_and_the_product_stands_in_the_free_rectangle(monkeypatch):
+    """Lay out first, place second: the backdrop is built at the WINDOW's
+    size, the product inside the rectangle the layout left free, with a
+    margin, and the result is a PNG (one lossy encode in the whole path)
+    that says where the product is. poster_stack stands it right of centre."""
+    _fake_remove(monkeypatch, _box_mask(0.4, 0.6))
+    free = (100, 50, 980, 700)
+    res = P.product_background(
+        _striped_product(), 1080, 842, palette={}, template="split_card", free=free
+    )
+    assert res is not None
+    data, metrics = res
+    im = Image.open(io.BytesIO(data))
+    assert im.format == "PNG" and im.size == (1080, 842)
+    x0, y0, x1, y1 = metrics["subject"]
+    margin = round(1080 * P.PLACE_MARGIN)
+    assert free[0] + margin <= x0 < x1 <= free[2] - margin
+    assert free[1] + margin <= y0 < y1 <= free[3] - margin
+    assert y1 == free[3] - margin, "standing on the floor of the space"
+    inside = im.crop((x0, y0, x1, y1))
+    assert _share(inside, (200, 30, 30)) > 0.2 and _share(inside, (30, 60, 200)) > 0.4
+    right = P.product_background(
+        _striped_product(), 1080, 1350, palette={}, template="poster_stack", free=(0, 0, 1080, 1200)
+    )
+    rx0, _, rx1, _ = right[1]["subject"]
+    assert (rx0 + rx1) / 2 > 0.58 * 1080, "right of centre"
+
+
+def test_the_cutout_is_stored_with_its_source(monkeypatch):
+    _fake_remove(monkeypatch, _box_mask(0.4, 0.6))
+    cut = P.cutout(_striped_product())
+    png = P.cutout_png(cut, "asset-1")
+    rgba, source = P.cutout_from_png(png)
+    assert source == "asset-1" and rgba.mode == "RGBA" and rgba.size == cut.rgba.size
+    assert rgba.getchannel("A").getextrema()[0] == 0, "transparent around the product"
+
+
 def test_a_fuzzy_mask_is_refused_not_improved(monkeypatch):
     """Glass, hair, motion blur: a mask that is mostly guess ships the photo whole."""
     _fake_remove(monkeypatch, _box_mask(0.25, 0.25, soft=60))
@@ -118,7 +236,7 @@ def test_product_background_composes_at_canvas_size(monkeypatch):
     im = Image.open(io.BytesIO(data))
     assert im.size == (1080, 1350) and metrics["ok"]
     # The product sits in the upper zone, clear of the lower-third type.
-    top, bottom, _ = P.PLACEMENT["lower_third"]
+    top, bottom, _, _ = P.PLACEMENT["lower_third"]
     arr = im.convert("L").load()
     # Backdrop pixels in the type zone are light paper; a product there would be darker.
     zone_samples = [arr[540, y] for y in range(int(1350 * (bottom + 0.05)), 1340, 40)]
@@ -182,7 +300,7 @@ def test_a_real_client_product_photo_survives_the_lane():
     box = cut.rgba.getbbox()
     ref = cut.rgba.crop(box).convert("RGB").resize((64, 64))
     ref_mean = [sum(ref.tobytes()[c::3]) / 4096 for c in range(3)]
-    top, bottom, _ = P.PLACEMENT["lower_third"]
+    top, bottom, _, _ = P.PLACEMENT["lower_third"]
     zone = out.crop((270, int(1350 * top), 810, int(1350 * bottom))).resize((64, 64))
     zone_mean = [sum(zone.tobytes()[c::3]) / 4096 for c in range(3)]
     assert all(abs(a - b) < 60 for a, b in zip(ref_mean, zone_mean, strict=True))

@@ -1,11 +1,12 @@
 """Photo to reel: the still, set in motion.
 
 A reel here is not a new creative; it is the creative the owner already
-approved, moving. The photograph gets a slow push-in (a Ken Burns move),
-the designed card fades in over it and holds, and the whole thing runs
-seven seconds -- long enough to read, short enough to loop. No text is ever
-rendered by the video path: the card is the compositor's PNG, so the type,
-the logo and the grid-safe padding are exactly what the still had.
+approved, moving. The picture gets a slow push-in (a Ken Burns move), the
+designed card fades in over it, settles to exactly 1.0 and holds, and the
+whole thing runs seven seconds -- long enough to read, short enough to loop.
+No text is ever rendered by the video path: the card is the compositor's
+own raster, so the type, the logo and the grid-safe padding are exactly
+what the still had, and the last second of the reel IS the still.
 
 Encoded to what the Instagram Reels API accepts: MP4, H.264 high profile,
 yuv420p, closed GOPs, a silent AAC track (the spec lists one; owners add
@@ -24,7 +25,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.logging import get_logger
 
@@ -38,7 +39,14 @@ FADE_S = 0.7
 # The push-in crops 4% a side at its tightest -- inside every layout's
 # side padding, so no word is ever clipped while the card fades in.
 ZOOM_PHOTO = 1.08
-ZOOM_CARD = 1.03  # where the card settles and holds
+# How long the card takes to settle back from the push-in to 1.0, after the
+# fade. It used to hold at 1.03 for the whole rest of the clip, so the
+# approved still was never shown: 28px of the top and bottom -- the 15px
+# signature bar among them -- were cropped for the whole video.
+SETTLE_S = 1.6
+# Sideways drift during the move, as a share of the spare width. It is
+# spare width that drifts, so at zoom 1.0 there is none and nothing moves.
+DRIFT = 0.3
 VIDEO_BITRATE = "6M"
 MAX_BITRATE = "9M"
 
@@ -75,7 +83,10 @@ def _ease(t: float) -> float:
 
 
 def _cover(img: Image.Image, w: int, h: int) -> Image.Image:
-    """Scale to fill w x h, centre-cropped, like CSS object-fit: cover."""
+    """Scale to fill w x h, centre-cropped, like CSS object-fit: cover. The
+    picture's EXIF rotation is applied first: a phone photo used here as
+    the reel's opening frame played sideways."""
+    img = ImageOps.exif_transpose(img)
     scale = max(w / img.width, h / img.height)
     nw, nh = max(w, round(img.width * scale)), max(h, round(img.height * scale))
     img = img.resize((nw, nh), Image.LANCZOS)
@@ -83,51 +94,96 @@ def _cover(img: Image.Image, w: int, h: int) -> Image.Image:
     return img.crop((left, top, left + w, top + h))
 
 
-def _zoomed(base: Image.Image, zoom: float, w: int, h: int, drift: float = 0.0) -> Image.Image:
-    """A crop of `base` (already w x h) scaled by `zoom`, drifting slightly
-    sideways by `drift` in [-1, 1] of the spare width."""
-    if zoom <= 1.0005:
-        return base
-    cw, ch = round(w / zoom), round(h / zoom)
-    spare_w, spare_h = w - cw, h - ch
-    left = round(spare_w / 2 + drift * spare_w / 2)
-    top = round(spare_h / 2)
-    return base.crop((left, top, left + cw, top + ch)).resize((w, h), Image.BILINEAR)
+def _zoom_at(i: int, n: int, fps: int) -> tuple[float, float]:
+    """(zoom, drift) of frame i: the push-in over the photo and the fade,
+    then an eased settle back to exactly 1.0 for the rest of the hold."""
+    photo_end = int(n * PHOTO_SHARE)
+    fade = max(1, int(fps * FADE_S))
+    hold_start = photo_end + fade
+    if i < hold_start:
+        t = _ease(i / max(1, hold_start - 1))
+        return 1.0 + (ZOOM_PHOTO - 1.0) * t, -DRIFT + 2 * DRIFT * t
+    settle = max(1, min(int(fps * SETTLE_S), n - hold_start - 1))
+    t = _ease((i - hold_start) / settle)
+    return ZOOM_PHOTO + (1.0 - ZOOM_PHOTO) * t, DRIFT * (1 - t)
 
 
-def frames(photo: bytes, card: bytes, plan: Plan):
+def _window_at(
+    src: Image.Image,
+    box: tuple[int, int, int, int],
+    zoom: float,
+    drift: float,
+    out_size: tuple[int, int],
+) -> Image.Image:
+    """The photo window of `src` (a k-times source) pushed in by `zoom`,
+    drifting sideways by `drift` of the spare width, resampled with Lanczos
+    to its delivery size. Only the window moves; a crop of a k-times source
+    at zoom <= k is never an enlargement."""
+    left, top, right, bottom = box
+    bw, bh = right - left, bottom - top
+    cw, ch = bw / zoom, bh / zoom
+    spare_w, spare_h = bw - cw, bh - ch
+    x0 = left + spare_w / 2 + drift * spare_w / 2
+    y0 = top + spare_h / 2
+    crop = src.crop((round(x0), round(y0), round(x0 + cw), round(y0 + ch)))
+    return crop.resize(out_size, Image.LANCZOS)
+
+
+def frames(
+    photo: bytes, card: bytes, plan: Plan, photo_box: tuple[int, int, int, int] | None = None
+):
     """Yield raw RGB frames in order. Two images live in memory, never the video.
 
-    One continuous move: the photograph pushes in and drifts, the designed
-    card (which carries the same photograph) cross-fades in at the same zoom
-    so nothing jumps, then the card settles back a touch and holds.
+    `photo` is the frame without its words (the compositor's own ground, or a
+    photograph) and `card` the approved still; either may be supplied above
+    the delivery size (the compositor's 2x rasters), and every frame is then
+    a Lanczos DOWNSCALE of a crop rather than a bilinear enlargement.
+    `photo_box` is the photo window on the delivery canvas: on a layout that
+    shows the picture through a panel, a band or a frame only that window
+    pushes in and the rest of the card stays put, so the picture does not
+    jump at the cross-fade. The move settles to exactly 1.0 and holds there:
+    the last second of the reel IS the approved still, signature and all.
     """
     w, h = plan.width, plan.height
-    with Image.open(BytesIO(photo)) as p:
-        base = _cover(p.convert("RGB"), w, h)
     with Image.open(BytesIO(card)) as c:
-        top = _cover(c.convert("RGBA"), w, h)
-    # An opaque card (the compositor's PNG) simply replaces the photo; a
+        c.load()
+        k = max(1, min(2, c.width // w))
+        top = _cover(c.convert("RGBA"), w * k, h * k)
+    with Image.open(BytesIO(photo)) as p:
+        p.load()
+        ground = _cover(p.convert("RGB"), w * k, h * k)
+    # An opaque card (the compositor's PNG) simply replaces the ground; a
     # transparent one is laid over it.
-    card_rgb = Image.alpha_composite(base.convert("RGBA"), top).convert("RGB")
+    card_k = Image.alpha_composite(ground.convert("RGBA"), top).convert("RGB")
+    box = tuple(int(v) for v in (photo_box or (0, 0, w, h)))
+    box = (max(0, box[0]), max(0, box[1]), min(w, box[2]), min(h, box[3]))
+    box_k = tuple(v * k for v in box)
+    out_size = (box[2] - box[0], box[3] - box[1])
+    ground_1 = ground.resize((w, h), Image.LANCZOS) if k > 1 else ground
+    card_1 = card_k.resize((w, h), Image.LANCZOS) if k > 1 else card_k
+    still = card_1.tobytes()
     n = plan.frames
     photo_end = int(n * PHOTO_SHARE)
     fade = max(1, int(plan.fps * FADE_S))
     hold_start = photo_end + fade
     for i in range(n):
-        drift = -0.3 + 0.6 * (i / max(1, n - 1))
-        if i < hold_start:
-            z = 1.0 + (ZOOM_PHOTO - 1.0) * _ease(i / max(1, hold_start - 1))
-        else:
-            k = (i - hold_start) / max(1, n - hold_start - 1)
-            z = ZOOM_PHOTO + (ZOOM_CARD - ZOOM_PHOTO) * _ease(k)
+        z, drift = _zoom_at(i, n, plan.fps)
         if i < photo_end:
-            frame = _zoomed(base, z, w, h, drift)
+            base, mix = ground_1, 0.0
         elif i < hold_start:
-            a = _ease((i - photo_end + 1) / fade)
-            frame = Image.blend(_zoomed(base, z, w, h, drift), _zoomed(card_rgb, z, w, h, drift), a)
+            base, mix = ground_1, _ease((i - photo_end + 1) / fade)
         else:
-            frame = _zoomed(card_rgb, z, w, h, drift)
+            base, mix = card_1, 1.0
+        if z <= 1.0005 and mix in (0.0, 1.0):
+            yield still if mix else ground_1.tobytes()
+            continue
+        frame = base if mix in (0.0, 1.0) else Image.blend(ground_1, card_1, mix)
+        frame = frame.copy()
+        moving = _window_at(ground, box_k, z, drift, out_size)
+        if mix > 0.0:
+            over = _window_at(card_k, box_k, z, drift, out_size)
+            moving = over if mix >= 1.0 else Image.blend(moving, over, mix)
+        frame.paste(moving, (box[0], box[1]))
         yield frame.tobytes()
 
 
@@ -139,6 +195,7 @@ def render(
     height: int = 1920,
     seconds: float = SECONDS,
     fps: int = FPS,
+    photo_box: tuple[int, int, int, int] | None = None,
 ) -> bytes:
     """MP4 bytes. Frames stream to ffmpeg's stdin; nothing is held in memory."""
     exe = ffmpeg_path()
@@ -206,7 +263,7 @@ def render(
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             assert proc.stdin is not None
-            for frame in frames(photo, card, plan):
+            for frame in frames(photo, card, plan, photo_box):
                 proc.stdin.write(frame)
             # communicate() flushes and closes stdin, then waits for the encoder.
             _, err = proc.communicate(timeout=180)

@@ -156,3 +156,88 @@ async def test_send_video_goes_out_as_a_video_message(monkeypatch):
         account_id=uuid.uuid4(), session_id=None, wa_id="9199", video_url="https://x/r.mp4"
     )
     assert ok and sent[0].kind == "video" and sent[0].video_url == "https://x/r.mp4"
+
+
+# --------------------------------------------------------------------------- #
+# the reel shows the approved card
+# --------------------------------------------------------------------------- #
+def _frame(buf: bytes, w: int, h: int) -> Image.Image:
+    return Image.frombytes("RGB", (w, h), buf)
+
+
+def test_the_move_settles_to_exactly_the_approved_still_and_holds_there():
+    """The hold sat at 1.03 for the whole clip: the still was never shown
+    and its bottom 28px -- the signature bar -- were cropped throughout.
+    The last second is the card, pixel for pixel."""
+    plan = reel.Plan(width=120, height=200, fps=24, seconds=7)
+    card = _card(120, 200)
+    buffers = list(reel.frames(_photo(240, 400), card, plan))
+    still = Image.open(BytesIO(card)).convert("RGB").tobytes()
+    assert buffers[-1] == still and buffers[-plan.fps] == still, "held at 1.0 for the last second"
+    zooms = [reel._zoom_at(i, plan.frames, plan.fps)[0] for i in range(plan.frames)]
+    assert zooms[0] == 1.0 and max(zooms) == reel.ZOOM_PHOTO and zooms[-1] == 1.0
+    peak = zooms.index(max(zooms))
+    assert all(a <= b for a, b in zip(zooms[:peak], zooms[1 : peak + 1], strict=True)), "in"
+    assert all(a >= b for a, b in zip(zooms[peak:-1], zooms[peak + 1 :], strict=True)), "settle"
+    # sideways drift is spare width: none at 1.0
+    assert reel._zoom_at(plan.frames - 1, plan.frames, plan.fps)[1] == 0.0
+    # and the bottom rows (the signature bar's place) are the card's own
+    assert (
+        _frame(buffers[-1], 120, 200).crop((0, 190, 120, 200)).tobytes()
+        == Image.open(BytesIO(card)).convert("RGB").crop((0, 190, 120, 200)).tobytes()
+    )
+
+
+def test_on_a_windowed_layout_only_the_photo_window_moves():
+    """split_card, frame_card and top_band cross-faded a full-bleed photo
+    into a card whose picture had another scale and position: the subject
+    jumped. With the window given, everything outside it is the card,
+    unmoved, in every frame."""
+    plan = reel.Plan(width=120, height=200, fps=24, seconds=3)
+    card = _card(120, 200)
+    window = (0, 0, 120, 120)
+    still = Image.open(BytesIO(card)).convert("RGB")
+    ground = Image.open(BytesIO(_photo(120, 200))).convert("RGB")
+    buffers = list(reel.frames(_photo(120, 200), card, plan, photo_box=window))
+    photo_end = int(plan.frames * reel.PHOTO_SHARE)
+    hold = photo_end + int(plan.fps * reel.FADE_S)
+    below = (0, 130, 120, 200)
+    for i, buf in enumerate(buffers):
+        frame = _frame(buf, 120, 200)
+        expect = still if i >= hold else (ground if i < photo_end else None)
+        if expect is not None:
+            assert frame.crop(below).tobytes() == expect.crop(below).tobytes(), i
+    moved = {_frame(b, 120, 200).crop(window).tobytes() for b in buffers[:photo_end]}
+    assert len(moved) > 5, "the window itself pushes in"
+
+
+def test_frames_come_from_the_higher_resolution_source():
+    """Handed the compositor's 2x rasters, every frame is a Lanczos
+    downscale: the still is the 2x card resampled, never a bilinear
+    enlargement of a 1x crop."""
+    plan = reel.Plan(width=120, height=200, fps=24, seconds=3)
+    card2x = _card(240, 400)
+    buffers = list(reel.frames(_photo(240, 400), card2x, plan))
+    want = Image.open(BytesIO(card2x)).convert("RGB").resize((120, 200), Image.LANCZOS)
+    assert buffers[-1] == want.tobytes()
+    assert all(len(b) == 120 * 200 * 3 for b in buffers)
+
+
+def test_a_rotated_photo_plays_upright():
+    im = Image.new("RGB", (400, 240), (120, 90, 60))
+    ImageDraw.Draw(im).rectangle((0, 0, 400, 60), fill=(235, 205, 120))  # a bright band on top
+    exif = im.getexif()
+    exif[0x0112] = 6  # 90 CW on display: really a 240x400 portrait, band on the RIGHT
+    buf = BytesIO()
+    im.save(buf, "JPEG", exif=exif.tobytes())
+    plan = reel.Plan(width=120, height=200, fps=24, seconds=3)
+    clear = _card(120, 200, opaque=False)
+    first = _frame(next(iter(reel.frames(buf.getvalue(), clear, plan))), 120, 200)
+    assert first.getpixel((110, 100))[0] > 200 and first.getpixel((10, 100))[0] < 150
+
+
+@requires_ffmpeg
+def test_render_accepts_the_window():
+    mp4 = reel.render(_photo(), _card(360, 640), width=360, height=640, seconds=3, fps=12,
+                      photo_box=(0, 0, 360, 400))  # fmt: skip
+    assert reel.probe(mp4)["duration_s"] == 3.0

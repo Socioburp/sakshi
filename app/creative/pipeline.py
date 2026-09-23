@@ -58,7 +58,7 @@ from app.creative import (
 )
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
-from app.creative.imagegen.base import generation_size
+from app.creative.imagegen.base import generation_size_for_window
 from app.db import repo
 from app.db.models import Account, Brand, BrandAsset, Brief, Creative
 from app.db.session import session_scope
@@ -232,6 +232,9 @@ _LAYOUT_WORDS = {
     "overlap": "two elements would overlap",
     "logo_clearspace": "the copy crowds the logo",
     "logo_not_loaded": "the logo could not be loaded",
+    "photo_window": "the copy would shrink the picture's window below what it was made for",
+    "subject_clipped": "the product would be cut by the edge of the picture",
+    "subject_unsafe": "the product reaches into the strip the profile grid trims",
 }
 # The same violations when their subject is the brand's own mark. Shorter copy
 # cannot cure any of these, so they are never described as a copy problem.
@@ -339,7 +342,12 @@ def _blame(violations: list[str]) -> tuple[bool, list[str]]:
     return mark_only, own if mark_only else violations
 
 
-async def layout_gate(brief: CreativeBrief, units: list[Slide], brand_snapshot) -> dict | None:
+async def layout_gate(
+    brief: CreativeBrief,
+    units: list[Slide],
+    brand_snapshot,
+    reports: dict[int, dict] | None = None,
+) -> dict | None:
     """The deterministic guarantees, checked before any money moves.
 
     Returns the tool result to hand back when a slide cannot be set, or None.
@@ -348,6 +356,10 @@ async def layout_gate(brief: CreativeBrief, units: list[Slide], brand_snapshot) 
     told "shorten the headline" on every request, for ever, and a typeface that
     failed to load surfaced as a bare tool error -- the agent rewrote good copy
     in a loop and the owner got nothing.
+
+    `reports`, when given, receives each slide's layout report by position:
+    the photo window the picture must be generated for, and where the type
+    will sit, both known here before a rupee is spent.
     """
     results = await asyncio.gather(
         *(compose.check_layout(brief, s, brand_snapshot) for s in units),
@@ -355,6 +367,8 @@ async def layout_gate(brief: CreativeBrief, units: list[Slide], brand_snapshot) 
     )
     problems, faces = [], []
     for slide, res in zip(units, results, strict=True):
+        if isinstance(res, dict) and reports is not None:
+            reports[slide.position] = res
         if isinstance(res, compose.LayoutError):
             mark_only, described = _blame(res.violations)
             words = []
@@ -451,22 +465,6 @@ async def generate(
         # the charge, so the free lane is actually free.
         resolved = _resolve_photos(db, ctx.brand_id, brief, units)
         assets = _load_assets(db, ctx.brand_id, units, resolved)
-
-        # A product photo and centred type fight for the same pixels. When the
-        # owner's product is in the picture the words move to the lower third
-        # and the product gets the top. Decided HERE -- before the slides are
-        # snapshotted and the brief stored -- so the render, the stored brief,
-        # a later free revision, and the taste/grid history all agree.
-        template_switched = False
-        if brief.template_id == "centered_overlay" and any(
-            (a := assets.get(resolved.get(u.position, ""))) and a.kind == "product" for u in units
-        ):
-            brief.template_id = product.PREFERRED_TEMPLATE
-            for sl in brief.slides:
-                if sl.template_id == "centered_overlay":
-                    sl.template_id = None
-            units = brief.units()
-            template_switched = True
         brand_snapshot = _snapshot(db, brand)
         # The layout their approved posts share -- read BEFORE this brief is
         # stored, so a creative is never evidence for its own "usual".
@@ -479,13 +477,35 @@ async def generate(
         except Exception:  # noqa: BLE001 - a missing signature costs one remembered fact
             log.warning("grid_fingerprint_failed", brand_id=str(ctx.brand_id))
 
+    # The owner's photographs are read ONCE, here, before a layout is chosen
+    # and before the charge: upright pixels, the cut-out where the photo is a
+    # product, and where the subject is either way. A photo's layout is
+    # decided per slide from what is in it -- the words move off a product
+    # that keeps its cut, and off the subject of a photo whose cut is refused
+    # -- so the render, the stored brief, a later free revision and the
+    # taste/grid history all agree. It used to be decided for the whole brief
+    # before the cut was even attempted.
+    photos = await _plan_photos(units, assets, resolved)
+    switches = _choose_photo_layouts(brief, units, photos)
+    units = brief.units()
+
     # Prove the copy can be set -- no overlap, no crop, inside the safe zone,
     # the mark clear -- BEFORE the brief is stored or a credit is charged. The
     # layout does not depend on the picture, so there is no reason to buy one
     # first and find out afterwards.
-    unfit = await layout_gate(brief, units, brand_snapshot)
+    layouts: dict[int, dict] = {}
+    unfit = await layout_gate(brief, units, brand_snapshot, layouts)
     if unfit:
         return unfit
+    # A photo with too few pixels for its window is never enlarged to fill
+    # it: a layout with a smaller window takes it, or the job is refused
+    # with the ask that gets a better file -- before anything is charged.
+    too_small = await _photo_resolution_gate(
+        brief, units, photos, layouts, brand_snapshot, switches
+    )
+    if too_small:
+        return too_small
+    units = brief.units()
 
     with session_scope() as db:
         billable_positions = {
@@ -600,6 +620,8 @@ async def generate(
                     reuse,
                     register,
                     delivery,
+                    layouts.get(slide.position),
+                    photos.get(slide.position),
                 )
                 for slide, cid in zip(units, creative_ids, strict=True)
             ),
@@ -714,11 +736,16 @@ async def generate(
             "Shipped, but these phrases invite a complaint in this industry; use the "
             "suggested wording next time. Do not mention this to the owner unprompted."
         )
-    if template_switched:
+    if switches:
         out["template"] = brief.template_id
+        out["template_switches"] = {
+            str(pos): {"from": was, "to": now, "why": why}
+            for pos, (was, now, why) in switches.items()
+        }
         out["template_note"] = (
-            "Their product photo is in this creative, so the words were set in the lower "
-            "third to keep the product clear. Do not mention this unless they ask."
+            "Their own photo is in this creative, so the layout of the slide(s) named in "
+            "template_switches was changed to keep the words off the subject (or to show a "
+            "small photo without enlarging it). Do not mention this unless they ask."
         )
     if not delivered:
         # Never tell the model the owner has seen something they have not. The
@@ -740,7 +767,7 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
     """Copy-only revision. Reuses every stored background: no image call, no charge."""
     # The new copy has to be settable before anything is stored. Done in its own
     # short session so the browser work does not hold a pooled connection.
-    draft, snap = None, None
+    draft, snap, before = None, None, {}
     with session_scope() as db:
         parent, brand = db.get(Brief, brief_id), db.get(Brand, ctx.brand_id)
         if parent is not None and brand is not None:
@@ -749,10 +776,19 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
                 snap = _snapshot(db, brand)
             except Exception:  # noqa: BLE001 - reported properly by the validation below
                 draft = None
+            before = {
+                "format": dict(parent.payload.get("format") or {}),
+                "slides": _stored_pictures(repo.creatives_for_brief(db, brief_id)),
+            }
+    rebuilt: dict[int, dict] = {}
     if draft is not None:
         unfit = await layout_gate(draft, draft.units(), snap)
         if unfit:
             return unfit
+        # A revision never reuses a picture made for another shape or layout.
+        refused, rebuilt = await _revision_guard(draft, before, snap)
+        if refused:
+            return refused
 
     with session_scope() as db:
         parent = db.get(Brief, brief_id)
@@ -834,17 +870,33 @@ async def recompose(ctx: ToolContext, *, brief_id: uuid.UUID, changes: dict) -> 
             )
             db.add(c)
             db.flush()
-            pairs.append((slide, c.id, old.background_key))
+            if slide.position in rebuilt:
+                # The product stood in a new window for free (see _revision_guard).
+                c.background_key = _store_rebuilt(ctx, c.id, rebuilt[slide.position])
+                c.background_url = r2.public_url(c.background_key)
+            pairs.append((slide, c.id, c.background_key, old.imagegen_provider or ""))
         brand_snapshot = _snapshot(db, brand)
 
     urls = await asyncio.gather(
-        *(_recompose_one(ctx, brief, slide, cid, key, brand_snapshot) for slide, cid, key in pairs)
+        *(
+            _recompose_one(
+                ctx,
+                brief,
+                slide,
+                cid,
+                key,
+                brand_snapshot,
+                lane not in PHOTO_LANES or slide.position in rebuilt,
+                rebuilt.get(slide.position),
+            )
+            for slide, cid, key, lane in pairs
+        )
     )
     await _show(ctx, brief, list(urls))
     return {
         "ok": True,
         "brief_id": str(new_brief_id),
-        "creative_ids": [str(cid) for _, cid, _ in pairs],
+        "creative_ids": [str(cid) for _, cid, _, _ in pairs],
         "image_urls": list(urls),
         "shown_to_user": True,
         "credits_charged": 0,
@@ -864,6 +916,24 @@ async def regenerate_image(
         if parent is None:
             return {"ok": False, "reason": "unknown_brief"}
         payload = dict(parent.payload)
+        own = _owner_photo_slides(repo.creatives_for_brief(db, brief_id), slide_position)
+    if own:
+        # "Change the picture" on a slide that shows the owner's own photograph
+        # would run the same free lane and hand back the same photo, and
+        # spend a revision doing it. Said plainly instead.
+        return {
+            "ok": False,
+            "reason": "picture_is_the_owners_photo",
+            "charged": 0,
+            "slides": own,
+            "hint": (
+                "The slide(s) named show the owner's OWN photograph, not a generated picture, "
+                "so regenerating would return the same photo. Ask the owner what they want: "
+                "a different photo of theirs (create_creative with that reference_asset_id), "
+                "or a generated picture (create_creative with no reference_asset_id and a "
+                "headline that does not name the photographed product). Nothing was charged."
+            ),
+        }
 
     if new_prompt:
         targets = payload.get("slides") or []
@@ -911,7 +981,11 @@ async def regenerate_image(
                     }
                 for c in prev:
                     if c.slide_position != slide_position and c.background_key:
-                        reuse[c.slide_position] = (c.background_key, c.background_url or "")
+                        reuse[c.slide_position] = (
+                            c.background_key,
+                            c.background_url or "",
+                            c.imagegen_provider or "",
+                        )
     with session_scope() as db:
         events.record(
             db,
@@ -1012,6 +1086,353 @@ def dedupe_register() -> dict:
     }
 
 
+# The lanes whose stored background is the owner's own photograph (or the
+# studio built around it) rather than a picture generated for the window.
+PHOTO_LANES = frozenset({"brand_asset", "product_studio"})
+
+# The block of words the picture must stay calm under. The CTA is a solid
+# pill on its own ground, the mark has its own plate and clear space, the
+# rule is a hairline -- and on poster_stack the CTA sits at the foot under a
+# headline at the top, so counting it made the band the whole frame.
+_WORDS = ("headline", "subhead")
+
+
+class PhotoPlan:
+    """One owner photograph as a slide will use it: upright bytes, its size,
+    the cut-out when it is a product whose cut passed, and the subject's box
+    (from the same mask) whether or not the cut passed."""
+
+    __slots__ = ("asset_id", "image", "mime", "kind", "size", "cut", "bbox", "trusted")
+
+    def __init__(self, asset_id: str, image: bytes, mime: str, kind: str, size: tuple[int, int]):
+        self.asset_id, self.image, self.mime = asset_id, image, mime
+        self.kind, self.size = kind, size
+        self.cut: product.Cutout | None = None
+        self.bbox: tuple[int, int, int, int] | None = None
+        self.trusted = False
+
+    @property
+    def cut_ok(self) -> bool:
+        return self.cut is not None and self.cut.ok and self.cut.rgba is not None
+
+    @property
+    def focus(self) -> tuple[int, int, int, int] | None:
+        return self.bbox if self.trusted else None
+
+
+def _read_photo(snap: BrandAssetSnapshot) -> PhotoPlan:
+    from app.creative import photo_quality
+
+    raw = r2.get(snap.storage_key)
+    image, mime, size = photo_quality.upright(raw, snap.mime)
+    if size is None:
+        size = compose.image_size(image)
+    plan = PhotoPlan(snap.id, image, mime, snap.kind or "other", size)
+    if snap.kind == "product" and settings.cutout_enabled:
+        plan.cut = product.cutout(image)
+        if plan.cut.bbox != (0, 0, 0, 0):
+            plan.bbox = plan.cut.bbox
+            plan.trusted = (
+                product.MIN_COVERAGE <= plan.cut.coverage <= product.MAX_COVERAGE
+                and plan.cut.soft_share <= product.MAX_SOFT_SHARE
+            )
+    else:
+        plan.bbox, plan.trusted = product.subject_box(image)
+    return plan
+
+
+async def _plan_photos(
+    units: list[Slide], assets: dict[str, BrandAssetSnapshot], resolved: dict[int, str]
+) -> dict[int, PhotoPlan]:
+    """Every owner photograph this job will use, read once (the mask is the
+    slow part, and it used to run inside the render of every slide)."""
+    plans: dict[int, PhotoPlan] = {}
+    by_asset: dict[str, PhotoPlan] = {}
+    for u in units:
+        ref = resolved.get(u.position)
+        if not ref or ref not in assets:
+            continue
+        if ref not in by_asset:
+            by_asset[ref] = await asyncio.to_thread(_read_photo, assets[ref])
+        plans[u.position] = by_asset[ref]
+    return plans
+
+
+def _set_template(brief: CreativeBrief, slide: Slide, template: str) -> None:
+    """Change one slide's layout in the brief itself -- units() rebuilds a
+    single post's slide from the brief, so the slide object alone is not it."""
+    if brief.is_carousel():
+        slide.template_id = template
+    else:
+        brief.template_id = template
+        for sl in brief.slides:
+            sl.template_id = None
+
+
+# Layouts that set no word on the picture, in the order a subject that the
+# words would otherwise sit on is moved to: photo above a panel, photo below
+# a band, photo framed on a card.
+PANEL_TEMPLATES = ("split_card", "top_band", "frame_card")
+# The photo window each panel layout shows at ordinary copy length, as
+# fractions of the canvas (x inset, height share) -- the measured figures,
+# used to pick a layout before its exact window has been measured.
+_PANEL_WINDOWS = {"split_card": (0.0, 0.62), "top_band": (0.0, 0.70), "frame_card": (0.087, 0.48)}
+
+
+def _subject_on_canvas(plan: PhotoPlan, w: int, h: int) -> tuple[float, float, float, float] | None:
+    """Where the photo's subject lands on a w x h window after the
+    subject-aware cover crop (or the letterbox), as fractions of it."""
+    if plan.focus is None:
+        return None
+    iw, ih = plan.size
+    scale = max(w / iw, h / ih)
+    cw, ch = w / scale, h / scale
+    at = compose._focus_crop(plan.size, (cw, ch), plan.focus)
+    x0, y0, x1, y1 = plan.focus
+    if at is None:
+        fit = min(w / iw, h / ih)
+        ox, oy = (w - iw * fit) / 2, (h - ih * fit) / 2
+        return (ox + x0 * fit) / w, (oy + y0 * fit) / h, (ox + x1 * fit) / w, (oy + y1 * fit) / h
+    left, top = at
+    return (
+        (x0 - left) * scale / w,
+        (y0 - top) * scale / h,
+        (x1 - left) * scale / w,
+        (y1 - top) * scale / h,
+    )
+
+
+def _panel_for(plan: PhotoPlan, w: int, h: int) -> str:
+    """The panel layout whose window shows the photo's subject whole without
+    a letterbox, in PANEL_TEMPLATES order; the first when none does."""
+    for name in PANEL_TEMPLATES:
+        inset, share = _PANEL_WINDOWS[name]
+        ww, wh = round(w * (1 - 2 * inset)), round(h * share)
+        iw, ih = plan.size
+        scale = max(ww / iw, wh / ih)
+        if compose._focus_crop(plan.size, (ww / scale, wh / scale), plan.focus) is not None:
+            return name
+    return PANEL_TEMPLATES[0]
+
+
+def _choose_photo_layouts(
+    brief: CreativeBrief, units: list[Slide], photos: dict[int, PhotoPlan]
+) -> dict[int, tuple[str, str, str]]:
+    """Per slide, the layout a photo slide is set in. Returns the switches
+    made: position -> (from, to, why).
+
+    A product whose cut passed is stood in a studio, and the words go to the
+    lower third (centred type and a product fight for the same pixels). A
+    photo used whole -- a shop, a team, a product whose cut was refused --
+    keeps a type-over-photo layout only when its subject stays clear of
+    where that layout sets the words; otherwise the words move to a panel.
+    """
+    w, h = brief.pixel_size()
+    switches: dict[int, tuple[str, str, str]] = {}
+    for slide in units:
+        plan = photos.get(slide.position)
+        if plan is None:
+            continue
+        was = brief.template_for(slide)
+        if plan.cut_ok:
+            if was == "centered_overlay":
+                _set_template(brief, slide, product.PREFERRED_TEMPLATE)
+                switches[slide.position] = (was, product.PREFERRED_TEMPLATE, "product_cutout")
+            continue
+        zone = shotplan.TYPE_ZONES.get(was)
+        subject = _subject_on_canvas(plan, w, h)
+        if zone is None or subject is None:
+            continue
+        zl, zt, zr, zb = zone
+        sl, st, sr, sb = subject
+        if sl < zr and zl < sr and st < zb and zt < sb:
+            to = _panel_for(plan, w, h)
+            _set_template(brief, slide, to)
+            switches[slide.position] = (was, to, "subject_under_type")
+    if switches:
+        log.info("photo_layouts_chosen", switches={str(k): v for k, v in switches.items()})
+    return switches
+
+
+_SMALL_PHOTO_HINT = (
+    "Nothing was made and nothing was charged. The owner's photo on the slide(s) named has too "
+    "few pixels for any layout: filling the picture window would enlarge it more than "
+    f"{compose.MAX_PHOTO_UPSCALE}x and it would ship soft. Ask the owner to send the original "
+    "photo as a DOCUMENT (WhatsApp shrinks a photo it sends as a picture to about 1280px; a "
+    "document arrives at full size), then call the tool again; or call it again without "
+    "reference_asset_id so the picture is generated instead."
+)
+
+
+def _scale_needed(plan: PhotoPlan, layout: dict | None, w: int, h: int) -> float:
+    win = compose.photo_window(layout, w, h)
+    return max((win[2] - win[0]) / plan.size[0], (win[3] - win[1]) / plan.size[1])
+
+
+async def _photo_resolution_gate(
+    brief: CreativeBrief,
+    units: list[Slide],
+    photos: dict[int, PhotoPlan],
+    layouts: dict[int, dict],
+    brand_snapshot,
+    switches: dict[int, tuple[str, str, str]],
+) -> dict | None:
+    """Refuse -- or move to a smaller window -- any photo slide whose picture
+    would have to be enlarged past MAX_PHOTO_UPSCALE. Runs after the layout
+    gate, because the window is what the gate measured. A slide moved to a
+    panel is re-proven, and its report replaces the old one."""
+    w, h = brief.pixel_size()
+    small = []
+    for slide in units:
+        plan = photos.get(slide.position)
+        if plan is None or plan.cut_ok:
+            continue
+        needed = _scale_needed(plan, layouts.get(slide.position), w, h)
+        if needed <= compose.MAX_PHOTO_UPSCALE:
+            continue
+        was = brief.template_for(slide)
+        found = None
+        for name in PANEL_TEMPLATES:
+            if name == was:
+                continue
+            _set_template(brief, slide, name)
+            trial = brief.units()[units.index(slide)] if not brief.is_carousel() else slide
+            try:
+                report = await compose.check_layout(brief, trial, brand_snapshot)
+            except compose.TextDoesNotFit:
+                continue
+            if _scale_needed(plan, report, w, h) <= compose.MAX_PHOTO_UPSCALE:
+                found, layouts[slide.position] = name, report
+                break
+        if found is None:
+            _set_template(brief, slide, was)
+            small.append(
+                {
+                    "slide": slide.position,
+                    "asset_id": plan.asset_id,
+                    "pixels": f"{plan.size[0]}x{plan.size[1]}",
+                    "needs": f"{needed:.2f}x",
+                }
+            )
+            continue
+        switches[slide.position] = (was, found, "photo_too_small_for_window")
+        log.info("photo_layout_for_pixels", position=slide.position, was=was, now=found)
+    if not small:
+        return None
+    log.warning("photo_too_small_refused", slides=small)
+    return {
+        "ok": False,
+        "reason": "photo_too_small",
+        "charged": 0,
+        "slides": small,
+        "hint": _SMALL_PHOTO_HINT,
+    }
+
+
+def cutout_key(brand_id: str, creative_id: str) -> str:
+    """Where a product-studio creative keeps its cut-out (see cutout_png)."""
+    return r2.key_for(brand_id, creative_id, "cutout.png")
+
+
+# Everything the product must keep clear of, besides the words: the mark and
+# its clear space, the brand name, the pill. The rule is a hairline under
+# the words and inside their block.
+_KEEP_OUT = ("headline", "subhead", "cta", "logo", "brandline")
+# Clear space kept between the product and anything it must not touch, as a
+# share of the canvas width: a product against the CTA reads as touching it.
+_KEEP_OUT_MARGIN = 0.03
+
+
+def _free_rect(
+    layout: dict | None, window: tuple[int, int, int, int], w: int, h: int
+) -> tuple[int, int, int, int]:
+    """The largest rectangle inside the photo window and the safe zone that
+    the measured layout leaves clear of every word and mark (each grown by a
+    margin), in WINDOW coordinates. Where the product goes."""
+    pad = compose.padding_for(w, h)
+    left = max(window[0], pad["pad_x"])
+    top = max(window[1], pad["pad_top"])
+    right = min(window[2], w - pad["pad_x"])
+    bottom = min(window[3], h - pad["pad_bottom"])
+    rect = [float(left), float(top), float(right), float(bottom)]
+    boxes = (layout or {}).get("boxes") or {}
+    grow = w * _KEEP_OUT_MARGIN
+    keep = []
+    for cls in _KEEP_OUT:
+        b = boxes.get(cls)
+        if b:
+            g = compose.LOGO_CLEAR * (b["b"] - b["t"]) if cls == "logo" else 0.0
+            keep.append(
+                (b["l"] - grow - g, b["t"] - grow - g, b["r"] + grow + g, b["b"] + grow + g)
+            )
+    # Greedy: for each keep-out that still intersects, keep the largest of
+    # the four rectangles left around it. Words sit in one block, so this
+    # finds the band above (or below, or beside) them.
+    for _ in range(len(keep) + 1):
+        hit = next(
+            (
+                k
+                for k in keep
+                if rect[0] < k[2] and k[0] < rect[2] and rect[1] < k[3] and k[1] < rect[3]
+            ),
+            None,
+        )
+        if hit is None:
+            break
+        options = [
+            [rect[0], rect[1], rect[2], hit[1]],  # above
+            [rect[0], hit[3], rect[2], rect[3]],  # below
+            [rect[0], rect[1], hit[0], rect[3]],  # left of
+            [hit[2], rect[1], rect[2], rect[3]],  # right of
+        ]
+        rect = max(options, key=lambda r: max(0.0, r[2] - r[0]) * max(0.0, r[3] - r[1]))
+    return (
+        int(round(rect[0] - window[0])),
+        int(round(rect[1] - window[1])),
+        int(round(rect[2] - window[0])),
+        int(round(rect[3] - window[1])),
+    )
+
+
+def _text_box_in_window(
+    layout: dict | None, window: tuple[int, int, int, int]
+) -> tuple[float, float, float, float] | None:
+    """The measured type block as fractions of the photo window (l, t, r, b),
+    or None when no word sits on the picture (a panel layout, or no report)."""
+    boxes = (layout or {}).get("boxes") or {}
+    found = [boxes[c] for c in _WORDS if boxes.get(c)]
+    if not found:
+        return None
+    wl, wt, wr, wb = window
+    left = max(wl, min(b["l"] for b in found))
+    top = max(wt, min(b["t"] for b in found))
+    right = min(wr, max(b["r"] for b in found))
+    bottom = min(wb, max(b["b"] for b in found))
+    if right <= left or bottom <= top:
+        return None
+    ww, wh = wr - wl, wb - wt
+    return ((left - wl) / ww, (top - wt) / wh, (right - wl) / ww, (bottom - wt) / wh)
+
+
+# How far a non-exact vendor's frame may stray from the ratio asked for: a
+# 0.5% difference is under a pixel of trim at the window; the 896x1088 that a
+# "4:5" once came back as is 2.9%, and it was silently cropped and enlarged.
+SIZE_RATIO_TOLERANCE = 0.005
+
+
+def _size_fault(provider, got: tuple[int, int], asked: tuple[int, int], floor) -> str:
+    """Why `got` is not the frame that was asked for, or '' when it is."""
+    if getattr(provider, "exact_size", False):
+        return "" if got == asked else f"asked {asked[0]}x{asked[1]}, got {got[0]}x{got[1]}"
+    want = asked[0] / asked[1]
+    if abs(got[0] / got[1] - want) / want > SIZE_RATIO_TOLERANCE:
+        return f"ratio {got[0]}x{got[1]} is not {asked[0]}x{asked[1]}"
+    need = floor or asked
+    if got[0] < need[0] or got[1] < need[1]:
+        return f"{got[0]}x{got[1]} is below the {need[0]}x{need[1]} it must cover"
+    return ""
+
+
 class BackgroundRejected(RuntimeError):
     """No acceptable picture in the allowed attempts. The slide fails; nothing
     that was rejected is ever delivered."""
@@ -1033,8 +1454,14 @@ async def _generate_checked(
     size: tuple[int, int],
     register: dict | None,
     stage: str,
+    floor: tuple[int, int] | None = None,
 ):
     """Generate, inspect, and regenerate until a picture passes -- or fail.
+
+    `floor` is the window the picture must cover (never enlarged to). A
+    vendor that picks its own size from a ratio (replicate, bfl) is held to
+    the ratio within SIZE_RATIO_TOLERANCE and to the floor; one that returns
+    exactly what it is asked is held to exactly that.
 
     Every attempt is the SAME call at the SAME settings; only the prompt gains
     a sentence about what was wrong, and the seed moves. Reasons to reject:
@@ -1077,9 +1504,10 @@ async def _generate_checked(
         reasons: list[str] = []
         notes = ""
         got = await asyncio.to_thread(compose.image_size, res.data)
-        if getattr(provider, "exact_size", False) and got != (gw, gh):
+        fault = _size_fault(provider, got, (gw, gh), floor)
+        if fault:
             reasons.append("wrong_size")
-            notes = f"asked {gw}x{gh}, got {got[0]}x{got[1]}"
+            notes = fault
         if not reasons and register is not None:
             if await _register_or_reroll(register, slide, res.data, force=last):
                 reasons.append("duplicate_of_earlier_slide")
@@ -1167,12 +1595,25 @@ async def _build_one(
     reuse: dict[int, tuple[str, str]] | None = None,
     register: dict | None = None,
     delivery: _Delivery | None = None,
+    layout: dict | None = None,
+    plan: PhotoPlan | None = None,
 ) -> str:
     w, h = brief.pixel_size()
     ref = (resolved or {}).get(slide.position)
+    focus: tuple[int, int, int, int] | None = None
+    subject: tuple[int, int, int, int] | None = None
+    cutout_png: bytes | None = None
     stage = f"slide{slide.position}"
     job_id, cost_micros = None, 0  # set only when a vendor was paid
     gate: dict | None = None  # set only when a picture was generated and inspected
+    # The window the layout shows the picture through, measured before the
+    # charge. The picture is made for THAT -- never for the canvas and then
+    # cover-cropped by a panel, a band or a frame.
+    window = compose.photo_window(layout, w, h)
+    window_size = (window[2] - window[0], window[3] - window[1])
+    # Only a picture made for the window is held to it exactly; the owner's
+    # own photograph is whatever shape they took it in.
+    generated = True
 
     if reuse and slide.position in reuse:
         # Picture kept from the previous version of this creative.
@@ -1180,26 +1621,46 @@ async def _build_one(
             key = reuse[slide.position][0]
             image, mime = r2.get(key), ("image/jpeg" if key.endswith(".jpg") else "image/png")
         provider_name = "reused"
+        kept = reuse[slide.position]
+        generated = (kept[2] if len(kept) > 2 else "") not in PHOTO_LANES
+        if not generated:
+            # The owner's photograph, kept: cropped around its subject again.
+            focus = (await asyncio.to_thread(product.subject_box, image))[0]
     elif ref and ref in assets:
-        # The owner's own photograph. No model call, no charge.
-        with ctx.trace.stage(f"{stage}:asset_fetch"):
-            image, mime = r2.get(assets[ref].storage_key), assets[ref].mime or "image/jpeg"
+        # The owner's own photograph, read once by _plan_photos: upright, with
+        # its subject located. No model call, no charge.
+        if plan is None:
+            with ctx.trace.stage(f"{stage}:asset_fetch"):
+                plan = await asyncio.to_thread(_read_photo, assets[ref])
+        image, mime, focus = plan.image, plan.mime, plan.focus
         provider_name = "brand_asset"
-        if assets[ref].kind == "product":
-            # Cut the product out and stand it in a studio. Refused cuts fall
-            # back to the photo as it was -- a wrong cut ships a broken product.
-            with ctx.trace.stage(f"{stage}:product_cutout"):
+        generated = False
+        if plan.cut_ok:
+            # Lay out first, place second: the studio is built at the photo
+            # WINDOW's size and the product stands in the rectangle the
+            # measured layout leaves clear of words and mark, so nothing is
+            # cover-cropped and nothing sits on it -- by construction, and
+            # then asserted by FIT_JS on the subject box. Refused cuts use
+            # the photo as it was, cropped around the product.
+            free = _free_rect(layout, window, w, h)
+            with ctx.trace.stage(f"{stage}:product_studio"):
                 studio = await asyncio.to_thread(
                     product.product_background,
                     image,
-                    w,
-                    h,
+                    window_size[0],
+                    window_size[1],
                     palette=dict(getattr(brand_snapshot, "palette", {}) or {}),
                     template=brief.template_for(slide),
+                    cut=plan.cut,
+                    free=free,
                 )
             if studio is not None:
-                image, mime = studio[0], "image/jpeg"
+                image, mime, focus = studio[0], "image/png", None
+                generated = True  # made for the window exactly, like a generated picture
                 provider_name = "product_studio"
+                sx0, sy0, sx1, sy1 = studio[1]["subject"]
+                subject = (sx0 + window[0], sy0 + window[1], sx1 + window[0], sy1 + window[1])
+                cutout_png = product.cutout_png(plan.cut, plan.asset_id)
                 log.info("product_studio", position=slide.position, **studio[1])
     else:
         provider = get_provider()
@@ -1224,9 +1685,15 @@ async def _build_one(
                 getattr(brand_snapshot, "template_prefs", None),
                 str(getattr(brand_snapshot, "name", "") or ""),
             ),
+            # Where the words will sit on THIS layout, measured by the gate,
+            # so the model keeps that part of the frame calm -- not the
+            # rung's guess by slide position, which contradicted the layout.
+            template=brief.template_for(slide),
+            text_box=_text_box_in_window(layout, window),
         )
-        # Generated natively at 4:5 ABOVE the delivery size and resampled down
-        # by the compositor. Never generated at a preset and cropped.
+        # Generated natively at the WINDOW's ratio ABOVE its size and resampled
+        # down by the compositor. Never generated at a preset and cropped, and
+        # never generated for the canvas and cropped by the layout.
         res, cost_micros, rejections = await _generate_checked(
             ctx,
             provider,
@@ -1235,15 +1702,27 @@ async def _build_one(
             creative_id,
             prompt,
             negative,
-            generation_size((w, h)),
+            generation_size_for_window(window_size, (w, h)),
             register,
             stage,
+            floor=window_size,
         )
         image, mime, job_id = res.data, res.mime, res.job_id
         gate = {"attempts": len(rejections) + 1, "rejections": rejections, "raw": res.raw}
 
     with ctx.trace.stage(f"{stage}:compose"):
-        png = await compose.compose(brief, slide, brand_snapshot, image, mime)
+        png, report = await compose.compose_with_report(
+            brief,
+            slide,
+            brand_snapshot,
+            image,
+            mime,
+            layout=layout,
+            generated=generated,
+            focus=focus,
+            subject=subject,
+            keep_sources=brief.is_reel(),
+        )
         # PNG all the way to here; this is the single lossy encode. It also
         # refuses any frame that is not exactly the post size.
         final = await asyncio.to_thread(compose.export_jpeg, png, (w, h))
@@ -1257,12 +1736,17 @@ async def _build_one(
             ext = "jpg" if "jpeg" in mime else "png"
             bg_key = r2.key_for(str(ctx.brand_id), str(creative_id), f"bg.{ext}")
             r2.put(bg_key, image, mime)
+            if cutout_png is not None:
+                # The cut product itself, beside the studio built around it:
+                # a revision to another layout stands it in the new window
+                # for nothing, instead of cropping the old composite.
+                r2.put(cutout_key(str(ctx.brand_id), str(creative_id)), cutout_png, "image/png")
         composed_key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.jpg")
         composed_url = r2.put(composed_key, final, "image/jpeg")
 
     video_key = video_url = None
     if brief.is_reel():
-        video_key, video_url = await _render_reel(ctx, creative_id, image, png, stage)
+        video_key, video_url = await _render_reel(ctx, creative_id, report["reel"], stage)
 
     with session_scope() as db:
         c = db.get(Creative, creative_id)
@@ -1294,39 +1778,76 @@ async def _build_one(
     return url
 
 
-async def _render_reel(ctx, creative_id: uuid.UUID, photo: bytes, card: bytes, stage: str):
+async def _render_reel(ctx, creative_id: uuid.UUID, sources: dict, stage: str):
     """The card set in motion: a seven-second MP4 beside the still, in R2.
 
-    CPU-bound (PIL frames piped to ffmpeg), so it runs in a thread and never
-    blocks the other slides or the WhatsApp loop.
+    `sources` is what compose measured and rasterised for it (the 2x frame
+    without its words, the 2x finished frame, the photo window), so the reel
+    moves the picture inside the window the layout shows and ends on the
+    approved still. CPU-bound (PIL frames piped to ffmpeg), so it runs in a
+    thread and never blocks the other slides or the WhatsApp loop.
     """
     from app.creative import reel
 
     w, h = 1080, 1920
     with ctx.trace.stage(f"{stage}:reel"):
-        mp4 = await asyncio.to_thread(reel.render, photo, card, width=w, height=h)
+        mp4 = await asyncio.to_thread(
+            reel.render,
+            sources["ground"],
+            sources["card"],
+            width=w,
+            height=h,
+            photo_box=tuple(sources["window"]),
+        )
     with ctx.trace.stage(f"{stage}:reel_upload"):
         key = r2.key_for(str(ctx.brand_id), str(creative_id), "reel.mp4")
         url = r2.put(key, mp4, "video/mp4")
     return key, url
 
 
-async def _recompose_one(ctx, brief, slide, creative_id, background_key, brand_snapshot) -> str:
+async def _recompose_one(
+    ctx,
+    brief,
+    slide,
+    creative_id,
+    background_key,
+    brand_snapshot,
+    generated: bool = True,
+    rebuilt: dict | None = None,
+) -> str:
     stage = f"slide{slide.position}"
-    with ctx.trace.stage(f"{stage}:bg_fetch"):
-        image = r2.get(background_key)
-    mime = "image/jpeg" if background_key.endswith(".jpg") else "image/png"
+    if rebuilt is not None:
+        image, mime = rebuilt["png"], "image/png"
+    else:
+        with ctx.trace.stage(f"{stage}:bg_fetch"):
+            image = r2.get(background_key)
+        mime = "image/jpeg" if background_key.endswith(".jpg") else "image/png"
+    focus = None
+    if not generated and rebuilt is None:
+        # The owner's photograph, whole: cropped around its subject again.
+        focus = (await asyncio.to_thread(product.subject_box, image))[0]
     with ctx.trace.stage(f"{stage}:compose"):
-        png = await compose.compose(brief, slide, brand_snapshot, image, mime)
+        png, report = await compose.compose_with_report(
+            brief,
+            slide,
+            brand_snapshot,
+            image,
+            mime,
+            layout=(rebuilt or {}).get("layout"),
+            generated=generated,
+            focus=focus,
+            subject=(rebuilt or {}).get("subject"),
+            keep_sources=brief.is_reel(),
+        )
         final = await asyncio.to_thread(compose.export_jpeg, png, brief.pixel_size())
     with ctx.trace.stage(f"{stage}:upload"):
         key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.jpg")
         url = r2.put(key, final, "image/jpeg")
     video_key = video_url = None
     if brief.is_reel():
-        # A revision of a reel -- or a still turned into one -- re-renders the
-        # motion over the same photograph. Still free: no image call.
-        video_key, video_url = await _render_reel(ctx, creative_id, image, png, stage)
+        # A revision of a reel re-renders the motion over the same picture.
+        # Still free: no image call.
+        video_key, video_url = await _render_reel(ctx, creative_id, report["reel"], stage)
     with session_scope() as db:
         c = db.get(Creative, creative_id)
         c.composed_key, c.composed_url, c.status = key, url, "ready"
@@ -1349,6 +1870,140 @@ async def _show(ctx: ToolContext, brief: CreativeBrief, urls: list[str]) -> bool
     if not ok:
         log.error("creative_not_delivered", account_id=str(ctx.account_id), urls=len(urls))
     return ok
+
+
+def _stored_pictures(rows) -> dict[int, dict]:
+    """What each slide of a stored creative was composed over, by position."""
+    return {
+        c.slide_position: {
+            "template": c.template,
+            "provider": c.imagegen_provider or "",
+            "background_key": c.background_key or "",
+        }
+        for c in rows
+    }
+
+
+def cutout_key_beside(background_key: str) -> str:
+    """The cut-out stored next to a product-studio background (same day,
+    same creative), derived from the background's own key because key_for
+    dates a key on the day it is made."""
+    return background_key.rsplit("-bg.", 1)[0] + "-cutout.png"
+
+
+def _owner_photo_slides(rows, slide_position: int | None) -> list[dict]:
+    return [
+        {"slide": c.slide_position, "lane": c.imagegen_provider}
+        for c in sorted(rows, key=lambda c: c.slide_position)
+        if (c.imagegen_provider or "") in PHOTO_LANES
+        and (slide_position is None or c.slide_position == slide_position)
+    ]
+
+
+_FORMAT_HINT = (
+    "Nothing was made and nothing was charged. A post and a story (or reel) are different "
+    "shapes, and a picture made for one is never cropped into the other. Use "
+    "create_creative for the new format; the owner's photo (if any) is used again for free."
+)
+_LAYOUT_PICTURE_HINT = (
+    "Nothing was made and nothing was charged. The picture on the slide(s) named was made "
+    "for the layout it had: in the new layout it would be cut by the window or covered by "
+    "the words. Keep the layout and revise the copy, or call regenerate_image with "
+    "template_id set in the revision first (1 credit) so a picture is made for the new "
+    "layout."
+)
+
+
+async def _revision_guard(
+    brief: CreativeBrief, before: dict, snap
+) -> tuple[dict | None, dict[int, dict]]:
+    """A revision that changes the shape or the layout must not reuse a
+    picture made for the old one. Returns (refusal, rebuilt): a refusal to
+    hand back, or the studio pictures rebuilt for the new window from the
+    stored cut-out (free: no model runs) keyed by slide position.
+
+    A format change (post <-> story/reel) is always refused: the old picture
+    is the wrong ratio and would be cropped 30% and enlarged 1.4x. On a
+    layout change, a product-studio slide is re-placed from its cut-out; a
+    generated picture must still fit the new window and keep its subject
+    out from under the words, or the revision is refused; a whole photo is
+    cropped around its subject again by the compositor and only its pixels
+    are checked here.
+    """
+    old_type = str(before.get("format", {}).get("type") or "single")
+    tall = {"story", "reel"}
+    if (old_type in tall) != (brief.format.type in tall):
+        return {"ok": False, "reason": "format_change_needs_new_picture", "charged": 0,
+                "hint": _FORMAT_HINT}, {}  # fmt: skip
+    w, h = brief.pixel_size()
+    rebuilt: dict[int, dict] = {}
+    stuck: list[dict] = []
+    for slide in brief.units():
+        was = before.get("slides", {}).get(slide.position)
+        template = brief.template_for(slide)
+        if not was or was["template"] == template or not was["background_key"]:
+            continue
+        layout = await compose.check_layout(brief, slide, snap)
+        window = compose.photo_window(layout, w, h)
+        size = (window[2] - window[0], window[3] - window[1])
+        if was["provider"] == "product_studio":
+            try:
+                rgba, _ = product.cutout_from_png(r2.get(cutout_key_beside(was["background_key"])))
+            except Exception:  # noqa: BLE001 - an older draft without a stored cut-out
+                log.warning("cutout_missing_for_revision", position=slide.position)
+                stuck.append({"slide": slide.position, "why": "no stored cut-out"})
+                continue
+            free = _free_rect(layout, window, w, h)
+            png, box = product.studio(
+                rgba,
+                size[0],
+                size[1],
+                palette=dict(getattr(snap, "palette", {}) or {}),
+                free=free,
+                anchor=product.ANCHOR.get(template, 0.5),
+            )
+            ox, oy = window[0], window[1]
+            subject = (box[0] + ox, box[1] + oy, box[2] + ox, box[3] + oy)
+            rebuilt[slide.position] = {
+                "png": png,
+                "subject": subject,
+                "layout": layout,
+                "cutout": r2.get(cutout_key_beside(was["background_key"])),
+            }
+            log.info("studio_rebuilt_for_layout", position=slide.position, template=template)
+            continue
+        image = r2.get(was["background_key"])
+        if was["provider"] in PHOTO_LANES:
+            iw, ih = compose.image_size(image)
+            if max(size[0] / iw, size[1] / ih) > compose.MAX_PHOTO_UPSCALE:
+                stuck.append({"slide": slide.position, "why": "photo too small for the window"})
+            continue
+        from app.creative.imagegen.base import crop_for
+
+        got = compose.image_size(image)
+        if crop_for(got, size) > compose.GENERATED_CROP_TOLERANCE or got[0] < size[0]:
+            stuck.append({"slide": slide.position, "why": "picture made for another window"})
+            continue
+        bbox, trusted = await asyncio.to_thread(product.subject_box, image)
+        words = _text_box_in_window(layout, window)
+        if trusted and bbox and words:
+            scale = size[0] / got[0]
+            sl, st, sr, sb = (v * scale / d for v, d in zip(bbox, (*size, *size), strict=True))
+            wl, wt, wr, wb = words
+            if sl < wr and wl < sr and st < wb and wt < sb:
+                stuck.append({"slide": slide.position, "why": "subject under the words"})
+    if stuck:
+        log.warning("revision_refused_picture", slides=stuck)
+        return {"ok": False, "reason": "picture_made_for_other_layout", "charged": 0,
+                "slides": stuck, "hint": _LAYOUT_PICTURE_HINT}, {}  # fmt: skip
+    return None, rebuilt
+
+
+def _store_rebuilt(ctx: ToolContext, creative_id: uuid.UUID, rebuilt: dict) -> str:
+    key = r2.key_for(str(ctx.brand_id), str(creative_id), "bg.png")
+    r2.put(key, rebuilt["png"], "image/png")
+    r2.put(cutout_key(str(ctx.brand_id), str(creative_id)), rebuilt["cutout"], "image/png")
+    return key
 
 
 def _mark_failed(creative_id: uuid.UUID, error: str, *, cost_micros: int = 0) -> None:
@@ -1424,12 +2079,14 @@ def _resolve_photos(
     known = {str(c.id) for c in candidates}
 
     # An explicit reference is honoured only if it is a real photo of THIS
-    # brand. The model authors that field; a made-up or foreign id used to skip
-    # billing and then fall through to a paid model call anyway.
+    # brand, and one the compositor can use: the same floor the automatic
+    # match applies (no logo, not under 800px), because a referenced 640px
+    # photo was enlarged to the canvas and shipped soft.
+    by_id = {str(c.id): c for c in candidates}
     out: dict[int, str] = {}
     for u in units:
         raw = u.visual_direction.reference_asset_id
-        if raw and str(raw) in known:
+        if raw and str(raw) in known and photoref.is_usable(by_id[str(raw)]):
             out[u.position] = str(raw)
         elif raw:
             log.warning("reference_asset_ignored", position=u.position, asset_id=str(raw))

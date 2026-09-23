@@ -131,7 +131,7 @@ async def test_a_story_is_rendered_at_1080_by_1920_not_cropped_from_a_post(chrom
 
     brief = _brief("story")
     gw, gh = generation_size(brief.pixel_size())
-    assert (gw, gh) == (1088, 1920), "generated natively tall, not a 4:5 picture cropped"
+    assert (gw, gh) == (1440, 2560), "generated natively tall, not a 4:5 picture cropped"
     buf = io.BytesIO()
     Image.new("RGB", (gw, gh), (90, 110, 100)).save(buf, "PNG")
     png = await compose.compose(brief, brief.units()[0], _brand(), buf.getvalue(), "image/png")

@@ -32,10 +32,11 @@ from app.creative.brief import MOOD_MAX
 # The brief validator caps the model-authored prompt at 900 characters and the
 # mood at MOOD_MAX. The enrichment adds a bounded amount on top, so the total on
 # the wire is known: 900 + ENRICHMENT_MAX. Enforced below, not just documented.
-# (Raised from 720 for the palette clause. gpt-image-2 has no 256-token window;
-# for FLUX the palette sits BEFORE the camera clause, so the trim in
-# providers.flux_prompt still takes the tail and not the brand's colours.)
-ENRICHMENT_MAX = 800
+# (Raised from 720 for the palette clause and again for the copy-space clause.
+# gpt-image-2 has no 256-token window; for FLUX the palette and the copy space
+# sit BEFORE the camera clause, so the trim in providers.flux_prompt still
+# takes the tail and not the brand's colours or where the words go.)
+ENRICHMENT_MAX = 980
 
 # Present in every enriched prompt; also the idempotency marker.
 _MARKER = "shot on a full-frame camera"
@@ -206,21 +207,22 @@ PLAYBOOK: list[tuple[tuple[str, ...], str]] = [
 ]
 
 
-# The camera clause, the longest playbook clause and the longest mood, plus
-# punctuation, must fit the budget.
+# The camera clause, the longest playbook clause, the longest mood and the
+# copy-space clause, plus punctuation, must fit the budget.
 _LONGEST_PLAY = max(len(c) for _, c in PLAYBOOK)
 # The per-slide camera clauses are longer than the fixed one (they name a
-# framing and a copy-space as well as a lens), so the budget is checked
-# against the WORST rung of the ladder, not against CAMERA_DIRECTION. If a new
-# shot is added and this trips, shorten the shot -- do not raise the budget:
-# past ~1000 characters FLUX silently drops the tail, which is the camera.
+# framing as well as a lens), so the budget is checked against the WORST rung
+# of the ladder, not against CAMERA_DIRECTION. If a new shot is added and this
+# trips, shorten the shot -- do not raise the budget: past ~1000 characters
+# FLUX silently drops the tail, which is the camera.
 _LONGEST_CAMERA = max(
     len(CAMERA_DIRECTION),
     max(len(_shotplan.camera_clause(i, 6)) for i in range(1, 7)),
 )
-assert _LONGEST_CAMERA + _LONGEST_PLAY + MOOD_MAX + PALETTE_MAX + 14 <= ENRICHMENT_MAX, (
-    "enrichment exceeds its budget"
-)
+assert (
+    _LONGEST_CAMERA + _LONGEST_PLAY + MOOD_MAX + PALETTE_MAX + _shotplan.COPY_SPACE_MAX + 16
+    <= ENRICHMENT_MAX
+), "enrichment exceeds its budget"
 
 
 def _has_word(text: str, key: str) -> bool:
@@ -249,6 +251,8 @@ def photographic(
     slide_count: int | None = None,
     palette: dict | None = None,
     style: str | None = None,
+    template: str | None = None,
+    text_box: tuple[float, float, float, float] | None = None,
 ) -> tuple[str, str]:
     """Return (prompt, negative) tuned for a photograph, safely re-runnable.
 
@@ -256,6 +260,12 @@ def photographic(
     them the fixed CAMERA_DIRECTION is used, which is correct for a single
     post; passing them is what stops a carousel's slides being six versions of
     the same photograph.
+
+    `template` and `text_box` (the measured type block, as fractions of the
+    photo window) say where the words will sit, so the model keeps that part
+    of the frame calm -- on a single post as much as on a carousel slide. It
+    used to be said by the rung, by slide position, and disagreed with the
+    layout most of the time.
     """
     p = (prompt or "").strip()
     if _MARKER not in p:
@@ -273,7 +283,9 @@ def photographic(
             )
         tint = palette_clause(palette)
         tint_clause = f" {tint}." if tint else ""
-        p = f"{p.rstrip('.,; ')}{mood_clause}.{play_clause}{tint_clause} {camera}."
+        space = _shotplan.copy_space_clause(template, text_box) if template else ""
+        space_clause = f" {space}." if space else ""
+        p = f"{p.rstrip('.,; ')}{mood_clause}.{play_clause}{tint_clause}{space_clause} {camera}."
 
     parts = [s.strip() for s in (negative or "").split(",") if s.strip()]
     seen = {s.lower() for s in parts}

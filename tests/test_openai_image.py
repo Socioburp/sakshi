@@ -71,8 +71,10 @@ def test_the_generation_size_is_native_4_5_above_the_export_and_divisible_by_16(
     assert gw * 5 == gh * 4 and gw % 16 == 0 and gh % 16 == 0
     assert gw >= POST_SIZE[0] and gw * gh <= P.OPENAI_EXPERIMENTAL_PIXELS
     assert P.openai_size(gw, gh) == "1600x2000"
-    # a reel's still: the smallest multiple-of-16 frame that covers 1080x1920
-    assert generation_size(REEL_SIZE) == (1088, 1920)
+    # a story's or reel's still: the same-ratio OVERSAMPLED frame, as a post
+    # gets -- not the 1088x1920 that was trimmed 4px a side at delivery size
+    assert generation_size(REEL_SIZE) == (1440, 2560)
+    assert P.openai_size(1440, 2560) == "1440x2560"
 
 
 def test_the_export_size_is_not_a_legal_generation_size():

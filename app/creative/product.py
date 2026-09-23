@@ -25,7 +25,6 @@ Three stages, each measurable:
 from __future__ import annotations
 
 import io
-import math
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -51,28 +50,48 @@ MAX_COVERAGE = 0.80
 # Share of the mask that is semi-transparent. Clean cuts are decisive; a
 # mask that is a third fuzz is guessing (glass, hair, motion blur).
 MAX_SOFT_SHARE = 0.30
-# A product may sit on the bottom edge (it stands on something) but a mask
-# that runs off two or more edges is a cropped product or retained backdrop.
+# At most one edge of the photo may be touched, and only the bottom (see
+# MIN_BASE_SHARE): a mask on two edges is a cropped product or kept backdrop.
 MAX_BORDERS_TOUCHED = 1
+# A product may stand on the bottom edge of the photo (it sits on something,
+# and the contact shadow hides the flat base) -- if that contact is a BASE:
+# the mask's bottom row spans at least this share of the product's width. A
+# product cut by the left, right or top edge, or a bottom contact that is one
+# thin point, is a sliced product; placed mid-canvas it reads as a crop.
+MIN_BASE_SHARE = 0.40
+# Erosion, in full-resolution pixels. One pixel kills the halo the model
+# leaves; more than two takes chains, hooks and spoon handles with it -- a
+# 4000px photo used to lose 4px from every edge.
+MAX_ERODE_PX = 2
+# Share of the raw mask's solid area the refinement may remove. Past this the
+# erosion ate a thin feature, and the cut is refused rather than shipped
+# missing a piece.
+MAX_REFINE_LOSS = 0.03
+# The cut-out is never enlarged past this: a product small in the frame was
+# blown up ~3x to fill a zone, soft and ringing. Above the cap it is shown
+# smaller in its space instead.
+MAX_PLACE_UPSCALE = 1.25
+# Room kept between the product and the edge of the space it stands in, as a
+# share of the window's width.
+PLACE_MARGIN = 0.04
 
-# Where the product goes, per template: (top, bottom, max_width) as fractions
-# of the canvas. Chosen to stay clear of the type AND the logo each template
-# sets, and -- for split_card -- inside the band of the background that the
-# template actually shows (it centre-crops the picture into the top 63% of
-# the card, so the product must sit in the middle of the source, not its top).
+# Where the product goes when NO measured layout is at hand (a caller without
+# the layout report; tests): (top, bottom, max_width, anchor) as fractions of
+# the picture handed in, in the band that picture will show. The pipeline
+# never uses these: it lays out first and places second, into the free
+# rectangle FIT_JS measured (see `studio`).
 PLACEMENT = {
-    "lower_third": (0.17, 0.57, 0.68),
-    "split_card": (0.24, 0.72, 0.62),
-    "centered_overlay": (0.17, 0.40, 0.50),
-    # The band covers the top 34%; the product stands in the photo below it,
-    # above the footer row.
-    "top_band": (0.40, 0.84, 0.70),
+    "lower_third": (0.17, 0.57, 0.68, 0.5),
+    "split_card": (0.10, 0.88, 0.62, 0.5),
+    "centered_overlay": (0.17, 0.40, 0.50, 0.5),
+    "top_band": (0.08, 0.80, 0.70, 0.5),
     # Words top-left: the product goes right of centre, lower half.
-    "poster_stack": (0.42, 0.86, 0.56),
-    # The card shows the top 56% of the picture, framed; the product sits in
-    # the middle of that band.
-    "frame_card": (0.10, 0.50, 0.62),
+    "poster_stack": (0.42, 0.86, 0.56, 0.62),
+    "frame_card": (0.08, 0.90, 0.62, 0.5),
 }
+# Where the product stands, side to side, per layout: the centre of its
+# space, or right of it where the words own the left.
+ANCHOR = {"poster_stack": 0.62}
 # Type in the middle of the canvas and a product in the middle of the canvas
 # cannot both win. A product creative asked for as centered_overlay is set as
 # lower_third instead; the pipeline records the switch in its result.
@@ -110,6 +129,8 @@ class Cutout:
     borders_touched: int = 0
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
     rgba: Image.Image | None = field(default=None, repr=False)
+    edges: tuple[str, ...] = ()
+    refine_loss: float = 0.0
 
     def metrics(self) -> dict[str, Any]:
         return {
@@ -118,6 +139,8 @@ class Cutout:
             "coverage": round(self.coverage, 3),
             "soft_share": round(self.soft_share, 3),
             "borders_touched": self.borders_touched,
+            "edges": list(self.edges),
+            "refine_loss": round(self.refine_loss, 4),
         }
 
 
@@ -146,16 +169,20 @@ def _refine(mask: Image.Image, scale: float = 1.0) -> Image.Image:
 
     Erode so the background's colour does not ride along the outline (the
     classic "white fringe on a dark backdrop"), then a sub-pixel blur so the
-    edge reads as photographed rather than cut with scissors. The mask was
-    inferred at <=1024px and upscaled by `scale`; one pixel of erosion at
-    1024 is `scale` pixels here.
+    edge reads as photographed rather than cut with scissors. One pixel at
+    full resolution, two when the mask was inferred well below it -- never
+    more: `cutout` measures what the refinement removed and refuses a cut
+    that lost a thin part to it.
     """
-    k = 2 * max(1, math.ceil(scale)) + 1
-    m = mask.filter(ImageFilter.MinFilter(k))
-    return m.filter(ImageFilter.GaussianBlur(0.8 * max(1.0, scale)))
+    erode = 1 if scale <= 1.0 else MAX_ERODE_PX
+    m = mask.filter(ImageFilter.MinFilter(2 * erode + 1))
+    return m.filter(ImageFilter.GaussianBlur(0.8 * max(1.0, min(scale, 2.0))))
 
 
-def _measure(mask: Image.Image) -> tuple[float, float, int, tuple[int, int, int, int]]:
+def _measure(mask: Image.Image) -> tuple[float, float, tuple[str, ...], tuple[int, int, int, int]]:
+    """(coverage, soft share, edges the product touches, bbox). An edge is
+    'touched' when the mask reaches within 1% of it; the bottom counts as a
+    BASE (not a cut) when the contact row is wide enough to stand on."""
     a = np.asarray(mask, dtype=np.uint8)
     solid = a > 128
     present = a > 20
@@ -163,14 +190,21 @@ def _measure(mask: Image.Image) -> tuple[float, float, int, tuple[int, int, int,
     soft = float(((a > 20) & (a < 235)).sum() / max(1, present.sum()))
     ys, xs = np.where(solid)
     if len(xs) == 0:
-        return coverage, soft, 0, (0, 0, 0, 0)
+        return coverage, soft, (), (0, 0, 0, 0)
     x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
     h, w = a.shape
     edge = max(2, int(0.01 * min(w, h)))
-    touched = sum(
-        1 for hit in (x0 <= edge, y0 <= edge, x1 >= w - 1 - edge, y1 >= h - 1 - edge) if hit
-    )
-    return coverage, soft, touched, (x0, y0, x1 + 1, y1 + 1)
+    edges: list[str] = []
+    if x0 <= edge:
+        edges.append("left")
+    if y0 <= edge:
+        edges.append("top")
+    if x1 >= w - 1 - edge:
+        edges.append("right")
+    if y1 >= h - 1 - edge:
+        contact = int(solid[h - 1 - edge :, :].any(axis=0).sum())
+        edges.append("bottom" if contact >= MIN_BASE_SHARE * (x1 - x0 + 1) else "bottom_point")
+    return coverage, soft, tuple(edges), (x0, y0, x1 + 1, y1 + 1)
 
 
 def cutout(photo: bytes, session=None) -> Cutout:
@@ -182,12 +216,16 @@ def cutout(photo: bytes, session=None) -> Cutout:
     scale = max(rgb.size) / INFER_EDGE
     try:
         with _infer:
-            mask = _refine(_raw_mask(rgb, session), scale)
+            raw = _raw_mask(rgb, session)
+            mask = _refine(raw, scale)
     except Exception as exc:  # noqa: BLE001
         log.exception("cutout_model_failed")
         return Cutout(ok=False, reason=f"model failed: {exc}"[:120])
 
-    coverage, soft, touched, bbox = _measure(mask)
+    coverage, soft, edges, bbox = _measure(mask)
+    raw_area = int((np.asarray(raw, dtype=np.uint8) > 128).sum())
+    loss = 1 - coverage * mask.width * mask.height / raw_area if raw_area else 0.0
+    touched = len(edges)
     reason = ""
     if coverage < MIN_COVERAGE:
         reason = "product too small in frame or not found"
@@ -195,11 +233,20 @@ def cutout(photo: bytes, session=None) -> Cutout:
         reason = "background not separated from product"
     elif soft > MAX_SOFT_SHARE:
         reason = "edges too uncertain (glass, hair or motion blur)"
-    elif touched > MAX_BORDERS_TOUCHED:
+    elif touched > MAX_BORDERS_TOUCHED or (edges and edges != ("bottom",)):
         reason = "product runs off the edge of the photo"
+    elif loss > MAX_REFINE_LOSS:
+        reason = "a thin part of the product would be lost at the edge"
     if reason:
-        log.info("cutout_refused", reason=reason, coverage=round(coverage, 3), soft=round(soft, 3))
-        return Cutout(False, reason, coverage, soft, touched, bbox)
+        log.info(
+            "cutout_refused",
+            reason=reason,
+            coverage=round(coverage, 3),
+            soft=round(soft, 3),
+            edges=list(edges),
+            refine_loss=round(loss, 4),
+        )
+        return Cutout(False, reason, coverage, soft, touched, bbox, None, edges, loss)
 
     rgba = rgb.convert("RGBA")
     rgba.putalpha(mask)
@@ -208,7 +255,49 @@ def cutout(photo: bytes, session=None) -> Cutout:
     crop = rgba.crop(
         (max(0, x0 - pad), max(0, y0 - pad), min(rgba.width, x1 + pad), min(rgba.height, y1 + pad))
     )
-    return Cutout(True, "", coverage, soft, touched, bbox, crop)
+    return Cutout(True, "", coverage, soft, touched, bbox, crop, edges, loss)
+
+
+def cutout_png(cut: Cutout, source_asset_id: str | None = None) -> bytes:
+    """The RGBA cut-out as a PNG that carries where it came from, so a later
+    revision can stand the same product in a new window for nothing."""
+    from PIL import PngImagePlugin
+
+    assert cut.rgba is not None
+    info = PngImagePlugin.PngInfo()
+    if source_asset_id:
+        info.add_text("source_asset_id", str(source_asset_id))
+    # Not "bbox": a tEXt chunk of that name makes Pillow refuse to load the file.
+    info.add_text("product_box", ",".join(str(v) for v in cut.bbox))
+    buf = io.BytesIO()
+    cut.rgba.save(buf, format="PNG", pnginfo=info)
+    return buf.getvalue()
+
+
+def cutout_from_png(data: bytes) -> tuple[Image.Image, str | None]:
+    """(rgba, source_asset_id) back from `cutout_png`."""
+    im = Image.open(io.BytesIO(data))
+    im.load()
+    return im.convert("RGBA"), (im.info or {}).get("source_asset_id")
+
+
+def subject_box(photo: bytes, session=None) -> tuple[tuple[int, int, int, int] | None, bool]:
+    """Where the subject is in the owner's photo, in its UPRIGHT pixels, and
+    whether the mask behind that box is sane enough to crop around.
+
+    The same salient-object mask the cut-out lane uses; a cut the gate refuses
+    (glass, a product on two edges) still says where the subject is, and that
+    is what keeps a whole-photo crop off it. `trusted` is False when the mask
+    grabbed a shadow or kept the backdrop (coverage outside the gate's range)
+    or is mostly guess (soft): then the crop is centred as it always was.
+    """
+    if not settings.cutout_enabled:
+        return None, False
+    cut = cutout(photo, session=session)
+    if cut.bbox == (0, 0, 0, 0):
+        return None, False
+    trusted = MIN_COVERAGE <= cut.coverage <= MAX_COVERAGE and cut.soft_share <= MAX_SOFT_SHARE
+    return cut.bbox, trusted
 
 
 # --------------------------------------------------------------------------- #
@@ -289,21 +378,62 @@ def _contact_shadow(product: Image.Image, canvas: Image.Image, x: int, y: int) -
     return Image.alpha_composite(wide, tight)
 
 
-def place(cut: Image.Image, canvas: Image.Image, template: str) -> Image.Image:
-    """Scale the cut product into the zone the template leaves clear of type."""
-    top, bottom, max_w = PLACEMENT.get(template, PLACEMENT[PREFERRED_TEMPLATE])
+def place(
+    cut: Image.Image,
+    canvas: Image.Image,
+    free: tuple[int, int, int, int],
+    anchor: float = 0.5,
+) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """Stand the cut product inside `free` (l, t, r, b), a rectangle of the
+    canvas that the layout leaves clear of type and mark, with PLACE_MARGIN
+    kept on every side and its base on the rectangle's floor. `anchor` is
+    where its centre sits across the rectangle (0.5 the middle). Returns the
+    composite and the product's box on it."""
     W, H = canvas.size
-    zone_h = int(H * (bottom - top))
-    zone_w = int(W * max_w)
-    scale = min(zone_w / cut.width, zone_h / cut.height)
+    margin = int(round(W * PLACE_MARGIN))
+    fl, ft, fr, fb = free
+    zone_w, zone_h = max(1, fr - fl - 2 * margin), max(1, fb - ft - 2 * margin)
+    scale = min(zone_w / cut.width, zone_h / cut.height, MAX_PLACE_UPSCALE)
     pw, ph = max(1, int(cut.width * scale)), max(1, int(cut.height * scale))
     product = cut.resize((pw, ph), Image.LANCZOS)
-    x = (W - pw) // 2
-    y = int(H * bottom) - ph  # stands on the zone floor, not floating mid-air
+    x = int(round(fl + margin + zone_w * anchor - pw / 2))
+    x = max(fl + margin, min(x, fr - margin - pw))
+    y = fb - margin - ph  # stands on the floor of its space, not floating mid-air
     out = canvas.convert("RGBA")
     out = Image.alpha_composite(out, _contact_shadow(product, out, x, y))
     out.alpha_composite(product, (x, y))
-    return out.convert("RGB")
+    log.info("product_placed", scale=round(scale, 3), box=[x, y, x + pw, y + ph], free=list(free))
+    return out.convert("RGB"), (x, y, x + pw, y + ph)
+
+
+def free_rect_for(template: str, width: int, height: int) -> tuple[int, int, int, int]:
+    """The PLACEMENT fallback as a rectangle of a width x height picture."""
+    top, bottom, max_w, _ = PLACEMENT.get(template, PLACEMENT[PREFERRED_TEMPLATE])
+    half = width * max_w / 2 + width * PLACE_MARGIN
+    centre = width * PLACEMENT.get(template, PLACEMENT[PREFERRED_TEMPLATE])[3]
+    left = int(max(0, centre - half))
+    right = int(min(width, centre + half))
+    return left, int(height * top), right, int(height * bottom) + int(width * PLACE_MARGIN)
+
+
+def studio(
+    cut: Image.Image,
+    width: int,
+    height: int,
+    *,
+    palette: dict | None,
+    free: tuple[int, int, int, int],
+    anchor: float = 0.5,
+) -> tuple[bytes, tuple[int, int, int, int]]:
+    """The product on a studio backdrop of exactly width x height (the photo
+    window), standing in `free`. Returns (png_bytes, product_box). The floor
+    seam of the paper sweep sits where the product stands."""
+    floor = min(0.95, max(0.3, (free[3] - int(round(width * PLACE_MARGIN))) / height))
+    canvas = backdrop(width, height, palette, floor=floor)
+    composed, box = place(cut, canvas, free, anchor)
+    buf = io.BytesIO()
+    composed.save(buf, format="PNG", compress_level=1)
+    return buf.getvalue(), box
 
 
 def product_background(
@@ -314,26 +444,31 @@ def product_background(
     palette: dict | None,
     template: str,
     session=None,
+    cut: Cutout | None = None,
+    free: tuple[int, int, int, int] | None = None,
 ) -> tuple[bytes, dict[str, Any]] | None:
-    """The owner's product on a clean studio backdrop, sized for the canvas.
+    """The owner's product on a clean studio backdrop, width x height -- the
+    photo WINDOW the layout shows, not the canvas.
 
-    Returns (jpeg_bytes, metrics) or None when the cut cannot be trusted --
+    Returns (png_bytes, metrics) or None when the cut cannot be trusted --
     in which case the caller uses the photo as it was. Never raises: any
-    failure here means "use the photo whole", not "lose the slide".
+    failure here means "use the photo whole", not "lose the slide". `cut` is
+    a cut-out already made from this photo (the pipeline cuts once, before
+    the layout is chosen); without one the model runs here. `free` is the
+    rectangle the measured layout leaves clear of type and mark; without one
+    the PLACEMENT fallback for the template is used. metrics["subject"] is
+    the product's box on the picture.
     """
     if not settings.cutout_enabled:
         return None
     try:
-        cut = cutout(photo, session=session)
+        cut = cut or cutout(photo, session=session)
         if not cut.ok or cut.rgba is None:
             return None
-        _, zone_bottom, _ = PLACEMENT.get(template, PLACEMENT[PREFERRED_TEMPLATE])
-        # The floor seam sits exactly where the product stands.
-        canvas = backdrop(width, height, palette, floor=zone_bottom)
-        composed = place(cut.rgba, canvas, template)
-        buf = io.BytesIO()
-        composed.save(buf, format="JPEG", quality=92, subsampling=0)
-        return buf.getvalue(), cut.metrics()
+        space = free or free_rect_for(template, width, height)
+        anchor = ANCHOR.get(template, 0.5)
+        png, box = studio(cut.rgba, width, height, palette=palette, free=space, anchor=anchor)
+        return png, {**cut.metrics(), "subject": list(box), "free": list(space)}
     except Exception:  # noqa: BLE001
         log.exception("product_background_failed")
         return None

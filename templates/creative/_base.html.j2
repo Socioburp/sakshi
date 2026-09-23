@@ -161,6 +161,11 @@
                text-transform: uppercase; text-wrap: balance;
                overflow-wrap: normal; word-break: normal; hyphens: manual; }
 
+  {# The placed product (or a photo's subject), as a box the compositor can
+     see. It draws nothing -- the pixels are in the picture -- but FIT_JS
+     treats it as an element: nothing may overlap it, no plate is laid on
+     it, and it must sit whole inside the photo window and the safe zone. #}
+  .subject { position: absolute; pointer-events: none; }
   {# No slide indicator is drawn. Instagram paints its own pagination dots
      under a carousel; a second row baked into the image reads as a screenshot
      of the app, and it goes stale the moment the owner reorders the slides. #}
@@ -175,6 +180,7 @@
     <div class="grain"></div>
     {% if brand.signature == 'corner' %}<div class="sig-corner"></div>{% endif %}
     {% if brand.signature == 'bar' %}<div class="sig-bar"></div>{% endif %}
+    {% if subject %}<div class="subject" style="left: {{ subject[0] }}px; top: {{ subject[1] }}px; width: {{ subject[2] - subject[0] }}px; height: {{ subject[3] - subject[1] }}px;"></div>{% endif %}
     {% block body %}{% endblock %}
   </div>
 </body>

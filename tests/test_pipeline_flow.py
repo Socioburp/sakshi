@@ -76,6 +76,14 @@ class _Provider:
 
 @pytest.fixture
 async def world(monkeypatch):
+    w = await build_world(monkeypatch)
+    yield w
+    await compose.shutdown()
+
+
+async def build_world(monkeypatch) -> dict:
+    """The faked world behind the `world` fixture, callable from other test
+    modules (tests/test_image_perfection.py drives the same pipeline)."""
     try:
         await compose.get_browser()
     except Exception as exc:  # noqa: BLE001
@@ -141,8 +149,7 @@ async def world(monkeypatch):
         account_id=uuid.uuid4(), brand_id=w["brand"].id, message_id=None, wa_id="9198",
         trace=Trace("flow"), say=say, progress=say, show=show, show_video=show,
     )  # fmt: skip
-    yield w
-    await compose.shutdown()
+    return w
 
 
 def _clean(monkeypatch, *scripted):

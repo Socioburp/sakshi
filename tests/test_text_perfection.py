@@ -854,12 +854,17 @@ async def test_the_delivered_frame_is_rasterised_at_2x_and_the_layout_proof_at_1
 
     monkeypatch.setattr(browser, "new_page", new_page)
     brief = _brief("lower_third", "Weekend Sale", "Cold-pressed", "Order now")
-    await compose.check_layout(brief, brief.units()[0], _brand())
+    report = await compose.check_layout(brief, brief.units()[0], _brand())
     png = await compose.compose(
-        brief, brief.units()[0], _brand(), _flat((90, 110, 100)), "image/png"
+        brief, brief.units()[0], _brand(), _flat((90, 110, 100)), "image/png", layout=report
     )
     assert scales == [1, 2]
     assert compose.image_size(png) == brief.pixel_size(), "Lanczos back to the export size"
+    # Handed no report, compose measures the photo window itself on a 1x page
+    # before it fits the picture: the window is a property of the copy.
+    scales.clear()
+    await compose.compose(brief, brief.units()[0], _brand(), _flat((90, 110, 100)), "image/png")
+    assert scales == [1, 2], "its own 1x proof, then the one 2x frame"
 
 
 def test_the_smallest_type_survives_a_platform_re_encode():

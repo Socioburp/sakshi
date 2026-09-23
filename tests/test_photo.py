@@ -42,6 +42,44 @@ def test_enrichment_never_asks_the_model_for_letterforms():
     )
 
 
+def test_copy_space_follows_the_layout_not_the_slide_position():
+    """The 'hero' rung asked for the subject filling the middle and the lower
+    third kept quiet -- on centered_overlay, whose type runs through the
+    middle. The clause now comes from the layout and the measured type block;
+    the rung says lens, distance and angle and nothing about words."""
+    from app.creative import shotplan
+
+    for shot in shotplan.LADDER:
+        for word in ("quiet", "empty", "clean", "copy", "cropped in hard"):
+            assert word not in shot.framing and word not in shot.camera, (shot.key, word)
+    hero, _ = photographic("a jar of pickle", None, position=2, slide_count=4,
+                           template="centered_overlay", text_box=(0.1, 0.32, 0.9, 0.7))  # fmt: skip
+    assert "Keep the band from 32% to 70% of the height" in hero
+    assert "never across the middle" in hero and "lower third" not in hero
+    lower, _ = photographic("a jar of pickle", None, template="lower_third")
+    assert "from 55% to 93%" in lower and "upper part of the frame" in lower
+    poster, _ = photographic("a jar of pickle", None, template="poster_stack",
+                             text_box=(0.08, 0.07, 0.6, 0.42))  # fmt: skip
+    assert "on the left" in poster and "lower part of the frame" in poster
+    panel, _ = photographic("a jar of pickle", None, template="split_card")
+    assert "No words will be set on this picture" in panel
+    # A single post gets one too (it had none), before the camera clause so
+    # a FLUX trim takes the lens, not the copy space.
+    single, _ = photographic("a jar of pickle", None, template="centered_overlay")
+    assert "Keep the band" in single and single.index("Keep the band") < single.index("shot on")
+    again, _ = photographic(single, None, template="lower_third")
+    assert again == single, "idempotent: a regenerate does not stack a second clause"
+
+
+def test_the_detail_rung_is_a_texture_study_not_a_cropped_subject():
+    """'cropped in hard' contradicted the gate's subject_cropped rejection and
+    bought retries on every carousel."""
+    from app.creative import shotplan
+
+    detail = shotplan.SHOT_BY_KEY["detail"]
+    assert "cropped" not in detail.framing and "no whole object" in detail.framing
+
+
 def test_a_real_photo_wins_when_the_words_actually_match():
     assets = [
         Asset("a", label="coconut oil bottle, 500ml"),

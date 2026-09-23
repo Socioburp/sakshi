@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from app.config import settings
 from app.creative import fonts, legibility
@@ -399,6 +399,7 @@ def render_html(
     brand: Any,
     background_data_uri: str,
     scrim_boost: float = 1.0,
+    subject: tuple[int, int, int, int] | None = None,
 ) -> str:
     name = brief.template_for(slide)
     tpl = _env.get_template(TEMPLATES.get(name, TEMPLATES[DEFAULT_TEMPLATE]))
@@ -466,6 +467,8 @@ def render_html(
         scrim_boost=scrim_boost,
         show_cta=bool(brief.cta)
         and (not brief.is_carousel() or slide.position == len(brief.slides)),
+        # The placed product's box on the canvas, for FIT_JS to guard.
+        subject=[int(round(v)) for v in subject] if subject else None,
     )
 
 
@@ -493,6 +496,14 @@ def render_html(
 #             overlap:<a>+<b>      two elements intersect
 #             logo_clearspace:<x>  something inside the mark's clear space
 #             logo_not_loaded      the mark would render as a hole
+#             subject_clipped      the placed product leaves the photo window
+#             subject_unsafe       the placed product reaches the grid's trim
+#
+# The SUBJECT is an element too: the product the studio placed (or a photo's
+# subject), given to render_html as a box. It is the one element that is
+# checked against the picture's own window, and the one nothing may be laid
+# over -- words, mark or plate. Type set on the placed product used to be
+# invisible to every check here.
 #
 # Text is measured from its REAL INK, grapheme by grapheme. Horizontally that is
 # a Range per grapheme -- an <h1> is as wide as its container however short
@@ -693,9 +704,25 @@ FIT_JS = r"""
     all('.bg, .scrim, .grain').forEach(e => { e.style.height = h + 'px'; });
   };
 
+  // The rectangle of the photograph a reader SEES, after reflow: the framed
+  // box of a card, the strip under a band, the whole canvas when the picture
+  // runs full-bleed. Measured inside any border, clipped to the canvas. It is
+  // what the picture is generated and fitted FOR (compose.fit_background), so
+  // nothing outside it is ever paid for and nothing inside it is cropped.
+  const photoBox = () => {
+    const el = document.querySelector('.photo') || document.querySelector('.bg');
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none') return null;
+    const r = boxOf(el);
+    const bw = (side) => parseFloat(cs['border' + side + 'Width']) || 0;
+    return {l: Math.max(0, r.l + bw('Left')), t: Math.max(0, r.t + bw('Top')),
+            r: Math.min(W, r.r - bw('Right')), b: Math.min(H, r.b - bw('Bottom'))};
+  };
+
   const elements = () => {
     const out = [];
-    for (const cls of ['headline', 'subhead', 'cta', 'logo', 'brandline', 'rule']) {
+    for (const cls of ['headline', 'subhead', 'cta', 'logo', 'brandline', 'rule', 'subject']) {
       for (const el of all('.' + cls)) {
         const box = TEXT.includes(cls) ? measure(el).box : boxOf(el);
         if (area(box) > 0) out.push({cls, el, box});
@@ -734,6 +761,14 @@ FIT_JS = r"""
         }
       }
       const b = e.box;
+      if (e.cls === 'subject') {
+        const p = photoBox();
+        if (!p || b.l < p.l - 1 || b.t < p.t - 1 || b.r > p.r + 1 || b.b > p.b + 1)
+          v.push('subject_clipped');
+        if (b.l < safe.l - 1 || b.r > safe.r + 1 || b.t < safe.t - 1 || b.b > safe.b + 1)
+          v.push('subject_unsafe');
+        continue;
+      }
       if (b.l < -1 || b.t < -1 || b.r > W + 1 || b.b > H + 1) v.push('outside:' + e.cls);
       else if (e.cls !== 'rule' && (b.l < safe.l - 1 || b.r > safe.r + 1
                                     || b.t < safe.t - 1 || b.b > safe.b + 1))
@@ -857,7 +892,7 @@ FIT_JS = r"""
   for (const e of elements()) boxes[e.cls] = e.box;
   const mark = document.querySelector('img.logo');
   return {violations: violations(), sizes, boxes, inks, canvas: [W, H],
-          logo_solid: mark ? solidBehind(mark) : false};
+          photo_box: photoBox(), logo_solid: mark ? solidBehind(mark) : false};
 }
 """
 
@@ -1050,28 +1085,193 @@ class BrandFontUnavailable(RuntimeError):
     face would be an approximation of the brand, so the render is refused."""
 
 
-def fit_background(image: bytes, width: int, height: int) -> bytes:
-    """The generated picture, resampled to the canvas with Lanczos.
+class PictureMismatch(RuntimeError):
+    """A generated picture does not fit the window it was generated for.
 
-    Generation runs above the delivery size (1600x2000 for a 1080x1350 post).
-    Handing the browser the full frame and letting `object-fit` scale it uses
-    Chromium's bilinear-ish filter and makes every page carry a 5MB data URI;
-    resampling here is both sharper and faster. Same ratio in, so nothing is
-    cropped; a legacy or owner-supplied picture of another ratio is centre-
-    cropped to cover, which is what the template did with it anyway.
+    The frame is asked for at the window's own ratio, above its size, so the
+    only way this fires is a vendor returning something else -- and that is
+    refused, never centre-cropped or enlarged to fit. `crop` is the pixels of
+    the window that would have been lost, `scale` the enlargement.
+    """
+
+    def __init__(self, message: str, *, crop: float = 0.0, scale: float = 1.0) -> None:
+        super().__init__(message)
+        self.crop, self.scale = round(float(crop), 2), round(float(scale), 4)
+
+
+class PhotoTooSmall(RuntimeError):
+    """The owner's photograph has too few pixels for the window it would fill.
+
+    Enlarging it past MAX_PHOTO_UPSCALE shows before the creative does -- a
+    soft jar on a sharp card -- so it is refused here, and the pipeline asks
+    for the original (or a layout with a smaller window) instead.
+    """
+
+    def __init__(self, message: str, *, scale: float) -> None:
+        super().__init__(message)
+        self.scale = round(float(scale), 3)
+
+
+# The most a GENERATED picture may lose to its window, in window pixels: the
+# rounding of two multiples of 16 to the window's ratio, and nothing more.
+GENERATED_CROP_TOLERANCE = 4.0
+# The most an owner's photograph is ever enlarged. WhatsApp hands over
+# 1280x960 for a landscape phone photo; covering a 1080x1350 post from that
+# is 1.41x and it showed. 1.15x is where Lanczos still passes for the original.
+MAX_PHOTO_UPSCALE = 1.15
+# Room kept between the subject and the crop's edge when the crop has it to
+# give, as a share of the crop: a bottle exactly touching the frame reads as
+# cropped even when no pixel of it is.
+FOCUS_MARGIN = 0.04
+# The blurred extension behind a letterboxed photograph.
+LETTERBOX_BLUR = 0.03  # of the window's width
+LETTERBOX_DARKEN = 0.72
+
+
+def _focus_crop(
+    size: tuple[int, int], crop: tuple[float, float], focus: tuple[int, int, int, int] | None
+) -> tuple[int, int] | None:
+    """(left, top) of a `crop`-sized window over a `size` image that keeps
+    `focus` inside it, or None when the focus cannot fit at any offset."""
+    iw, ih = size
+    cw, ch = crop
+    if focus is None:
+        return round((iw - cw) / 2), round((ih - ch) / 2)
+    fx0, fy0, fx1, fy1 = focus
+    if fx1 - fx0 > cw + 0.5 or fy1 - fy0 > ch + 0.5:
+        return None
+
+    def place(lo: float, hi: float, span: float, full: float) -> float:
+        # Centre the crop on the subject, keep a margin where there is room,
+        # then clamp to the picture. Clamping can only move the crop TOWARDS
+        # the subject's far edge, never off it: the subject fits the crop.
+        margin = min(FOCUS_MARGIN * span, (span - (hi - lo)) / 2)
+        start = (lo + hi) / 2 - span / 2
+        start = min(start, lo - margin)
+        start = max(start, hi + margin - span)
+        return min(max(0.0, start), full - span)
+
+    return round(place(fx0, fx1, cw, iw)), round(place(fy0, fy1, ch, ih))
+
+
+def _letterbox(im: Image.Image, width: int, height: int) -> Image.Image:
+    """The photograph whole, contained in the window, on a blurred and
+    darkened extension of itself -- what a subject too large for any crop
+    gets instead of a crop."""
+    ground = im.copy()
+    scale = max(width / ground.width, height / ground.height)
+    ground = ground.resize(
+        (max(width, round(ground.width * scale)), max(height, round(ground.height * scale))),
+        Image.BILINEAR,
+    )
+    left, top = (ground.width - width) // 2, (ground.height - height) // 2
+    ground = ground.crop((left, top, left + width, top + height))
+    ground = ground.filter(ImageFilter.GaussianBlur(width * LETTERBOX_BLUR))
+    ground = ImageEnhance.Brightness(ground).enhance(LETTERBOX_DARKEN)
+    fit = min(width / im.width, height / im.height)
+    inner_size = (max(1, round(im.width * fit)), max(1, round(im.height * fit)))
+    inner = im.resize(inner_size, Image.LANCZOS)
+    ground.paste(inner, ((width - inner.width) // 2, (height - inner.height) // 2))
+    return ground
+
+
+def fit_background(
+    image: bytes,
+    width: int,
+    height: int,
+    *,
+    generated: bool = False,
+    focus: tuple[int, int, int, int] | None = None,
+) -> bytes:
+    """The picture, resampled with Lanczos to the WINDOW the layout shows.
+
+    `width` x `height` is the photo window (compose measures it before the
+    picture is fitted): the whole canvas for a full-bleed layout, the framed
+    box or the strip under the band for the others -- so a picture generated
+    for that window lands in it 1:1 and nothing is cover-cropped by the
+    stylesheet. Generation runs above the delivery size (1600x2000 for a
+    1080x1350 post); handing the browser the full frame and letting
+    `object-fit` scale it uses Chromium's bilinear-ish filter and makes every
+    page carry a 5MB data URI, and resampling here is both sharper and faster.
+
+    A GENERATED picture (`generated=True`) was made for this window: its ratio
+    must agree within GENERATED_CROP_TOLERANCE and it is never enlarged;
+    anything else is a vendor fault and raises PictureMismatch.
+
+    An owner's photograph may be any shape. It is never enlarged past
+    MAX_PHOTO_UPSCALE (PhotoTooSmall), and it is cropped around its SUBJECT:
+    `focus` is the subject's box in the photo's upright pixels, and the crop
+    is placed so the whole of it stays inside the window. A subject that
+    cannot fit the window at any offset is not cropped -- the photograph is
+    letterboxed whole on a blurred extension of itself. A 4:3 shopfront on a
+    post lost 40% of its width to a blind centre crop before this.
+
+    Orientation is honoured first: a phone photo carries its rotation in EXIF,
+    and used whole it shipped sideways, cropped on the unrotated pixels.
     """
     with Image.open(BytesIO(image)) as im:
+        im = ImageOps.exif_transpose(im)
         im = im.convert("RGB")
         if im.size == (width, height):
             return image
         scale = max(width / im.width, height / im.height)
-        if abs(im.width * scale - width) > 1 or abs(im.height * scale - height) > 1:
+        crop = max(im.width * scale - width, im.height * scale - height)
+        if generated:
+            log.info(
+                "generated_fit",
+                source=f"{im.width}x{im.height}",
+                window=f"{width}x{height}",
+                scale=round(scale, 4),
+                crop_px=round(crop, 2),
+            )
+            if scale > 1.0 + 1e-6 or crop > GENERATED_CROP_TOLERANCE:
+                raise PictureMismatch(
+                    f"generated picture {im.width}x{im.height} does not fit its "
+                    f"{width}x{height} window (scale {scale:.3f}, crop {crop:.1f}px)",
+                    crop=crop,
+                    scale=scale,
+                )
+        elif scale > MAX_PHOTO_UPSCALE:
+            raise PhotoTooSmall(
+                f"photo {im.width}x{im.height} would be enlarged {scale:.2f}x to fill "
+                f"{width}x{height}; the most allowed is {MAX_PHOTO_UPSCALE}x",
+                scale=scale,
+            )
+        if crop > 1:
             cw, ch = width / scale, height / scale
-            left, top = (im.width - cw) / 2, (im.height - ch) / 2
-            im = im.crop((round(left), round(top), round(left + cw), round(top + ch)))
+            at = _focus_crop(im.size, (cw, ch), focus)
+            if at is None:
+                log.info(
+                    "photo_letterboxed",
+                    source=f"{im.width}x{im.height}",
+                    window=f"{width}x{height}",
+                    subject=list(focus or ()),
+                )
+                im = _letterbox(im, width, height)
+            else:
+                left, top = at
+                log.info(
+                    "photo_cropped",
+                    source=f"{im.width}x{im.height}",
+                    window=f"{width}x{height}",
+                    crop=[left, top, round(left + cw), round(top + ch)],
+                    subject=list(focus or ()),
+                )
+                im = im.crop((left, top, round(left + cw), round(top + ch)))
         out = BytesIO()
         im.resize((width, height), Image.LANCZOS).save(out, format="PNG", compress_level=1)
         return out.getvalue()
+
+
+def photo_window(report: dict | None, width: int, height: int) -> tuple[int, int, int, int]:
+    """The photo window FIT_JS measured, as integer canvas pixels (l, t, r, b):
+    the box the picture is generated for and fitted to. The whole canvas when
+    the layout reports none."""
+    box = report.get("photo_box") if report else None
+    if not box:
+        return 0, 0, width, height
+    left, top = round(box["l"]), round(box["t"])
+    return left, top, left + round(box["r"] - box["l"]), top + round(box["b"] - box["t"])
 
 
 def _fit_config(w: int, h: int) -> dict[str, Any]:
@@ -1286,6 +1486,14 @@ async def _make_legible(
             for g in groups
         ]
         k, why = max(guesses, key=lambda guess: guess[0])
+        if report["boxes"].get("subject") and k > 1.0:
+            # The gradient runs over the whole photograph, product included.
+            # Boosting it for words that sit nowhere near the product washed
+            # the owner's jar dark; with a product in the frame the gradient
+            # stays at its design strength and the plates -- laid under the
+            # words only, clipped off the product -- carry the contrast.
+            log.info("scrim_boost_held_for_subject", template=template, wanted=k)
+            k = 1.0
         if k != 1.0:
             log.info("scrim_measured", template=template, **why)
 
@@ -1296,16 +1504,20 @@ async def _make_legible(
     mark: dict | None = None
     feather = w * PLATE_FEATHER
     short: dict[str, float] = {}
+    subject = report["boxes"].get("subject")
     for attempt in range(LEGIBILITY_ROUNDS + 1):
         plates = []
         for group, alpha in zip(groups, alphas, strict=True):
             if alpha:
                 g = _union(group)
                 ink, _ = _ink_of(group[0])
+                box = [g[0] - feather, g[1] - feather, g[2] + feather, g[3] + feather]
                 plates.append(
                     {
                         "anchor": group[0]["cls"],
-                        "box": [g[0] - feather, g[1] - feather, g[2] + feather, g[3] + feather],
+                        # The feather reaches past the words; it stops at the
+                        # product. A plate was a black slab over the jar.
+                        "box": _kept_off(box, _edges(subject)) if subject else box,
                         "colour": legibility.plate_colour(ink),
                         "alpha": alpha,
                     }
@@ -1386,6 +1598,25 @@ async def _make_legible(
     raise LegibilityError(short, position=position)
 
 
+def _kept_off(box: list[float], keep: tuple[float, float, float, float]) -> list[float]:
+    """`box` pulled back on whichever side overlaps `keep` the least, so the
+    two no longer intersect. The words themselves never intersect the
+    subject (FIT_JS refused that); only the feather can reach it."""
+    left, top, right, bottom = box
+    kl, kt, kr, kb = keep
+    if not (left < kr and kl < right and top < kb and kt < bottom):
+        return box
+    cuts = [(right - kl, "r"), (kr - left, "l"), (bottom - kt, "b"), (kb - top, "t")]
+    _, side = min(cuts)
+    if side == "r":
+        return [left, top, kl, bottom]
+    if side == "l":
+        return [kr, top, right, bottom]
+    if side == "b":
+        return [left, top, right, kt]
+    return [left, kb, right, bottom]
+
+
 def _mark_plate(logo: dict, colour: str, alpha: float) -> dict:
     pad = MARK_PLATE_PAD * (logo["b"] - logo["t"])
     return {
@@ -1403,28 +1634,74 @@ async def _compose_once(
     brand: Any,
     background: bytes,
     background_mime: str = "image/jpeg",
+    layout: dict | None = None,
+    generated: bool = False,
+    focus: tuple[int, int, int, int] | None = None,
+    subject: tuple[int, int, int, int] | None = None,
+    keep_sources: bool = False,
 ) -> tuple[bytes, dict]:
     """The finished PNG for one slide (a single post is slide 1 of 1), and the
     report of what was fitted and measured to make it.
+
+    With `keep_sources` (a reel) the report also carries `reel`: the 2x
+    raster of the frame without its words and mark (`ground`), the 2x raster
+    of the finished frame (`card`) and the photo window, for reel.frames to
+    animate from -- every frame a Lanczos downscale, never an enlargement.
+
+    `layout` is the pre-charge check_layout report for this slide; it carries
+    the photo window the picture was generated for. Without one the window is
+    measured here first -- it is a property of the copy, not of the picture,
+    so a blank page answers it. `generated` says the picture was made for
+    that window and is held to it; `focus` is an owner photo's subject box,
+    kept inside the window (see fit_background); `subject` is the placed
+    product's box on the canvas, guarded by FIT_JS as an element.
 
     Raises LayoutError / LegibilityError / BrandFontUnavailable instead of
     returning a frame that breaks a guarantee. There is no degraded output.
     """
     w, h = brief.pixel_size()
     template = brief.template_for(slide)
-    fitted = await asyncio.to_thread(fit_background, background, w, h)
+    if layout is None:
+        layout = await _check_layout_once(brief, slide, brand)
+    window = photo_window(layout, w, h)
+    bw, bh = window[2] - window[0], window[3] - window[1]
+    fitted = await asyncio.to_thread(
+        fit_background, background, bw, bh, generated=generated, focus=focus
+    )
     mime = "image/png" if fitted is not background else background_mime
-    html = render_html(brief, slide, brand, as_data_uri(fitted, mime))
+    html = render_html(brief, slide, brand, as_data_uri(fitted, mime), subject=subject)
     browser = await get_browser()
     page = await browser.new_page(
         viewport={"width": w, "height": h}, device_scale_factor=SUPERSAMPLE
     )
     try:
         report = await _layout(page, brief, slide, brand, html)
+        # The window the fitted copy leaves for the picture must be the window
+        # the picture was made for. A panel that grew past it would cover-crop
+        # a picture generated to fill it exactly -- refused, never trimmed.
+        got = photo_window(report, w, h)
+        if abs((got[2] - got[0]) - bw) > 1 or abs((got[3] - got[1]) - bh) > 1:
+            log.error(
+                "photo_window_changed",
+                template=template,
+                position=slide.position,
+                composed_for=f"{bw}x{bh}",
+                measured=f"{got[2] - got[0]}x{got[3] - got[1]}",
+            )
+            raise LayoutError(["photo_window:changed"], position=slide.position)
+        report["photo_window"] = list(window)
         report["legibility"] = await _make_legible(
             page, report, template, fitted, (w, h), slide.position
         )
-        shot = await page.screenshot(type="png", clip={"x": 0, "y": 0, "width": w, "height": h})
+        clip = {"x": 0, "y": 0, "width": w, "height": h}
+        shot = await page.screenshot(type="png", clip=clip)
+        if keep_sources:
+            await page.evaluate(HIDE_JS, ["no-type", "no-mark"])
+            try:
+                ground = await page.screenshot(type="png", clip=clip)
+            finally:
+                await page.evaluate(HIDE_JS, [])
+            report["reel"] = {"card": shot, "ground": ground, "window": list(window)}
     finally:
         await page.close()
     return await asyncio.to_thread(_resample, shot, w, h), report
@@ -1444,12 +1721,12 @@ async def _surviving_a_crash(fn, *args):
     One shared browser serves every job in flight, so one crash used to fail
     them all. get_browser() already relaunches a disconnected browser; this is
     what gives the render that was caught mid-crash its second go. Refusals
-    (LayoutError, BrandFontUnavailable) are verdicts, not crashes, and pass
-    straight through.
+    (LayoutError, BrandFontUnavailable, PictureMismatch, PhotoTooSmall) are
+    verdicts, not crashes, and pass straight through.
     """
     try:
         return await fn(*args)
-    except (TextDoesNotFit, BrandFontUnavailable):
+    except (TextDoesNotFit, BrandFontUnavailable, PictureMismatch, PhotoTooSmall):
         raise
     except Exception as exc:  # noqa: BLE001
         if not _is_browser_death(exc):
@@ -1469,9 +1746,24 @@ async def compose(
     brand: Any,
     background: bytes,
     background_mime: str = "image/jpeg",
+    *,
+    layout: dict | None = None,
+    generated: bool = False,
+    focus: tuple[int, int, int, int] | None = None,
+    subject: tuple[int, int, int, int] | None = None,
 ) -> bytes:
     """The finished PNG for one slide, or a refusal. Never a degraded frame."""
-    png, _ = await compose_with_report(brief, slide, brand, background, background_mime)
+    png, _ = await compose_with_report(
+        brief,
+        slide,
+        brand,
+        background,
+        background_mime,
+        layout=layout,
+        generated=generated,
+        focus=focus,
+        subject=subject,
+    )
     return png
 
 
@@ -1481,10 +1773,30 @@ async def compose_with_report(
     brand: Any,
     background: bytes,
     background_mime: str = "image/jpeg",
+    *,
+    layout: dict | None = None,
+    generated: bool = False,
+    focus: tuple[int, int, int, int] | None = None,
+    subject: tuple[int, int, int, int] | None = None,
+    keep_sources: bool = False,
 ) -> tuple[bytes, dict]:
     """compose(), plus what was measured on the way: FIT_JS's report with the
-    contrast found behind every element of the rendered frame (`legibility`)."""
-    return await _surviving_a_crash(_compose_once, brief, slide, brand, background, background_mime)
+    photo window the picture was fitted to (`photo_window`), the contrast
+    found behind every element of the rendered frame (`legibility`) and,
+    when asked, the reel's sources (`reel`)."""
+    return await _surviving_a_crash(
+        _compose_once,
+        brief,
+        slide,
+        brand,
+        background,
+        background_mime,
+        layout,
+        generated,
+        focus,
+        subject,
+        keep_sources,
+    )
 
 
 async def compose_to_file(
