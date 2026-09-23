@@ -47,6 +47,23 @@ def key_for(brand_id: str, creative_id: str, suffix: str, *, draft: bool = True)
     return f"{prefix}/{day}/{brand_id}/{creative_id}-{suffix}"
 
 
+def onboarding_key(brand_id: str, lane: str, digest: str, ext: str) -> str:
+    """Where a file from the onboarding kit lives, named by its own bytes.
+
+    Not under drafts/ -- these are the brand's own material and must outlive the
+    seven-day sweep. The content hash IS the identity: staff re-run the
+    onboarding command whenever they add photos, and a key derived from the
+    bytes makes the second run a no-op for everything already stored, with no
+    extra column and no second source of truth.
+
+    `lane` is which folder the file came from ("photo" or "reference"), never
+    the kind the vision pass decides. A photo that turns out to be the shopfront
+    must keep the key it would have had anyway, or the next run cannot tell it
+    is already stored.
+    """
+    return f"onboarding/{brand_id}/{lane}/{digest[:32]}.{ext}"
+
+
 def put(key: str, data: bytes, content_type: str | None = None) -> str:
     ct = content_type or mimetypes.guess_type(key)[0] or "application/octet-stream"
     _s3().put_object(

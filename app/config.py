@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     voyage_model: str = "voyage-3"
     embed_dim: int = 1024
 
+    # google drive -- read-only, and only for the staff onboarding command.
+    # Our team hands over a brand's reference creatives and raw product photos
+    # as a Drive folder shared "anyone with the link", which a plain API key can
+    # list and download. No service account and no OAuth: the command is run by
+    # a person on their own machine, never by the app, and it must not be able
+    # to reach a folder nobody deliberately shared.
+    google_api_key: str = ""
+
     # r2
     r2_account_id: str = ""
     r2_access_key_id: str = ""
