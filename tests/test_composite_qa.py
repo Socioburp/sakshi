@@ -1018,11 +1018,15 @@ def test_one_look_per_slide_is_what_the_settings_are_priced_for():
     a 819x1024 JPEG at the documented ~(w*h)/750 plus the rubric, answered in
     JSON. Under 3% of what the picture it is checking costs."""
     image_tokens = (819 * 1024) / 750
-    read = image_tokens + 600
-    per_slide = bggate.cost_micros(_Usage(round(read), 60))
-    assert 5_500 <= per_slide <= 6_500, per_slide
-    assert per_slide < 0.03 * 288_300, "a look is a rounding error against a picture"
+    rubric_tokens = len(finalgate.prompt_for("Weekend Sale", "", "Order now", "Kadamba")) / 4
+    per_slide = bggate.cost_micros(_Usage(round(image_tokens + rubric_tokens), 60))
+    assert 5_500 <= per_slide <= 6_200, per_slide
+    assert per_slide < 0.025 * 288_300, "a look is a rounding error against a picture"
     assert 6 * per_slide < 40_000, "a six-slide carousel adds well under four cents"
+    capped = bggate.cost_micros(
+        _Usage(round(image_tokens + rubric_tokens), bggate.INSPECT_MAX_TOKENS)
+    )
+    assert capped < 10_000, "even a chatty inspector cannot run the bill up"
 
 
 async def test_a_revision_the_final_check_refuses_tells_the_agent_what_to_do(world, monkeypatch):

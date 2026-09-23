@@ -161,13 +161,13 @@ class Settings(BaseSettings):
     #
     # One delivered slide is one vision call on the exported JPEG scaled to a
     # 819x1024 long edge. At the documented ~(w*h)/750 that image is ~1,120
-    # tokens, the rubric another ~600, and the answer is JSON plus a short note
-    # -- call it 60 output tokens, capped at 300 by INSPECT_MAX_TOKENS. So
-    # ~$0.0061 a slide, ~$0.0097 if the inspector uses its whole allowance:
-    # about 2-3% of the $0.2883 the picture costs. A single post adds one call
-    # (~$0.006); a six-slide carousel adds six (~$0.037, ~$0.058 worst case).
-    # Latency is ~2-5s per call, and slides are already built concurrently, so
-    # a carousel pays that once rather than six times.
+    # tokens and the rubric another ~530, and the answer is JSON plus a short
+    # note -- ~60 output tokens, capped at 300 by INSPECT_MAX_TOKENS. So
+    # $0.0058 a slide, $0.0094 if the inspector uses its whole allowance:
+    # 2.0% of the $0.2883 the picture costs. A single post adds one call; a
+    # six-slide carousel adds six, $0.035 ($0.057 worst case). Latency is
+    # ~2-5s per call, and slides are already built concurrently, so a carousel
+    # pays that once rather than six times.
     inspector_input_micros_per_ktok: int = 3000
     inspector_output_micros_per_ktok: int = 15000
     # Seconds of silence after which the owner is told the job is still going.
