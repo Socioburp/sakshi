@@ -794,6 +794,65 @@ async def test_a_generated_picture_is_not_reused_under_a_layout_that_cuts_or_cov
         await compose.shutdown()
 
 
+@pytest.mark.parametrize("kind", ["single", "story"])
+@pytest.mark.parametrize("template", WINDOWED)
+async def test_a_copy_only_revision_keeps_the_picture(monkeypatch, template, kind):
+    """The photo window is what the COPY leaves. One more word in the headline
+    took 50px of split_card's window; _revision_guard looked only at slides
+    whose template changed, so it checked nothing, and the render raised
+    PictureMismatch into a bare {"ok": false, "reason": "generation_failed"}.
+    The owner's commonest free request came back with nothing on 9 of 72
+    ordinary copy edits across the six layouts x post/story."""
+    from app.creative import pipeline
+    from tests import test_pipeline_flow as flow
+
+    world = await flow.build_world(monkeypatch)
+    try:
+        flow._clean(monkeypatch)
+        brief = _brief(template, kind)
+        res = await pipeline.generate(world["ctx"], brief)
+        assert res["ok"], res
+        brief_id = _revisable(world, monkeypatch, res, brief)
+        out = await pipeline.recompose(
+            world["ctx"], brief_id=brief_id, changes={"headline": LONG_HEADLINE}
+        )
+        assert out["ok"] is True and out["credits_charged"] == 0, out
+        assert len(world["images"]) == 2, "the new version went out"
+    finally:
+        await compose.shutdown()
+
+
+async def test_copy_rewritten_wholesale_is_refused_by_name_not_by_the_render(monkeypatch):
+    """A picture cannot survive the copy being rewritten: split_card's window
+    goes 1080x842 -> 1080x577 and 46% of the picture's height goes with it.
+    That is refused by name, with the paid path, BEFORE the parent brief is
+    superseded -- never as an exception string out of the render."""
+    from app.creative import pipeline
+    from tests import test_pipeline_flow as flow
+
+    world = await flow.build_world(monkeypatch)
+    try:
+        flow._clean(monkeypatch)
+        brief = _brief("split_card")
+        res = await pipeline.generate(world["ctx"], brief)
+        assert res["ok"], res
+        brief_id = _revisable(world, monkeypatch, res, brief)
+        rows_before = len([r for r in world["rows"].values() if hasattr(r, "slide_position")])
+        out = await pipeline.recompose(
+            world["ctx"],
+            brief_id=brief_id,
+            changes={"headline": LONG_HEADLINE, "subhead": LONG_SUBHEAD, "cta": "Order today now"},
+        )
+        assert out["ok"] is False and out["reason"] == "picture_made_for_other_layout", out
+        assert out["slides"] == [{"slide": 1, "why": "picture made for another window"}]
+        assert out["charged"] == 0 and "regenerate_image" in out["hint"]
+        assert len(world["images"]) == 1, "nothing new was sent"
+        after = len([r for r in world["rows"].values() if hasattr(r, "slide_position")])
+        assert after == rows_before, "nothing was stored and nothing was marked failed"
+    finally:
+        await compose.shutdown()
+
+
 def _carousel(template: str, **copy) -> CreativeBrief:
     payload = json.loads(json.dumps(EXAMPLE_CAROUSEL))
     payload.update(template_id=template)

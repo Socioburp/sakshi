@@ -843,11 +843,12 @@ async def recompose(
             "format": dict(parent.payload.get("format") or {}),
             "slides": _stored_pictures(repo.creatives_for_brief(db, brief_id)),
         }
-    unfit = await layout_gate(draft, draft.units(), snap)
+    layouts: dict[int, dict] = {}
+    unfit = await layout_gate(draft, draft.units(), snap, layouts)
     if unfit:
         return unfit
-    # A revision never reuses a picture made for another shape or layout.
-    refused, rebuilt = await _revision_guard(draft, before, snap)
+    # A revision never reuses a picture the new version cannot show.
+    refused, rebuilt = await _revision_guard(draft, before, snap, layouts)
     if refused:
         return refused
 
@@ -1866,6 +1867,7 @@ async def _build_one(
             focus=focus,
             subject=subject,
             keep_sources=brief.is_reel(),
+            kept=generated and kept_key is not None,
         )
         # PNG all the way to here; this is the single lossy encode. It also
         # refuses any frame that is not exactly the post size.
@@ -1982,6 +1984,10 @@ async def _recompose_one(
             focus=focus,
             subject=(rebuilt or {}).get("subject"),
             keep_sources=brief.is_reel(),
+            # A picture carried over was made for the window the OLD copy
+            # left; a rebuilt studio was built for the new one. _revision_guard
+            # has already proved this trim is inside REUSE_CROP_SHARE.
+            kept=generated and rebuilt is None,
         )
         final = await asyncio.to_thread(compose.export_jpeg, png, brief.pixel_size())
     with ctx.trace.stage(f"{stage}:upload"):
@@ -2059,20 +2065,32 @@ _LAYOUT_PICTURE_HINT = (
 
 
 async def _revision_guard(
-    brief: CreativeBrief, before: dict, snap
+    brief: CreativeBrief, before: dict, snap, layouts: dict[int, dict] | None = None
 ) -> tuple[dict | None, dict[int, dict]]:
-    """A revision that changes the shape or the layout must not reuse a
-    picture made for the old one. Returns (refusal, rebuilt): a refusal to
-    hand back, or the studio pictures rebuilt for the new window from the
-    stored cut-out (free: no model runs) keyed by slide position.
+    """A revision must not reuse a picture the new version cannot show.
+    Returns (refusal, rebuilt): a refusal to hand back, or the studio pictures
+    rebuilt for the new window from the stored cut-out (free: no model runs)
+    keyed by slide position.
+
+    Every slide is measured, not only the ones whose TEMPLATE changed. The
+    photo window is what the copy leaves, so one more word in the headline
+    moves it on split_card and top_band: keyed off the template alone this
+    ran on none of the slides an ordinary copy edit touches, and the render
+    raised PictureMismatch into _contain_revision's generic
+    "generation_failed" -- after the parent brief had already been stamped
+    superseded by a version that never rendered.
 
     A format change (post <-> story/reel) is always refused: the old picture
-    is the wrong ratio and would be cropped 30% and enlarged 1.4x. On a
-    layout change, a product-studio slide is re-placed from its cut-out; a
-    generated picture must still fit the new window and keep its subject
-    out from under the words, or the revision is refused; a whole photo is
-    cropped around its subject again by the compositor and only its pixels
-    are checked here.
+    is the wrong ratio and would be cropped 30% and enlarged 1.4x. A
+    product-studio slide whose window moved is re-placed from its cut-out, in
+    the rectangle the NEW copy leaves clear. A generated picture must still
+    fit the new window (compose.fits_kept, the same rule the compositor
+    applies) and, where the layout changed, keep its subject out from under
+    the words. A whole photo is cropped around its subject again by the
+    compositor and only its pixels are checked here.
+
+    `layouts` are the reports layout_gate already measured for this draft;
+    without them each slide is measured again here.
     """
     old_type = str(before.get("format", {}).get("type") or "single")
     tall = {"story", "reel"}
@@ -2085,11 +2103,17 @@ async def _revision_guard(
     for slide in brief.units():
         was = before.get("slides", {}).get(slide.position)
         template = brief.template_for(slide)
-        if not was or was["template"] == template or not was["background_key"]:
+        if not was or not was["background_key"]:
             continue
-        layout = await compose.check_layout(brief, slide, snap)
+        moved = was["template"] != template
+        layout = (layouts or {}).get(slide.position) or await compose.check_layout(
+            brief, slide, snap
+        )
         window = compose.photo_window(layout, w, h)
         size = (window[2] - window[0], window[3] - window[1])
+        image = r2.get(was["background_key"])
+        if compose.image_size(image) == size and not moved:
+            continue  # the copy left the window exactly where the picture found it
         if was["provider"] == "product_studio":
             try:
                 rgba, _ = product.cutout_from_png(r2.get(cutout_key_beside(was["background_key"])))
@@ -2114,19 +2138,22 @@ async def _revision_guard(
                 "layout": layout,
                 "cutout": r2.get(cutout_key_beside(was["background_key"])),
             }
-            log.info("studio_rebuilt_for_layout", position=slide.position, template=template)
+            log.info("studio_rebuilt_for_window", position=slide.position, template=template)
             continue
-        image = r2.get(was["background_key"])
         if was["provider"] in PHOTO_LANES:
             iw, ih = compose.image_size(image)
             if max(size[0] / iw, size[1] / ih) > compose.MAX_PHOTO_UPSCALE:
                 stuck.append({"slide": slide.position, "why": "photo too small for the window"})
             continue
-        from app.creative.imagegen.base import crop_for
-
         got = compose.image_size(image)
-        if crop_for(got, size) > compose.GENERATED_CROP_TOLERANCE or got[0] < size[0]:
+        if not compose.fits_kept(got, size):
             stuck.append({"slide": slide.position, "why": "picture made for another window"})
+            continue
+        if not moved:
+            # The words stayed in the block this layout sets them in, so the
+            # picture is still calm where they sit. Running the mask here on
+            # every copy edit would put a salient-object pass on the one path
+            # the product promises is instant.
             continue
         bbox, trusted = await asyncio.to_thread(product.subject_box, image)
         words = _text_box_in_window(layout, window)

@@ -1162,6 +1162,18 @@ class PhotoTooSmall(RuntimeError):
 # The most a GENERATED picture may lose to its window, in window pixels: the
 # rounding of two multiples of 16 to the window's ratio, and nothing more.
 GENERATED_CROP_TOLERANCE = 4.0
+# The most a picture KEPT from an earlier version may lose, as a share of the
+# window it is now shown in. A panel layout's window is what the copy leaves:
+# one more word in the headline takes 50px of split_card's picture, and
+# holding a kept picture to the vendor's 4px refused the owner's commonest
+# free request ("make it say X") on 9 of 72 ordinary copy edits across the six
+# layouts x post/story -- with reason "generation_failed" and a raw exception
+# string the agent had no rule for. A kept picture is therefore trimmed from
+# the centre by up to this much, and is still never enlarged. Measured: every
+# ordinary copy edit costs under 12% of the window; rewriting the copy
+# wholesale costs 46%, and that is a picture made for another layout --
+# refused by name in pipeline._revision_guard before anything is stored.
+REUSE_CROP_SHARE = 0.15
 # The most an owner's photograph is ever enlarged. WhatsApp hands over
 # 1280x960 for a landscape phone photo; covering a 1080x1350 post from that
 # is 1.41x and it showed. 1.15x is where Lanczos still passes for the original.
@@ -1222,12 +1234,29 @@ def _letterbox(im: Image.Image, width: int, height: int) -> Image.Image:
     return ground
 
 
+def fits_kept(size: tuple[int, int], window: tuple[int, int]) -> bool:
+    """True when a picture KEPT from an earlier version can still be shown in
+    `window`: never enlarged, and losing no more of it than REUSE_CROP_SHARE.
+
+    One rule, asked in two places: fit_background enforces it on the pixels,
+    and pipeline._revision_guard asks it BEFORE the revision is stored, so a
+    picture that really was made for another layout is refused by name with a
+    hint instead of raising out of the render into a generic failure.
+    """
+    (gw, gh), (bw, bh) = size, window
+    scale = max(bw / gw, bh / gh)
+    if scale > 1.0 + 1e-6:
+        return False
+    return max((gw * scale - bw) / bw, (gh * scale - bh) / bh) <= REUSE_CROP_SHARE
+
+
 def fit_background(
     image: bytes,
     width: int,
     height: int,
     *,
     generated: bool = False,
+    kept: bool = False,
     focus: tuple[int, int, int, int] | None = None,
 ) -> bytes:
     """The picture, resampled with Lanczos to the WINDOW the layout shows.
@@ -1243,7 +1272,10 @@ def fit_background(
 
     A GENERATED picture (`generated=True`) was made for this window: its ratio
     must agree within GENERATED_CROP_TOLERANCE and it is never enlarged;
-    anything else is a vendor fault and raises PictureMismatch.
+    anything else is a vendor fault and raises PictureMismatch. With `kept` it
+    was made for the window an EARLIER version's copy left, which the new copy
+    has moved: it is trimmed from the centre by up to REUSE_CROP_SHARE of the
+    window and refused past that (fits_kept).
 
     An owner's photograph may be any shape. It is never enlarged past
     MAX_PHOTO_UPSCALE (PhotoTooSmall), and it is cropped around its SUBJECT:
@@ -1264,17 +1296,24 @@ def fit_background(
         scale = max(width / im.width, height / im.height)
         crop = max(im.width * scale - width, im.height * scale - height)
         if generated:
+            fits = (
+                fits_kept(im.size, (width, height))
+                if kept
+                else scale <= 1.0 + 1e-6 and crop <= GENERATED_CROP_TOLERANCE
+            )
             log.info(
                 "generated_fit",
                 source=f"{im.width}x{im.height}",
                 window=f"{width}x{height}",
                 scale=round(scale, 4),
                 crop_px=round(crop, 2),
+                kept=kept,
             )
-            if scale > 1.0 + 1e-6 or crop > GENERATED_CROP_TOLERANCE:
+            if not fits:
                 raise PictureMismatch(
-                    f"generated picture {im.width}x{im.height} does not fit its "
-                    f"{width}x{height} window (scale {scale:.3f}, crop {crop:.1f}px)",
+                    f"{'kept' if kept else 'generated'} picture {im.width}x{im.height} does "
+                    f"not fit its {width}x{height} window "
+                    f"(scale {scale:.3f}, crop {crop:.1f}px)",
                     crop=crop,
                     scale=scale,
                 )
@@ -1710,6 +1749,7 @@ async def _compose_once(
     focus: tuple[int, int, int, int] | None = None,
     subject: tuple[int, int, int, int] | None = None,
     keep_sources: bool = False,
+    kept: bool = False,
 ) -> tuple[bytes, dict]:
     """The finished PNG for one slide (a single post is slide 1 of 1), and the
     report of what was fitted and measured to make it.
@@ -1723,9 +1763,11 @@ async def _compose_once(
     the photo window the picture was generated for. Without one the window is
     measured here first -- it is a property of the copy, not of the picture,
     so a blank page answers it. `generated` says the picture was made for
-    that window and is held to it; `focus` is an owner photo's subject box,
-    kept inside the window (see fit_background); `subject` is the placed
-    product's box on the canvas, guarded by FIT_JS as an element.
+    that window and is held to it; `kept` says it was made for the window an
+    earlier version's copy left, and is allowed the trim REUSE_CROP_SHARE
+    names; `focus` is an owner photo's subject box, kept inside the window
+    (see fit_background); `subject` is the placed product's box on the canvas,
+    guarded by FIT_JS as an element.
 
     Raises LayoutError / LegibilityError / BrandFontUnavailable instead of
     returning a frame that breaks a guarantee. There is no degraded output.
@@ -1737,7 +1779,7 @@ async def _compose_once(
     window = photo_window(layout, w, h)
     bw, bh = window[2] - window[0], window[3] - window[1]
     fitted = await asyncio.to_thread(
-        fit_background, background, bw, bh, generated=generated, focus=focus
+        fit_background, background, bw, bh, generated=generated, kept=kept, focus=focus
     )
     mime = "image/png" if fitted is not background else background_mime
     html = render_html(brief, slide, brand, as_data_uri(fitted, mime), subject=subject)
@@ -1822,6 +1864,7 @@ async def compose(
     generated: bool = False,
     focus: tuple[int, int, int, int] | None = None,
     subject: tuple[int, int, int, int] | None = None,
+    kept: bool = False,
 ) -> bytes:
     """The finished PNG for one slide, or a refusal. Never a degraded frame."""
     png, _ = await compose_with_report(
@@ -1834,6 +1877,7 @@ async def compose(
         generated=generated,
         focus=focus,
         subject=subject,
+        kept=kept,
     )
     return png
 
@@ -1850,6 +1894,7 @@ async def compose_with_report(
     focus: tuple[int, int, int, int] | None = None,
     subject: tuple[int, int, int, int] | None = None,
     keep_sources: bool = False,
+    kept: bool = False,
 ) -> tuple[bytes, dict]:
     """compose(), plus what was measured on the way: FIT_JS's report with the
     photo window the picture was fitted to (`photo_window`), the contrast
@@ -1867,6 +1912,7 @@ async def compose_with_report(
         focus,
         subject,
         keep_sources,
+        kept,
     )
 
 
