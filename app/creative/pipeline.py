@@ -1739,6 +1739,7 @@ async def _build_one(
     focus: tuple[int, int, int, int] | None = None
     subject: tuple[int, int, int, int] | None = None
     cutout_png: bytes | None = None
+    kept_key: str | None = None  # set only when this slide's picture was KEPT
     stage = f"slide{slide.position}"
     job_id, cost_micros = None, 0  # set only when a vendor was paid
     gate: dict | None = None  # set only when a picture was generated and inspected
@@ -1753,12 +1754,19 @@ async def _build_one(
 
     if reuse and slide.position in reuse:
         # Picture kept from the previous version of this creative.
-        with ctx.trace.stage(f"{stage}:reuse"):
-            key = reuse[slide.position][0]
-            image, mime = r2.get(key), ("image/jpeg" if key.endswith(".jpg") else "image/png")
-        provider_name = "reused"
         kept = reuse[slide.position]
-        generated = (kept[2] if len(kept) > 2 else "") not in PHOTO_LANES
+        with ctx.trace.stage(f"{stage}:reuse"):
+            kept_key = kept[0]
+            image = r2.get(kept_key)
+            mime = "image/jpeg" if kept_key.endswith(".jpg") else "image/png"
+        # The row records the lane the picture was MADE in, never the fact
+        # that this version did not remake it. Writing "reused" here erased
+        # brand_asset/product_studio, and the owner's next free copy change
+        # was then held to the generated picture's contract and refused the
+        # whole version -- recompose, _owner_photo_slides and _revision_guard
+        # all read this column to tell a photograph from a made picture.
+        provider_name = (kept[2] if len(kept) > 2 else "") or "reused"
+        generated = provider_name not in PHOTO_LANES
         if not generated:
             # The owner's photograph, kept: cropped around its subject again.
             focus = (await asyncio.to_thread(product.subject_box, image))[0]
@@ -1864,10 +1872,10 @@ async def _build_one(
         final = await asyncio.to_thread(compose.export_jpeg, png, (w, h))
 
     with ctx.trace.stage(f"{stage}:upload"):
-        if provider_name == "reused":
+        if kept_key is not None:
             # The background already lives in R2 under its old key; a copy per
             # revision is storage for nothing.
-            bg_key = reuse[slide.position][0]
+            bg_key = kept_key
         else:
             ext = "jpg" if "jpeg" in mime else "png"
             bg_key = r2.key_for(str(ctx.brand_id), str(creative_id), f"bg.{ext}")

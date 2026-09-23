@@ -18,7 +18,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from app.creative import compose
-from app.creative.brief import EXAMPLE, POST_SIZE, REEL_SIZE, CreativeBrief
+from app.creative.brief import EXAMPLE, EXAMPLE_CAROUSEL, POST_SIZE, REEL_SIZE, CreativeBrief
 from app.creative.imagegen import base as gen
 
 WINDOWED = ("split_card", "frame_card", "top_band")
@@ -790,6 +790,58 @@ async def test_a_generated_picture_is_not_reused_under_a_layout_that_cuts_or_cov
                 out,
             )
             assert why in out["slides"][0]["why"] and "regenerate_image" in out["hint"]
+    finally:
+        await compose.shutdown()
+
+
+def _carousel(template: str, **copy) -> CreativeBrief:
+    payload = json.loads(json.dumps(EXAMPLE_CAROUSEL))
+    payload.update(template_id=template)
+    payload.update(copy)
+    return CreativeBrief.model_validate(payload)
+
+
+async def test_a_kept_picture_keeps_the_lane_it_was_made_in(monkeypatch):
+    """Slide 2 shows the owner's photograph. Redoing slide 1 kept slide 2's
+    picture and stored its lane as "reused" -- the owner's next free copy
+    change then held a 2400x1800 photograph to the GENERATED picture's
+    contract, PictureMismatch refused the slide, and one refused slide
+    refuses the version: nothing at all for a free, valid change."""
+    from app.creative import pipeline
+    from tests import test_pipeline_flow as flow
+    from tests.test_product_lane import _box_mask, _fake_remove
+
+    _fake_remove(monkeypatch, _box_mask(0.3, 0.5))
+    world = await flow.build_world(monkeypatch)
+    try:
+        flow._clean(monkeypatch)
+        asset_id = "44444444-4444-4444-4444-444444444444"
+        snap = pipeline.BrandAssetSnapshot(asset_id, "assets/p.jpg", "image/jpeg", "shop", "shop")
+        photo = _photo(2400, 1800, [840, 450, 1560, 1350])
+        blobs = world["blobs"]
+        monkeypatch.setattr(pipeline, "_resolve_photos", lambda *a, **k: {2: asset_id})
+        monkeypatch.setattr(pipeline, "_load_assets", lambda *a, **k: {asset_id: snap})
+        monkeypatch.setattr(pipeline.r2, "get", lambda k: blobs[k][0] if k in blobs else photo)
+
+        brief = _carousel("lower_third")
+        res = await pipeline.generate(world["ctx"], brief)
+        assert res["ok"] and res["credits_charged"] == 2, res
+        brief_id = _revisable(world, monkeypatch, res, brief)
+        redo = await pipeline.regenerate_image(
+            world["ctx"], brief_id=brief_id, new_prompt="a new scene", slide_position=1
+        )
+        assert redo["ok"], redo
+        rows = {
+            r.slide_position: r.imagegen_provider
+            for r in world["rows"].values()
+            if getattr(r, "brief_id", None) == uuid_of(redo["brief_id"])
+        }
+        assert rows == {1: "fake", 2: "brand_asset", 3: "fake"}, rows
+        _revisable(world, monkeypatch, redo, brief)
+        out = await pipeline.recompose(
+            world["ctx"], brief_id=uuid_of(redo["brief_id"]), changes={"cta": "Order today"}
+        )
+        assert out["ok"] is True and out["credits_charged"] == 0, out
     finally:
         await compose.shutdown()
 

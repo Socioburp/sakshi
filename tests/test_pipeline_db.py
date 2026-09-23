@@ -204,7 +204,7 @@ async def test_reused_slides_keep_their_background_key(owner, blobs):
     first = await pipeline.generate(ctx, CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
     with session_scope() as db:
         old = {
-            c.slide_position: c.background_key
+            c.slide_position: (c.background_key, c.imagegen_provider)
             for c in db.query(Creative).filter(Creative.brief_id == uuid.UUID(first["brief_id"]))
         }
     bg_puts_before = len([k for k in blobs if "bg." in k])
@@ -216,8 +216,10 @@ async def test_reused_slides_keep_their_background_key(owner, blobs):
             c.slide_position: (c.background_key, c.imagegen_provider)
             for c in db.query(Creative).filter(Creative.brief_id == uuid.UUID(redo["brief_id"]))
         }
-    assert new[1] == (old[1], "reused") and new[3] == (old[3], "reused")
-    assert new[2][0] != old[2]
+    # The key AND the lane survive. This used to store "reused", and the lane
+    # a later revision reads to tell a photograph from a made picture was gone.
+    assert new[1] == old[1] and new[3] == old[3]
+    assert new[2][0] != old[2][0]
     assert len([k for k in blobs if "bg." in k]) == bg_puts_before + 1
 
 
