@@ -722,10 +722,11 @@ async def test_a_layout_that_cannot_take_this_slide_is_skipped_not_failed():
     """A picture generated for one window does not fill another's, and long
     copy does not fit every layout. That is one fewer free option, not a
     failure -- the ladder moves on."""
-    render, asked = _ladder({"top_band": _variant("top_band", 88)})
+    render, asked = _ladder({"frame_card": _variant("frame_card", 88)})
     first = _variant("split_card", 40, ok=False)
     out = await compositeqa.best_free_variant(first, render, limit=3)
-    assert out.template == "top_band" and asked[0] != "top_band"
+    assert asked[0] == "top_band" and out.template == "frame_card"
+    assert asked == ["top_band", "frame_card"], "asked for the one it wanted first, then moved on"
 
 
 async def test_when_nothing_renders_the_slide_it_came_in_as_is_kept():
@@ -936,6 +937,26 @@ async def test_exhaustion_delivers_nothing_stores_nothing_and_refunds(world, mon
     assert row.status == "failed" and row.cost_micros > 0, "the spend is still on the ledger"
 
 
+async def test_a_retry_that_was_paid_for_and_then_refused_is_still_on_the_ledger(
+    world, monkeypatch
+):
+    """The slide buys a second picture, the check refuses that one too, and
+    nothing ships. Both pictures were still bought. Losing the second from the
+    ledger would tell the owner the failure was half as expensive as it was --
+    and the refund is computed from credits, not from this, so the number would
+    simply have been wrong for ever."""
+    world["final_verdicts"].extend([["artefacts"], ["artefacts"]])
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is False and res["reason"] == "generation_failed"
+    assert len(world["provider"].requests) == 2, "one retry, as allowed"
+    assert world["refunded"] == 1
+    assert not [k for k in world["blobs"] if k.endswith("composed.jpg")]
+    (row,) = world["rows"].values()
+    assert row.status == "failed"
+    assert row.cost_micros == 2 * 288_300 + 2 * 4_500, "both pictures and both looks"
+
+
 async def test_a_revision_is_looked_at_as_hard_as_a_first_version(world, monkeypatch):
     """recompose had no picture check of ANY kind -- not the background gate,
     not anything -- and it is the lane the owner already had to ask twice for."""
@@ -1002,3 +1023,25 @@ def test_one_look_per_slide_is_what_the_settings_are_priced_for():
     assert 5_500 <= per_slide <= 6_500, per_slide
     assert per_slide < 0.03 * 288_300, "a look is a rounding error against a picture"
     assert 6 * per_slide < 40_000, "a six-slide carousel adds well under four cents"
+
+
+async def test_a_revision_the_final_check_refuses_tells_the_agent_what_to_do(world, monkeypatch):
+    """A revision never buys a picture, so a refusal is the end of the line for
+    that arrangement -- and the agent can do something about it only if it is
+    told what. A stack trace under "generation_failed" is not actionable."""
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert first["ok"]
+    world["images"].clear()
+    _fault_once(monkeypatch, faults=["text_over_subject"], on=99)
+    monkeypatch.setattr(pipeline.compositeqa, "best_free_variant", _keep_first)
+
+    res = await pipeline.recompose(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        changes={"cta": "Order today"},
+        owner_request="change the button",
+    )
+    assert res["ok"] is False and res["reason"] == "composite_quality"
+    assert "another photo" in res["hint"] or "different layout" in res["hint"]
+    assert world["images"] == [], "nothing of a refused revision reaches the owner"
+    assert len(world["provider"].requests) == 1, "and it never bought its way out"

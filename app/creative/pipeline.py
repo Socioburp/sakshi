@@ -1941,12 +1941,14 @@ async def _final_check(
             break
         # Nothing free was good enough. The generated lane may buy ONE more
         # picture, corrected by what was wrong with this one.
-        bought = await buy(faults, reasons, brief.template_for(slide))
-        if bought is None:
-            break
-        source["image"], source["mime"], extra = bought
-        source["size"] = compose.image_size(source["image"])
+        again, again_mime, extra = await buy(faults, reasons, brief.template_for(slide))
+        # Paid for whether or not it produced anything usable: the spend is
+        # real, so it goes on the tally that rides home on the refusal too.
         spent += int(extra or 0)
+        if again is None:
+            break
+        source["image"], source["mime"] = again, again_mime
+        source["size"] = compose.image_size(source["image"])
         _set_template(brief, slide, started)
         with ctx.trace.stage(f"{stage}:recompose"):
             layout_again = await compose.check_layout(brief, slide, brand_snapshot)
@@ -2139,8 +2141,11 @@ async def _build_one(
             quietly cost two caps because the final check asked for a second
             picture. When there is not enough left in the cap for one honest
             call, the answer is no.
+
+            Returns (picture, mime, what it cost) -- and the cost even when
+            there is no picture, because a rejected retry was still paid for
+            and the ledger has to show it whether or not the slide ships.
             """
-            nonlocal cost_micros
             left = int(settings.imagegen_gate_budget_micros or 0)
             if left:
                 left -= int(cost_micros or 0)
@@ -2151,7 +2156,7 @@ async def _build_one(
                         position=slide.position,
                         spent_micros=int(cost_micros or 0),
                     )
-                    return None
+                    return None, "", 0
             try:
                 again, extra, more = await _generate_checked(
                     ctx,
@@ -2173,12 +2178,10 @@ async def _build_one(
                     budget_micros=left,
                 )
             except BackgroundRejected as exc:
-                cost_micros += int(exc.cost_micros or 0)
-                return None
-            cost_micros += int(extra or 0)
+                return None, "", int(exc.cost_micros or 0)
             gate["attempts"] += len(more) + 1
             gate["rejections"].extend(more)
-            return again.data, again.mime, 0
+            return again.data, again.mime, int(extra or 0)
 
     with ctx.trace.stage(f"{stage}:compose"):
         png, report = await compose.compose_with_report(
@@ -2203,26 +2206,40 @@ async def _build_one(
     template = brief.template_for(slide)
     checked: dict | None = None
     if settings.composite_gate_enabled:
-        checked = await _final_check(
-            ctx,
-            brief,
-            slide,
-            brand_snapshot,
-            creative_id,
-            image=image,
-            mime=mime,
-            png=png,
-            final=final,
-            report=report,
-            generated=generated,
-            focus=focus,
-            subject=subject,
-            stage=stage,
-            lane=provider_name,
-            buy=buy if provider_name not in PHOTO_LANES | {"reused"} and gate is not None else None,
-        )
+        try:
+            checked = await _final_check(
+                ctx,
+                brief,
+                slide,
+                brand_snapshot,
+                creative_id,
+                image=image,
+                mime=mime,
+                png=png,
+                final=final,
+                report=report,
+                generated=generated,
+                focus=focus,
+                subject=subject,
+                stage=stage,
+                lane=provider_name,
+                buy=(
+                    buy
+                    if provider_name not in PHOTO_LANES | {"reused"} and gate is not None
+                    else None
+                ),
+            )
+        except CompositeRejected as exc:
+            # The picture this slide had already bought was bought whatever the
+            # check then decided. The refusal only knows what IT spent, so the
+            # rest is added here or the failed row understates the loss.
+            exc.cost_micros += int(cost_micros or 0)
+            raise
         png, final, report = checked["png"], checked["final"], checked["report"]
         image, mime, template = checked["image"], checked["mime"], checked["template"]
+        # Everything the final check spent: the looks, and any picture it
+        # bought. When it refuses instead, the same figure rides out on
+        # CompositeRejected.cost_micros and lands on the failed row.
         cost_micros += int(checked["cost_micros"] or 0)
 
     with ctx.trace.stage(f"{stage}:upload"):
@@ -2593,6 +2610,8 @@ def _contain_revision(
     """
     failures: list[str] = []
     legibility = True
+    quality = True
+    hint = ""
     for (slide, cid, _, _), res in zip(pairs, results, strict=True):
         if not isinstance(res, BaseException):
             continue
@@ -2602,9 +2621,11 @@ def _contain_revision(
             position=slide.position,
             error=str(res)[:300],
         )
-        _mark_failed(cid, str(res))
+        _mark_failed(cid, str(res), cost_micros=getattr(res, "cost_micros", 0))
         failures.append(f"slide {slide.position}: {res}")
         legibility = legibility and isinstance(res, compose.LegibilityError)
+        quality = quality and isinstance(res, CompositeRejected)
+        hint = hint or getattr(res, "hint", "")
     if not failures:
         return None
     if legibility:
@@ -2613,6 +2634,17 @@ def _contain_revision(
             "reason": "legibility",
             "errors": failures[:3],
             "hint": _LEGIBILITY_HINT,
+        }
+    if quality:
+        # A revision never buys a picture, so the final check refusing one is
+        # the end of the line for THIS arrangement -- and the agent can do
+        # something about that, if it is told what. "generation_failed" with a
+        # stack trace is not something anybody can act on.
+        return {
+            "ok": False,
+            "reason": "composite_quality",
+            "errors": failures[:3],
+            "hint": hint,
         }
     return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
 
