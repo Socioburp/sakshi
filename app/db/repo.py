@@ -84,8 +84,10 @@ def touch_session(db: Session, account: Account, wa_id: str, inbound: bool) -> W
     )
     ts = now()
     carried: dict = {}
+    carried_brief: uuid.UUID | None = None
     if sess and sess.window_expires_at and sess.window_expires_at < ts:
         carried = _carry_over(sess.state or {}, ts)
+        carried_brief = _carry_brief(db, sess.active_brief_id, ts)
         sess.closed_at = ts
         db.flush()
         sess = None
@@ -93,7 +95,12 @@ def touch_session(db: Session, account: Account, wa_id: str, inbound: bool) -> W
         # Same race as the account: two first messages, one live session.
         try:
             with db.begin_nested():
-                sess = WaSession(account_id=account.id, wa_id=wa_id, state=dict(carried))
+                sess = WaSession(
+                    account_id=account.id,
+                    wa_id=wa_id,
+                    active_brief_id=carried_brief,
+                    state=dict(carried),
+                )
                 db.add(sess)
                 db.flush()
         except IntegrityError:
@@ -129,6 +136,22 @@ def _carry_over(state: dict, ts: datetime) -> dict:
     except (TypeError, ValueError):
         return {}
     return {"suggestions": ideas, "suggestions_at": at} if fresh else {}
+
+
+def _carry_brief(db: Session, brief_id: uuid.UUID | None, ts: datetime) -> uuid.UUID | None:
+    """The creative they were shown last night is the one "change the headline"
+    means this morning. The window closing used to drop active_brief_id, so
+    the request targeted nothing and the agent made (and charged) a new one.
+    Not carried once it is approved (nothing left to change) or its drafts
+    have expired (nothing left to change it on)."""
+    if not brief_id:
+        return None
+    rows = creatives_for_brief(db, brief_id)
+    if not rows or all(r.approved_at for r in rows):
+        return None
+    if any(r.expires_at and r.expires_at <= ts for r in rows):
+        return None
+    return brief_id
 
 
 def latest_session(
@@ -193,17 +216,60 @@ def save_brief(
 ) -> Brief:
     if parent is not None:
         parent.status = "superseded"
+    # The id is minted here so a root can name itself before the INSERT: the
+    # lineage is complete on the row the moment it exists, never "fixed later".
+    brief_id = uuid.uuid4()
     brief = Brief(
+        id=brief_id,
         account_id=account_id,
         brand_id=brand_id,
         payload=payload,
         source_message_id=source_message_id,
         parent_brief_id=parent.id if parent else None,
+        root_brief_id=(parent.root_brief_id or parent.id) if parent else brief_id,
         version=(parent.version + 1) if parent else 1,
     )
     db.add(brief)
     db.flush()
     return brief
+
+
+def lineage(db: Session, brief_id: uuid.UUID) -> list[Brief]:
+    """Every version of a creative, root first, ending at `brief_id`.
+
+    Walks parent_brief_id rather than reading root_brief_id: a chain written
+    before the root column existed is still a chain, and a cycle (impossible
+    in practice, fatal in a loop) is cut by the seen-set.
+    """
+    chain: list[Brief] = []
+    seen: set[uuid.UUID] = set()
+    cur = db.get(Brief, brief_id)
+    while cur is not None and cur.id not in seen:
+        seen.add(cur.id)
+        chain.append(cur)
+        cur = db.get(Brief, cur.parent_brief_id) if cur.parent_brief_id else None
+    chain.reverse()
+    return chain
+
+
+def revision_no(db: Session, brief_id: uuid.UUID) -> int:
+    """How many change requests this creative has had so far: 0 for a first
+    version, 1 once the owner has asked for one change, and so on. It is the
+    number the ladder rules are keyed on, so it comes from the database every
+    turn -- session state is lost at the 24h window."""
+    return max(0, len(lineage(db, brief_id)) - 1)
+
+
+def request_text(db: Session, message_id: uuid.UUID | None, limit: int = 500) -> str | None:
+    """What the owner actually said in the message that asked for a change:
+    the typed text, or the transcript of their voice note."""
+    if message_id is None:
+        return None
+    msg = db.get(Message, message_id)
+    if msg is None:
+        return None
+    text = msg.text or msg.transcript
+    return text[:limit] if text else None
 
 
 def latest_creative_for_brief(db: Session, brief_id: uuid.UUID) -> Creative | None:
@@ -228,10 +294,9 @@ def mark_approved(
         bid = uuid.UUID(brief_id)
     except (ValueError, AttributeError):
         return 0
-    if account_id is not None:
-        brief = db.get(Brief, bid)
-        if brief is None or brief.account_id != account_id:
-            return 0
+    brief = db.get(Brief, bid)
+    if brief is None or (account_id is not None and brief.account_id != account_id):
+        return 0
     rows = creatives_for_brief(db, bid)
     stamped = 0
     for row in rows:
@@ -240,6 +305,12 @@ def mark_approved(
             row.approved_via = via
             row.status = "approved"
             stamped += 1
+    if stamped:
+        # The lineage's outcome gets one home: root -> superseded -> ... ->
+        # the version they tapped on. Approval used to live only on the slide
+        # rows, so "which version did they finally accept" meant joining
+        # creatives back to briefs and hoping the statuses agreed.
+        brief.status = "approved"
     db.flush()
     return stamped
 

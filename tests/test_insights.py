@@ -65,6 +65,13 @@ def test_facts_of_a_brief_are_the_facts_the_votes_need():
     assert f["format"] == "single" and f["slides"] == 1 and f["has_photo"] is False
 
 
+def test_facts_of_carry_the_version_the_vote_was_cast_on():
+    # The payload has no version; it is the brief ROW's, and a vote on a third
+    # version says something different about the first result than one on v1.
+    assert events.facts_of(EXAMPLE)["version"] is None
+    assert events.facts_of(EXAMPLE, version=3)["version"] == 3
+
+
 # --------------------------------------------------------------------------- #
 # suggestions
 # --------------------------------------------------------------------------- #

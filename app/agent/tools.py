@@ -171,7 +171,9 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Change the words on an existing creative and re-send it. Keeps the same "
             "background image, so it is fast and FREE. Use this for headline, subhead, "
-            "CTA, badge, price, template, caption or hashtag changes."
+            "CTA, template, caption, hashtag or alt-text changes -- only those; nothing "
+            "renders a badge, a price tag or a logo size. Refuses a call that would change "
+            "nothing. Returns `applied`: exactly what changed, to confirm in one line."
         ),
         "input_schema": {
             "type": "object",
@@ -179,6 +181,15 @@ TOOLS: list[dict[str, Any]] = [
                 "brief_id": {
                     "type": "string",
                     "description": "brief_id returned by a previous tool result",
+                },
+                "owner_request": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": (
+                        "What the owner asked for, in their own words (every complaint in "
+                        "this conversation, not only the last line). Stored with the "
+                        "revision so the product learns what they send back."
+                    ),
                 },
                 "changes": {
                     "type": "object",
@@ -217,7 +228,7 @@ TOOLS: list[dict[str, Any]] = [
                     },
                 },
             },
-            "required": ["brief_id", "changes"],
+            "required": ["brief_id", "owner_request", "changes"],
         },
     },
     {
@@ -231,6 +242,15 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "brief_id": {"type": "string"},
+                "owner_request": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": (
+                        "What is wrong with the picture, in the owner's own words (every "
+                        "complaint in this conversation, not only the last line). Stored "
+                        "with the revision so the next picture avoids it."
+                    ),
+                },
                 "new_prompt": {
                     "type": "string",
                     "description": (
@@ -245,7 +265,7 @@ TOOLS: list[dict[str, Any]] = [
                     ),
                 },
             },
-            "required": ["brief_id"],
+            "required": ["brief_id", "owner_request"],
         },
     },
     {
@@ -709,9 +729,19 @@ def _set_session_state(ctx: ToolContext, key: str, value) -> None:
         log.exception("session_state_failed", key=key)
 
 
+def _owner_request(args: dict) -> str | None:
+    """The schema requires it, but a model can still send an empty string;
+    an empty request is stored as nothing asked, never as ''."""
+    text = (args.get("owner_request") or "").strip()
+    return text[:300] or None
+
+
 async def _revise_creative(ctx: ToolContext, args: dict) -> dict:
     return await pipeline.recompose(
-        ctx, brief_id=uuid.UUID(args["brief_id"]), changes=args.get("changes", {})
+        ctx,
+        brief_id=uuid.UUID(args["brief_id"]),
+        changes=args.get("changes", {}),
+        owner_request=_owner_request(args),
     )
 
 
@@ -721,6 +751,7 @@ async def _regenerate_image(ctx: ToolContext, args: dict) -> dict:
         brief_id=uuid.UUID(args["brief_id"]),
         new_prompt=args.get("new_prompt"),
         slide_position=args.get("slide_position"),
+        owner_request=_owner_request(args),
     )
 
 

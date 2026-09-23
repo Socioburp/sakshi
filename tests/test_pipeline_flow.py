@@ -33,6 +33,8 @@ class _Db:
             return self.world["brand"]
         if name == "Account":
             return types.SimpleNamespace(locale="en", credits_balance=self.world["balance"])
+        if name == "Brief":
+            return self.world["briefs"].get(key)
         return self.world["rows"].get(key)
 
     def add(self, row):
@@ -90,6 +92,7 @@ async def build_world(monkeypatch) -> dict:
         pytest.skip(f"no chromium: {exc}")
     w = {
         "rows": {},
+        "briefs": {},
         "blobs": {},
         "balance": 10,
         "charged": 0,
@@ -118,8 +121,27 @@ async def build_world(monkeypatch) -> dict:
         w["refunded"] += amount
 
     monkeypatch.setattr(pipeline, "session_scope", scope)
-    monkeypatch.setattr(pipeline.repo, "save_brief", lambda db, **kw: types.SimpleNamespace(
-        id=uuid.uuid4(), payload=kw["payload"]))  # fmt: skip
+
+    def save_brief(db, **kw):
+        parent = kw.get("parent")
+        bid = uuid.uuid4()
+        row = types.SimpleNamespace(
+            id=bid,
+            payload=kw["payload"],
+            status="draft",
+            parent_brief_id=parent.id if parent else None,
+            version=(parent.version + 1) if parent else 1,
+            root_brief_id=(parent.root_brief_id if parent else bid),
+        )
+        w["briefs"][bid] = row  # so a revision can db.get(Brief, ...) its parent
+        return row
+
+    def creatives_for_brief(db, brief_id):
+        rows = [r for r in w["rows"].values() if getattr(r, "brief_id", None) == brief_id]
+        return sorted(rows, key=lambda r: r.slide_position)
+
+    monkeypatch.setattr(pipeline.repo, "save_brief", save_brief)
+    monkeypatch.setattr(pipeline.repo, "creatives_for_brief", creatives_for_brief)
     monkeypatch.setattr(pipeline.events, "record", lambda *a, **k: None)
     monkeypatch.setattr(pipeline.credits, "charge", charge)
     monkeypatch.setattr(pipeline.credits, "refund", refund)
@@ -136,6 +158,7 @@ async def build_world(monkeypatch) -> dict:
     monkeypatch.setattr(pipeline.r2, "put", lambda key, data, ct=None: (
         w["blobs"].__setitem__(key, (data, ct)) or f"https://cdn.test/{key}"))  # fmt: skip
     monkeypatch.setattr(pipeline.r2, "public_url", lambda key: f"https://cdn.test/{key}")
+    monkeypatch.setattr(pipeline.r2, "get", lambda key: w["blobs"][key][0])
 
     async def say(text, **kw):
         w["lines"].append(text)
@@ -240,3 +263,123 @@ async def test_a_single_post_uses_the_same_settings_as_a_carousel_slide(world, m
     (row,) = world["rows"].values()
     assert row.cost_micros == 2 * 288_300
     assert world["images"] == [(res["image_urls"][0], EXAMPLE["headline"])]
+
+
+async def test_a_revision_refused_on_the_rendered_frame_is_contained(world, monkeypatch):
+    """The layout gate measures on a blank background; legibility is measured
+    on the real photograph, inside compose. A revision that fails there used
+    to escape recompose as a raw exception and leave the new rows 'composing'
+    for ever: nothing told the agent, and the owner heard nothing."""
+    _clean(monkeypatch)
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
+    assert first["ok"] and first["slides_ok"] == 3
+    world["images"].clear()
+    real = compose.compose_with_report
+
+    async def refuse_slide_two(brief, slide, *a, **k):
+        if slide.position == 2:
+            raise compose.LegibilityError({"headline": 2.9}, position=2)
+        return await real(brief, slide, *a, **k)
+
+    monkeypatch.setattr(compose, "compose_with_report", refuse_slide_two)
+    res = await pipeline.recompose(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        changes={"cta": "Order today"},
+        owner_request="change the button",
+    )
+
+    assert res["ok"] is False and res["reason"] == "legibility", res
+    assert len(res["errors"]) == 1 and res["errors"][0].startswith("slide 2:")
+    assert "headline 2.9:1" in res["errors"][0]
+    assert "regenerate_image" in res["hint"] and "credits_charged" not in res
+    assert world["images"] == [], "nothing of a refused revision reaches the owner"
+    revised = [
+        r for r in world["rows"].values()
+        if getattr(r, "brief_id", None) not in (None, uuid.UUID(first["brief_id"]))
+    ]  # fmt: skip
+    assert len(revised) == 3 and not any(r.status == "composing" for r in revised)
+    (failed,) = [r for r in revised if r.status == "failed"]
+    assert failed.slide_position == 2 and "legibility guarantee" in failed.error
+    kept = [
+        r for r in world["rows"].values()
+        if getattr(r, "brief_id", None) == uuid.UUID(first["brief_id"])
+    ]  # fmt: skip
+    assert all(r.status == "ready" for r in kept), "the version they already have is untouched"
+
+
+async def test_a_revision_that_breaks_for_any_other_reason_is_generation_failed(world, monkeypatch):
+    _clean(monkeypatch)
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert first["ok"]
+    world["images"].clear()
+
+    async def broken(brief, slide, *a, **k):
+        raise RuntimeError("chromium went away")
+
+    monkeypatch.setattr(compose, "compose_with_report", broken)
+    res = await pipeline.recompose(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        changes={"headline": "Aaj hi lein"},
+        owner_request="Hindi headline",
+    )
+    assert res["ok"] is False and res["reason"] == "generation_failed"
+    assert res["errors"] == ["slide 1: chromium went away"] and "hint" not in res
+    assert world["images"] == []
+    statuses = sorted(r.status for r in world["rows"].values() if hasattr(r, "slide_position"))
+    assert statuses == ["failed", "ready"]
+
+
+async def test_redoing_one_slide_records_that_one_slide_changed(world, monkeypatch):
+    """generate() runs shotplan.apply on the brief it is handed, which seeds
+    every seedless slide in place. The 'regenerate' event's diff used to be
+    measured after that, so redoing slide 2 of three was recorded as all three
+    pictures changed -- and the record of what owners send back is what the
+    product learns from."""
+    _clean(monkeypatch)
+    recorded: list[dict] = []
+    monkeypatch.setattr(pipeline.events, "record", lambda db, **kw: recorded.append(kw))
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
+    assert first["ok"] and first["slides_ok"] == 3
+    redo = await pipeline.regenerate_image(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        new_prompt="a brass thali of pickles on a stone counter, hard afternoon sun",
+        slide_position=2,
+        owner_request="slide 2 is too dark, show the pickles",
+    )
+    assert redo["ok"] and redo["slides_ok"] == 3, redo
+    (ev,) = [r for r in recorded if r["kind"] == "regenerate"]
+    assert list(ev["meta"]["diff"]) == ["slides[2].visual_direction"]
+
+
+async def test_a_revision_the_provider_refused_to_send_is_not_reported_as_shown(world, monkeypatch):
+    """recompose used to drop _show()'s verdict and hard-code shown_to_user
+    True, so when the send was refused (window closed, provider rejected it)
+    the agent told the owner "here is the new version" about a picture that
+    never arrived. generate() reports the same case honestly; so must this."""
+    _clean(monkeypatch)
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert first["ok"] and first["shown_to_user"] is True
+
+    async def refused(url, caption=""):
+        return False
+
+    monkeypatch.setattr(world["ctx"], "show", refused)
+    res = await pipeline.recompose(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        changes={"headline": "Aaj hi lein"},
+        owner_request="Hindi headline",
+    )
+    assert res["ok"] is True and res["applied"] == {
+        "headline": [EXAMPLE["headline"], "Aaj hi lein"]
+    }
+    assert res["shown_to_user"] is False
+    assert "NOT deliver" in res["note"] and "Do not describe it" in res["note"]
+    revised = [
+        r for r in world["rows"].values()
+        if getattr(r, "brief_id", None) == uuid.UUID(res["brief_id"])
+    ]  # fmt: skip
+    assert [r.status for r in revised] == ["ready"], "made and kept; only the send was refused"
