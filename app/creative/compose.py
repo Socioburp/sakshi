@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -1310,6 +1311,68 @@ def fit_background(
         return out.getvalue()
 
 
+@dataclass(slots=True)
+class PictureFit:
+    """Where the source picture ended up inside its window.
+
+    `visible` is the rectangle of the SOURCE the window shows, in the source's
+    own upright pixels; `scale` and `offset` map a source pixel to a window
+    pixel (window_x = source_x * scale + offset_x). `mode` is how it got
+    there: "whole" when the picture already was the window, "crop" when it
+    was cover-cropped (around the subject when one was given), "letterbox"
+    when the subject fitted no crop and the photograph was kept whole.
+
+    fit_background does this placement and then throws the arithmetic away.
+    The final check needs it back: without it nothing can say how much of the
+    owner's photograph the layout actually shows, or whether the panel cut
+    the jar in half.
+    """
+
+    mode: str
+    visible: tuple[int, int, int, int]
+    scale: float
+    offset: tuple[float, float]
+
+
+def picture_fit(
+    source: tuple[int, int],
+    window: tuple[int, int],
+    *,
+    focus: tuple[int, int, int, int] | None = None,
+) -> PictureFit:
+    """Reproduce fit_background's placement, without touching a pixel.
+
+    Pure arithmetic over the two sizes and the subject box, so the composite
+    QA can measure the crop the compositor made on every lane -- including
+    the reused and recompose lanes, which fit the picture again from bytes.
+    """
+    iw, ih = source
+    width, height = window
+    if (iw, ih) == (width, height):
+        return PictureFit("whole", (0, 0, iw, ih), 1.0, (0.0, 0.0))
+    scale = max(width / iw, height / ih)
+    crop = max(iw * scale - width, ih * scale - height)
+    if crop <= 1:
+        return PictureFit("whole", (0, 0, iw, ih), scale, (0.0, 0.0))
+    cw, ch = width / scale, height / scale
+    at = _focus_crop(source, (cw, ch), focus)
+    if at is None:
+        fit = min(width / iw, height / ih)
+        return PictureFit(
+            "letterbox",
+            (0, 0, iw, ih),
+            fit,
+            ((width - iw * fit) / 2, (height - ih * fit) / 2),
+        )
+    left, top = at
+    return PictureFit(
+        "crop",
+        (left, top, round(left + cw), round(top + ch)),
+        scale,
+        (-left * scale, -top * scale),
+    )
+
+
 def photo_window(report: dict | None, width: int, height: int) -> tuple[int, int, int, int]:
     """The photo window FIT_JS measured, as integer canvas pixels (l, t, r, b):
     the box the picture is generated for and fitted to. The whole canvas when
@@ -1525,10 +1588,12 @@ async def _make_legible(
     green wordmark that read at 4.5:1 on a pale photograph was given a white
     card it did not need.
 
-    Returns the contrast found behind each element and the plates it took to
-    get there. Raises LegibilityError when a plate at full strength still
-    cannot deliver it. White type over a white photograph
-    used to ship at 2.78:1 because nothing ever looked at the frame.
+    Returns the contrast found behind each element, the plates it took to get
+    there and `boost`, the strength the gradient was measured up to -- the
+    final check reads that back, because a gradient standing at its cap says
+    the photograph was only just rescued. Raises LegibilityError when a plate
+    at full strength still cannot deliver it. White type over a white
+    photograph used to ship at 2.78:1 because nothing ever looked at the frame.
     """
     w, h = size
     words = [i for i in report["inks"] if i["cls"] != "cta"]
@@ -1623,6 +1688,7 @@ async def _make_legible(
                 "contrast": {cls: round(ratio, 2) for cls, ratio in found.items()},
                 "plates": plates,
                 "mark_plate": mark,
+                "boost": float(k or 1.0),
             }
         if attempt == LEGIBILITY_ROUNDS or (short and set(short) <= {"cta"}):
             # The CTA's ground is its own pill: no plate can change it. The
@@ -1654,6 +1720,7 @@ async def _make_legible(
             "contrast": {cls: round(ratio, 2) for cls, ratio in found.items()},
             "plates": plates,
             "mark_plate": mark,
+            "boost": float(k or 1.0),
         }
     log.error("legibility_refused", template=template, position=position, measured=short)
     raise LegibilityError(short, position=position)
