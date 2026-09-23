@@ -24,6 +24,9 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+from PIL import Image
+
 from app.config import settings
 from app.logging import get_logger
 
@@ -32,6 +35,125 @@ log = get_logger(__name__)
 SAMPLE_SIZE = 220
 QUANTIZE_COLORS = 12
 MIN_SHARE = 0.02  # ignore colours occupying under 2% of the mark
+
+# --- the mark as the compositor will set it ---------------------------------
+# A logo photographed or exported on white (the ordinary WhatsApp case: a
+# JPEG) shipped as a white rectangle with a drop shadow on every photograph.
+# At ingest the ground is removed and the mark trimmed to its ink, so what is
+# stored is the mark and only the mark, with its true shape.
+#
+# The ground is "uniform" when the four corners agree within CORNER_TOLERANCE
+# and is removed by flood-filling from each corner within FILL_TOLERANCE of
+# that corner's colour -- a JPEG's ringing around the letters is inside it,
+# a pale brand colour next to white is not.
+CORNER_TOLERANCE = 24
+FILL_TOLERANCE = 40
+# Alpha below this is "not ink" when the mark is trimmed to its box.
+INK_ALPHA = 8
+# Room left around the ink, as a share of the trimmed mark's longer side, so
+# a thin outline is not cut by its own box.
+TRIM_MARGIN = 0.02
+# A mark this much wider than tall is a wordmark by shape, whatever the
+# vision pass said or did not say: it is sized as a wide thing.
+WORDMARK_ASPECT = 2.2
+
+
+def _uniform_ground(rgb) -> tuple[int, int, int] | None:
+    """The colour of the ground if the four corners agree, else None."""
+    w, h = rgb.size
+    corners = [rgb.getpixel(p) for p in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))]
+    lo = [min(c[i] for c in corners) for i in range(3)]
+    hi = [max(c[i] for c in corners) for i in range(3)]
+    if max(b - a for a, b in zip(lo, hi, strict=True)) > CORNER_TOLERANCE:
+        return None
+    return tuple(int(round(sum(c[i] for c in corners) / 4)) for i in range(3))
+
+
+def remove_ground(rgba):
+    """`rgba` with a uniform ground made transparent, or None when the ground
+    is not uniform (a mark on a photograph, a gradient) and nothing is done.
+    The fill runs from every corner, so a ground enclosed by the mark's own
+    strokes (the counter of an O) stays -- that is part of the mark."""
+    from PIL import ImageDraw
+
+    rgb = rgba.convert("RGB")
+    ground = _uniform_ground(rgb)
+    if ground is None:
+        return None
+    w, h = rgb.size
+    # A sentinel no photograph of a logo contains, painted over the ground.
+    sentinel = tuple((c + 128) % 256 for c in ground)
+    work = rgb.copy()
+    for corner in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+        if work.getpixel(corner) != sentinel:
+            ImageDraw.floodfill(work, corner, sentinel, thresh=FILL_TOLERANCE)
+    arr = np.asarray(work, dtype=np.uint8)
+    ground_px = np.all(arr == np.array(sentinel, dtype=np.uint8), axis=2)
+    alpha = np.asarray(rgba.getchannel("A"), dtype=np.uint8).copy()
+    alpha[ground_px] = 0
+    out = rgba.copy()
+    out.putalpha(Image.fromarray(alpha, "L"))
+    return out
+
+
+def prepare(image_bytes: bytes, mime: str | None) -> tuple[bytes, dict[str, Any]]:
+    """The mark as it will be set, and what was measured of it.
+
+    Returns (png_bytes, info): a transparent PNG trimmed to the ink, plus
+    width, height, aspect (w/h), ink_luminance (alpha-weighted mean relative
+    luminance of the ink, 0..1), has_transparency, ground_removed and
+    trimmed. Bytes that are not an image come back unchanged with no info.
+    """
+    try:
+        im = Image.open(io.BytesIO(image_bytes))
+        im.load()
+    except Exception:  # noqa: BLE001
+        return image_bytes, {}
+    from PIL import ImageOps
+
+    rgba = ImageOps.exif_transpose(im).convert("RGBA")
+    had_alpha = rgba.getchannel("A").getextrema()[0] < 250
+    removed = False
+    if not had_alpha:
+        cleared = remove_ground(rgba)
+        if cleared is not None:
+            rgba, removed = cleared, True
+    box = rgba.getchannel("A").point(lambda v: 255 if v > INK_ALPHA else 0).getbbox()
+    trimmed = False
+    if box and box != (0, 0, rgba.width, rgba.height):
+        margin = int(round(TRIM_MARGIN * max(box[2] - box[0], box[3] - box[1])))
+        rgba = rgba.crop(
+            (
+                max(0, box[0] - margin),
+                max(0, box[1] - margin),
+                min(rgba.width, box[2] + margin),
+                min(rgba.height, box[3] + margin),
+            )
+        )
+        trimmed = True
+    # The ink's tone: the alpha-weighted mean relative luminance of what the
+    # mark paints, so a light mark and a dark mark can be told apart before
+    # anything is laid on a panel.
+    px = np.asarray(rgba, dtype=np.float32) / 255.0
+    weight = px[:, :, 3]
+    lin = np.where(
+        px[:, :, :3] <= 0.04045, px[:, :, :3] / 12.92, ((px[:, :, :3] + 0.055) / 1.055) ** 2.4
+    )
+    lum = lin @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    total = float(weight.sum())
+    ink_luminance = round(float((lum * weight).sum() / total), 3) if total else 0.0
+    buf = io.BytesIO()
+    rgba.save(buf, "PNG")
+    info = {
+        "width": rgba.width,
+        "height": rgba.height,
+        "aspect": round(rgba.width / max(1, rgba.height), 3),
+        "ink_luminance": ink_luminance,
+        "has_transparency": had_alpha or removed,
+        "ground_removed": removed,
+        "trimmed": trimmed,
+    }
+    return buf.getvalue(), info
 
 
 @dataclass
@@ -85,8 +207,6 @@ def _hue(rgb: tuple[int, int, int]) -> float:
 
 def extract_palette(image_bytes: bytes) -> LogoAnalysis:
     """Count pixels. No model involved, so this cannot hallucinate a colour."""
-    from PIL import Image
-
     img = Image.open(io.BytesIO(image_bytes))
     result = LogoAnalysis(width=img.width, height=img.height)
     img = img.convert("RGBA")

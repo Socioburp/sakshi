@@ -898,3 +898,135 @@ async def test_a_reel_is_rendered_from_the_compositors_rasters_inside_the_window
         assert row.video_key and row.status == "ready"
     finally:
         await compose.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# 8. the logo is never tiny, off-centre or a white rectangle
+# --------------------------------------------------------------------------- #
+def _jpeg_logo_on_white(w=900, h=300) -> bytes:
+    """The ordinary WhatsApp logo: a JPEG on white, with an enclosed counter."""
+    im = Image.new("RGB", (w, h), (255, 255, 255))
+    d = ImageDraw.Draw(im)
+    # four "letters" with gaps between them, the first with a counter
+    for x0, x1 in ((100, 240), (275, 415), (450, 590), (625, 800)):
+        d.rounded_rectangle([x0, 110, x1, 190], radius=30, fill=(24, 92, 62))
+    d.ellipse([140, 130, 200, 170], fill=(255, 255, 255))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=85)
+    return buf.getvalue()
+
+
+def _tall_emblem() -> bytes:
+    im = Image.new("RGBA", (200, 600), (0, 0, 0, 0))
+    ImageDraw.Draw(im).rectangle([40, 40, 160, 560], fill=(200, 30, 30, 255))
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_a_logo_on_white_is_stored_as_the_mark_alone():
+    """A JPEG on white shipped as a white rectangle with a drop shadow. At
+    ingest the ground is removed, the mark trimmed to its ink, the enclosed
+    counter kept, and its true aspect and ink tone recorded."""
+    from app.creative import logo
+
+    png, info = logo.prepare(_jpeg_logo_on_white(), "image/jpeg")
+    im = Image.open(io.BytesIO(png))
+    assert im.mode == "RGBA" and info["ground_removed"] and info["trimmed"]
+    assert info["has_transparency"] and 6.2 < info["aspect"] < 6.7 and info["ink_luminance"] < 0.2
+    assert im.getchannel("A").getextrema() == (0, 255)
+    assert im.getpixel((2, 2))[3] == 0, "the ground is gone"
+    assert im.getpixel((im.width // 2, im.height // 2))[3] == 255, "the ink is not"
+    margin = round(logo.TRIM_MARGIN * 700)
+    assert im.getpixel((170 - 100 + margin, 150 - 110 + margin))[3] == 255, "the counter stays"
+    # A transparent tall emblem: nothing to remove, trimmed to its ink.
+    png, info = logo.prepare(_tall_emblem(), "image/png")
+    assert not info["ground_removed"] and info["trimmed"] and 0.25 < info["aspect"] < 0.28
+    # A mark on a photograph is not a uniform ground: left alone.
+    busy = Image.effect_noise((300, 300), 80).convert("RGB")
+    buf = io.BytesIO()
+    busy.save(buf, "PNG")
+    _, info = logo.prepare(buf.getvalue(), "image/png")
+    assert not info["ground_removed"] and not info["trimmed"]
+    assert logo.prepare(b"not an image", None) == (b"not an image", {})
+
+
+def test_the_mark_is_sized_by_area_inside_the_caps_and_a_wide_mark_is_a_wordmark():
+    """A 1:3 emblem was 47x140 inside a 119px box, indented 36px; an 8:1
+    mark with no vision flag was sized as an emblem, 119x15."""
+    assert compose.logo_box(1.0, 1080, False) == (119, 119), "an emblem keeps its cap"
+    assert compose.logo_box(3.0, 1080, True) == (265, 88)
+    assert compose.logo_box(8.0, 1080, True) == (324, 40), "the width cap wins"
+    w, h = compose.logo_box(1 / 3, 1080, False)
+    assert h == round(compose.LOGO_MAX_HEIGHT * 1080) and abs(w - h / 3) <= 1
+    for aspect in (0.5, 1.0, 2.0, 4.0):
+        bw, bh = compose.logo_box(aspect, 1080, aspect >= 2.2)
+        assert min(bw, bh) >= compose.LOGO_MIN_SHORT * 1080 - 1, aspect
+    ctx = compose._brand_context(_brand(logo_analysis={"aspect": 6.43}))
+    assert ctx["logo_wordmark"] is True, "derived from the shape when vision gave none"
+    ctx = compose._brand_context(_brand(logo_analysis={"aspect": 0.26, "has_wordmark": None}))
+    assert ctx["logo_wordmark"] is False
+    ctx = compose._brand_context(_brand(logo_analysis={"aspect": 4.0, "has_wordmark": False}))
+    assert ctx["logo_wordmark"] is True, "a wide mark is sized as a wide thing"
+    ctx = compose._brand_context(_brand(logo_analysis={"has_wordmark": True}))
+    assert ctx["logo_wordmark"] is True and ctx["logo_aspect"] is None
+
+
+@pytest.mark.parametrize("template", ["lower_third", "split_card", "top_band"])
+async def test_a_tall_emblem_is_drawn_at_its_own_box_flush_with_the_margin(chromium, template):
+    from app.creative import logo
+
+    png, info = logo.prepare(_tall_emblem(), "image/png")
+    brand = _brand(
+        logo_src=compose.as_data_uri(png, "image/png"),
+        logo_analysis={"aspect": info["aspect"], "ink_luminance": info["ink_luminance"]},
+    )
+    brief = _brief(template, headline="Weekend Sale")
+    report = await compose.check_layout(brief, brief.units()[0], brand)
+    box = report["boxes"]["logo"]
+    want = compose.logo_box(info["aspect"], 1080, False)
+    assert (round(box["r"] - box["l"]), round(box["b"] - box["t"])) == want
+    assert report["violations"] == []
+    flat = io.BytesIO()
+    Image.new("RGB", (1600, 2000), (120, 130, 110)).save(flat, "PNG")
+    out, rep = await compose.compose_with_report(
+        brief, brief.units()[0], brand, flat.getvalue(), "image/png", layout=report
+    )
+    im = Image.open(io.BytesIO(out)).convert("RGB")
+    lb = rep["boxes"]["logo"]
+    reds = [x for x in range(int(lb["l"]) - 5, int(lb["r"]) + 5)
+            if im.getpixel((x, int((lb["t"] + lb["b"]) / 2)))[0] > 150]  # fmt: skip
+    assert reds and abs(min(reds) - lb["l"]) <= 3, "the ink starts where the box starts"
+
+
+async def test_a_prepared_jpeg_logo_is_not_a_white_rectangle_on_the_panel(chromium):
+    """split_card and frame_card set the mark on the brand's panel with no
+    shadow; a JPEG on white shipped there as a white box. Prepared at
+    ingest, what sits on the panel is the ink alone, and a mark that reads
+    on the panel (over 3:1) gets no card."""
+    from app.creative import logo
+
+    png, info = logo.prepare(_jpeg_logo_on_white(), "image/jpeg")
+    brand = _brand(
+        logo_src=compose.as_data_uri(png, "image/png"),
+        logo_analysis={"aspect": info["aspect"], "ink_luminance": info["ink_luminance"]},
+        palette={"primary": "#F2EDE4", "accent": "#E4572E", "ink": "#1A1A1A"},
+    )
+    brief = _brief("split_card", headline="Weekend Sale")
+    report = await compose.check_layout(brief, brief.units()[0], brand)
+    win = _window(report, brief)
+    size = gen.generation_size_for_window((win[2] - win[0], win[3] - win[1]), POST_SIZE)
+    out, rep = await compose.compose_with_report(
+        brief, brief.units()[0], brand, _bottle(size), "image/png", layout=report, generated=True
+    )
+    assert rep["legibility"]["mark_plate"] is None, "no card was needed under it"
+    assert rep["legibility"]["contrast"]["logo"] >= 3.0
+    im = Image.open(io.BytesIO(out)).convert("RGB")
+    lb = rep["boxes"]["logo"]
+    corner = im.getpixel((int(lb["l"]) + 3, int(lb["t"]) + 3))
+    assert _near(corner, (242, 237, 228), 12), ("the panel shows through the box", corner)
+    ink = im.getpixel((int((lb["l"] + lb["r"]) / 2), int((lb["t"] + lb["b"]) / 2)))
+    assert ink[1] > ink[0] + 20 and ink[1] < 140, ("the green word is there", ink)
+    # As tall as the floor allows under the width cap: a 6.4:1 mark at 0.30W.
+    tallest = min(compose.LOGO_MIN_SHORT * 1080, compose.LOGO_WIDTH["wordmark"] * 1080 / 6.43)
+    assert (lb["b"] - lb["t"]) >= tallest - 1, "never tiny"

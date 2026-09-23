@@ -114,6 +114,10 @@ async def transcribe_and_handle(payload: dict) -> None:
         await run_turn(message_id=message_id, trace=t)
 
 
+# What logo.prepare measured of the mark that the compositor reads back.
+_MARK_FACTS = ("aspect", "ink_luminance", "trimmed", "ground_removed")
+
+
 async def handle_image(payload: dict) -> None:
     """An inbound picture. The first one is almost always the logo.
 
@@ -198,6 +202,16 @@ async def handle_image(payload: dict) -> None:
                 kind = "product" if caption else "other"
             label = (caption or seen.get("label") or "")[:160] or None
 
+        mark: dict = {}
+        if is_logo:
+            # The mark is stored as it will be set: ground removed, trimmed to
+            # its ink, a transparent PNG with its true shape recorded. A JPEG
+            # on white used to ship as a white rectangle on every photograph.
+            with t.stage("logo_prepare"):
+                image, mark = await asyncio.to_thread(logo_analysis.prepare, image, mime)
+            if mark:
+                mime, dims = "image/png", (mark["width"], mark["height"])
+
         with t.stage("asset_upload"):
             ext = "png" if "png" in (mime or "") else "jpg"
             key = r2.key_for(str(brand_id), str(message_id), f"{kind}.{ext}", draft=False)
@@ -217,8 +231,8 @@ async def handle_image(payload: dict) -> None:
                     storage_key=key,
                     url=url,
                     mime=mime,
-                    width=analysis.width if analysis else (dims[0] if dims else None),
-                    height=analysis.height if analysis else (dims[1] if dims else None),
+                    width=dims[0] if dims else (analysis.width if analysis else None),
+                    height=dims[1] if dims else (analysis.height if analysis else None),
                     source_message_id=message_id,
                 )
             )
@@ -235,6 +249,8 @@ async def handle_image(payload: dict) -> None:
                     "style": analysis.style,
                     "tone": analysis.tone,
                     "has_wordmark": analysis.has_wordmark,
+                    # The mark's true shape and tone, for sizing and plating.
+                    **{k: v for k, v in mark.items() if k in _MARK_FACTS},
                 }
                 try:
                     memory_embed.remember(

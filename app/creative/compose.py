@@ -24,6 +24,7 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from app.config import settings
 from app.creative import fonts, legibility
+from app.creative import logo as logo_module
 from app.creative.brief import CreativeBrief, Slide
 from app.logging import get_logger
 
@@ -143,8 +144,36 @@ MAX_EXTRA_LEADING = 0.5
 # The mark is sized by canvas WIDTH, one figure per kind of mark, so it is the
 # same size on every post of a brand whatever the layout. A wordmark is wide
 # and reads at a modest height; an emblem is compact and needs the size.
+# These are the CAPS. When the mark's true shape is known (recorded at
+# ingest by logo.prepare) it is sized by AREA inside them, with a floor on
+# its short side: a 1:3 emblem was drawn 47px wide, off-centre in a 119px
+# box, and an 8:1 wordmark with no vision flag was 119x15.
 LOGO_WIDTH = {"wordmark": 0.30, "emblem": 0.11}
 LOGO_MAX_HEIGHT = 0.13
+# The share of a post's area a mark covers, and the least its short side
+# may be, as a share of the canvas width (56px on 1080).
+LOGO_AREA = 0.016
+LOGO_MIN_SHORT = 0.052
+
+
+def logo_box(aspect: float, width: int, wordmark: bool) -> tuple[int, int]:
+    """The mark's rendered (width, height) for a canvas `width` wide: sized
+    by area, the short side raised to LOGO_MIN_SHORT where the caps allow,
+    never past the caps for its kind."""
+    aspect = max(0.05, float(aspect))
+    area = LOGO_AREA * width * width * 1.25  # a post's area, so stories match
+    lw = (area * aspect) ** 0.5
+    lh = lw / aspect
+    short = min(lw, lh)
+    floor = LOGO_MIN_SHORT * width
+    if short < floor:
+        lw, lh = lw * floor / short, lh * floor / short
+    cap_w = LOGO_WIDTH["wordmark" if wordmark else "emblem"] * width
+    cap_h = LOGO_MAX_HEIGHT * width
+    s = min(1.0, cap_w / lw, cap_h / lh)
+    return max(1, round(lw * s)), max(1, round(lh * s))
+
+
 # Clear space kept free around the mark, as a fraction of its rendered height.
 LOGO_CLEAR = 0.25
 
@@ -361,13 +390,24 @@ def _brand_context(brand: Any) -> dict[str, Any]:
     analysis = dict(getattr(brand, "logo_analysis", {}) or {})
     # A wordmark and an emblem are not the same shape and must not be sized the
     # same way. Sizing both by height makes a wide wordmark span the canvas and
-    # a compact emblem vanish. The vision pass already recorded which this is;
-    # until now nothing read it.
-    wordmark = bool(analysis.get("has_wordmark"))
+    # a compact emblem vanish. The vision pass records which this is; when it
+    # gave no answer, the shape does -- and a mark wider than WORDMARK_ASPECT
+    # is sized as a wide thing whatever it was called.
+    aspect = analysis.get("aspect")
+    try:
+        aspect = float(aspect) if aspect else None
+    except (TypeError, ValueError):
+        aspect = None
+    wordmark = analysis.get("has_wordmark")
+    if aspect and (wordmark is None or aspect >= logo_module.WORDMARK_ASPECT):
+        wordmark = aspect >= logo_module.WORDMARK_ASPECT
+    wordmark = bool(wordmark)
     return {
         "logo_wordmark": wordmark,
         "logo_width_frac": LOGO_WIDTH["wordmark" if wordmark else "emblem"],
         "logo_max_height_frac": LOGO_MAX_HEIGHT,
+        # Set per canvas in render_html from the mark's true shape.
+        "logo_aspect": aspect,
         "name": getattr(brand, "name", ""),
         # Prefer the inlined data URI; fall back to the remote URL, then to text.
         "logo_url": getattr(brand, "logo_src", None) or getattr(brand, "logo_url", None),
@@ -426,6 +466,13 @@ def render_html(
     brand_ctx["body_leading"] = fonts.body_leading(fonts.script_families(slide.subhead or ""))
     prefs = getattr(brand, "template_prefs", None) or {}
     brand_ctx["signature"] = prefs.get("signature") or "none"
+    # The mark's box equals the visible mark when its shape is known: no
+    # empty box around a tall emblem, no wide mark squeezed to an emblem.
+    brand_ctx["logo_box"] = (
+        logo_box(brand_ctx["logo_aspect"], w, brand_ctx["logo_wordmark"])
+        if brand_ctx.get("logo_aspect")
+        else None
+    )
     # LEGIBILITY IS A GUARANTEE TOO. The layouts that set type over the
     # photograph put a BLACK scrim behind it, so the type must be light; a brand
     # whose ink is dark (a light-palette brand) came out as near-black words on
@@ -1461,10 +1508,22 @@ async def _frame(page, clip: tuple[float, float, float, float], *hidden: str) ->
 
 
 async def _make_legible(
-    page, report: dict, template: str, fitted: bytes, size: tuple[int, int], position: int
+    page,
+    report: dict,
+    template: str,
+    fitted: bytes,
+    size: tuple[int, int],
+    position: int,
+    mark_luminance: float | None = None,
 ) -> dict:
     """Measure the ground behind every word ON THE RENDERED FRAME and hold it to
     4.5:1 (the logo to 3:1), strengthening a plate under whatever falls short.
+
+    `mark_luminance` is the tone of the mark's own ink, measured on the file
+    at ingest (logo.prepare). Read off the frame instead, a letter-shaped
+    mark came out mid-grey -- its drop shadow counted as mark -- and a dark
+    green wordmark that read at 4.5:1 on a pale photograph was given a white
+    card it did not need.
 
     Returns the contrast found behind each element and the plates it took to
     get there. Raises LegibilityError when a plate at full strength still
@@ -1551,7 +1610,8 @@ async def _make_legible(
                     changed = True
             if not looks["opaque"]:
                 stats = legibility.ground(ground, [box], box[3] - box[1])
-                found["logo"] = legibility.contrast_on(looks["luminance"], 1.0, stats)
+                ink_tone = looks["luminance"] if mark_luminance is None else mark_luminance
+                found["logo"] = legibility.contrast_on(ink_tone, 1.0, stats)
                 slack = legibility.MEASURE_SLACK if legibility.designed(logo_solid, stats) else 0
                 if found["logo"] < legibility.MARK_CONTRAST - slack:
                     short["logo"] = found["logo"]
@@ -1581,8 +1641,9 @@ async def _make_legible(
                     )
                     alphas[n] = max(alphas[n], need)
         if "logo" in short:
-            on_white = legibility.contrast_ratio(looks["luminance"], 1.0)
-            on_dark = legibility.contrast_ratio(looks["luminance"], _luminance(_DARK))
+            ink_tone = looks["luminance"] if mark_luminance is None else mark_luminance
+            on_white = legibility.contrast_ratio(ink_tone, 1.0)
+            on_dark = legibility.contrast_ratio(ink_tone, _luminance(_DARK))
             colour = _LIGHT if on_white >= on_dark else _DARK
             mark = _mark_plate(logo, colour, 1.0 if mark else MARK_PLATE_ALPHA)
     if all(v >= legibility.bar_for(cls) - legibility.MEASURE_SLACK for cls, v in short.items()):
@@ -1615,6 +1676,16 @@ def _kept_off(box: list[float], keep: tuple[float, float, float, float]) -> list
     if side == "b":
         return [left, top, right, kt]
     return [left, kb, right, bottom]
+
+
+def _mark_luminance(brand: Any) -> float | None:
+    """The mark's ink tone recorded at ingest, or None for a mark whose file
+    was never measured."""
+    value = dict(getattr(brand, "logo_analysis", {}) or {}).get("ink_luminance")
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _mark_plate(logo: dict, colour: str, alpha: float) -> dict:
@@ -1691,7 +1762,7 @@ async def _compose_once(
             raise LayoutError(["photo_window:changed"], position=slide.position)
         report["photo_window"] = list(window)
         report["legibility"] = await _make_legible(
-            page, report, template, fitted, (w, h), slide.position
+            page, report, template, fitted, (w, h), slide.position, _mark_luminance(brand)
         )
         clip = {"x": 0, "y": 0, "width": w, "height": h}
         shot = await page.screenshot(type="png", clip=clip)

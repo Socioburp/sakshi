@@ -143,9 +143,12 @@
      brand. No layout overrides it. flex: none -- a mark is never squeezed to
      make room for a CTA; the CTA's type gives way instead. The drop shadow
      separates it from a busy photograph without a plate. #}
+  {# With the mark's shape known (logo.prepare at ingest) the box IS the
+     mark: sized by area inside the caps, a floor on its short side. #}
   .logo { display: block; object-fit: contain; flex: none;
-          width: {{ (width*brand.logo_width_frac)|round|int }}px; height: auto;
-          max-height: {{ (width*brand.logo_max_height_frac)|round|int }}px;
+          {% if brand.logo_box %}width: {{ brand.logo_box[0] }}px; height: {{ brand.logo_box[1] }}px;
+          {% else %}width: {{ (width*brand.logo_width_frac)|round|int }}px; height: auto;
+          max-height: {{ (width*brand.logo_max_height_frac)|round|int }}px;{% endif %}
           filter: drop-shadow(0 {{ (width*0.002)|round|int }}px
                               {{ (width*0.008)|round|int }}px rgba(0,0,0,.42)); }
   {# The brand's name where there is no logo. It is the smallest type on the
