@@ -919,6 +919,12 @@ async def regenerate_image(
         brief = CreativeBrief.model_validate(payload)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": "invalid_visual_direction", "error": str(exc)[:400]}
+    # Measured now, before generate() runs shotplan.apply on this very object:
+    # that gives every seedless slide a seed in place, so a diff taken after
+    # the work said all three pictures of a carousel changed when the owner
+    # asked for one. The event is what "the product gets smarter" learns from,
+    # so it names exactly the slides the owner sent back and nothing else.
+    diff = payload_diff(parent_payload, brief.model_dump(mode="json"))
 
     reuse: dict[int, tuple[str, str]] = {}
     if brief.is_carousel():
@@ -970,7 +976,7 @@ async def regenerate_image(
                 "revision_no": result.get("revision_no"),
                 "new_brief_id": new_brief_id,
                 "root_brief_id": result.get("root_brief_id"),
-                "diff": payload_diff(parent_payload, brief.model_dump(mode="json")),
+                "diff": diff,
                 "ok": bool(result.get("ok")),
                 "reason": result.get("reason"),
             },

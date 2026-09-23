@@ -322,3 +322,26 @@ async def test_a_revision_that_breaks_for_any_other_reason_is_generation_failed(
     assert world["images"] == []
     statuses = sorted(r.status for r in world["rows"].values() if hasattr(r, "slide_position"))
     assert statuses == ["failed", "ready"]
+
+
+async def test_redoing_one_slide_records_that_one_slide_changed(world, monkeypatch):
+    """generate() runs shotplan.apply on the brief it is handed, which seeds
+    every seedless slide in place. The 'regenerate' event's diff used to be
+    measured after that, so redoing slide 2 of three was recorded as all three
+    pictures changed -- and the record of what owners send back is what the
+    product learns from."""
+    _clean(monkeypatch)
+    recorded: list[dict] = []
+    monkeypatch.setattr(pipeline.events, "record", lambda db, **kw: recorded.append(kw))
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
+    assert first["ok"] and first["slides_ok"] == 3
+    redo = await pipeline.regenerate_image(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        new_prompt="a brass thali of pickles on a stone counter, hard afternoon sun",
+        slide_position=2,
+        owner_request="slide 2 is too dark, show the pickles",
+    )
+    assert redo["ok"] and redo["slides_ok"] == 3, redo
+    (ev,) = [r for r in recorded if r["kind"] == "regenerate"]
+    assert list(ev["meta"]["diff"]) == ["slides[2].visual_direction"]
