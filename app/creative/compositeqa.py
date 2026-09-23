@@ -414,15 +414,19 @@ WORDS_ON_PICTURE = ("centered_overlay", "lower_third", "poster_stack")
 FREE_VARIANTS = 2
 
 
-def order_for(template: str, assessment: Assessment) -> list[str]:
+def order_for(template: str, codes: set[str]) -> list[str]:
     """Which templates to try next, best first, for what is wrong with this one.
 
     The fault names the cure. Words sitting on the subject want a layout that
     sets words beside the picture; a subject the window cut off wants the
     layout that shows the whole frame. Anything else just wants the other kind
     of layout, because staying in the same family rarely changes the answer.
+
+    `codes` are this module's own fault and repair codes, or the inspector's
+    reasons translated into them -- the same ladder serves both, because the
+    cure for "the words are on the jar" does not depend on who noticed.
     """
-    faults = set(assessment.faults) | set(assessment.repairs)
+    faults = set(codes)
     if faults & {"text_over_subject", "scrim_saturated"}:
         first, second = WORDS_OFF_PICTURE, WORDS_ON_PICTURE
     elif faults & {"subject_cut_by_window", "photo_mostly_cropped"}:
@@ -455,7 +459,14 @@ class Variant:
         return self.assessment.ok
 
 
-async def best_free_variant(first: Variant, render, *, limit: int = FREE_VARIANTS) -> Variant:
+async def best_free_variant(
+    first: Variant,
+    render,
+    *,
+    limit: int = FREE_VARIANTS,
+    codes: set[str] | None = None,
+    must_change: bool = False,
+) -> Variant:
     """The best version of this slide that costs nothing to make.
 
     `render(template)` composes the slide again in another layout and comes
@@ -469,20 +480,30 @@ async def best_free_variant(first: Variant, render, *, limit: int = FREE_VARIANT
 
     Stops at the first clean variant that beats what it came in with; a slide
     that is already clean is returned untouched.
+
+    `codes` steers the search with something other than this module's own
+    verdict -- the inspector's reasons, when IT found what the measurements
+    could not. `must_change` goes with them: the measurements think this frame
+    is fine, so the only useful answer is a different layout, and keeping the
+    one the inspector just rejected is not an option.
     """
-    if not first.assessment.worth_a_variant:
-        return first
-    best = first
+    if codes is None:
+        codes = set(first.assessment.faults) | set(first.assessment.repairs)
+        if not codes:
+            return first
+    best = None if must_change else first
     tried: list[str] = []
-    for template in order_for(first.template, first.assessment)[:limit]:
+    for template in order_for(first.template, codes)[:limit]:
         tried.append(template)
         variant = await render(template)
         if variant is None:
             continue
-        if (variant.ok, variant.score) > (best.ok, best.score):
+        if best is None or (variant.ok, variant.score) > (best.ok, best.score):
             best = variant
         if best.ok and best is not first:
             break
+    if best is None:
+        return first
     log.info(
         "composite_repair",
         was=first.template,

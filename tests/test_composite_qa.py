@@ -12,12 +12,14 @@ from __future__ import annotations
 import io
 import json
 import types
+import uuid
 
 import pytest
 from PIL import Image
 
-from app.creative import bggate, compose, compositeqa, finalgate, legibility
-from app.creative.brief import EXAMPLE, CreativeBrief
+from app.creative import bggate, compose, compositeqa, finalgate, legibility, pipeline
+from app.creative.brief import EXAMPLE, EXAMPLE_CAROUSEL, CreativeBrief
+from tests.test_pipeline_flow import build_world
 
 
 async def _noop(*a, **k):
@@ -664,3 +666,339 @@ async def test_the_spend_of_every_attempt_rides_home_on_the_verdict(monkeypatch)
     verdict = await finalgate.inspect(buf.getvalue(), headline="Weekend Sale")
     assert verdict.ok and verdict.score == 80
     assert verdict.cost_micros == 5_500, "both calls are on the ledger"
+
+
+# --------------------------------------------------------------------------- #
+# the free repair ladder: another layout costs a second of Chromium, not a rupee
+# --------------------------------------------------------------------------- #
+def _variant(template, score, ok=True) -> compositeqa.Variant:
+    assessment = compositeqa.Assessment(faults=[] if ok else ["text_over_subject"], score=score)
+    return compositeqa.Variant(template, b"png", b"jpeg", {}, assessment)
+
+
+def _ladder(available: dict[str, compositeqa.Variant]):
+    """A renderer that can make some templates and not others. Records what it
+    was asked for, so 'how many renders did that cost' is checkable."""
+    asked: list[str] = []
+
+    async def render(template):
+        asked.append(template)
+        return available.get(template)
+
+    return render, asked
+
+
+async def test_a_clean_slide_is_never_re_composed():
+    """The ladder costs a second of Chromium per rung. A slide with nothing
+    wrong with it does not pay for one."""
+    render, asked = _ladder({})
+    first = _variant("centered_overlay", 100)
+    out = await compositeqa.best_free_variant(first, render)
+    assert out is first and asked == []
+
+
+async def test_a_fault_a_layout_change_fixes_is_fixed_by_a_layout_change():
+    render, asked = _ladder({"split_card": _variant("split_card", 92)})
+    first = _variant("centered_overlay", 62, ok=False)
+    out = await compositeqa.best_free_variant(first, render)
+    assert out.template == "split_card" and out.ok
+    assert asked == ["split_card"], "stopped at the first clean variant"
+
+
+async def test_words_on_the_subject_are_taken_to_a_layout_that_sets_words_beside_it():
+    """The fault names the cure: if the words are on the jar, move the words
+    off the picture -- do not shuffle between layouts that all put them on it."""
+    order = compositeqa.order_for("centered_overlay", {"text_over_subject"})
+    assert order[:3] == list(compositeqa.WORDS_OFF_PICTURE)
+
+
+async def test_a_subject_the_panel_cut_is_taken_to_a_layout_that_shows_the_whole_frame():
+    order = compositeqa.order_for("split_card", {"subject_cut_by_window"})
+    assert order[:3] == list(compositeqa.WORDS_ON_PICTURE)
+    assert "split_card" not in order, "the layout that caused it is not a cure for it"
+
+
+async def test_a_layout_that_cannot_take_this_slide_is_skipped_not_failed():
+    """A picture generated for one window does not fill another's, and long
+    copy does not fit every layout. That is one fewer free option, not a
+    failure -- the ladder moves on."""
+    render, asked = _ladder({"top_band": _variant("top_band", 88)})
+    first = _variant("split_card", 40, ok=False)
+    out = await compositeqa.best_free_variant(first, render, limit=3)
+    assert out.template == "top_band" and asked[0] != "top_band"
+
+
+async def test_when_nothing_renders_the_slide_it_came_in_as_is_kept():
+    render, _ = _ladder({})
+    first = _variant("centered_overlay", 62, ok=False)
+    out = await compositeqa.best_free_variant(first, render)
+    assert out is first, "a refusal is the caller's decision, not the ladder's"
+
+
+async def test_the_best_scoring_variant_wins_when_none_is_clean():
+    render, _ = _ladder({
+        "split_card": _variant("split_card", 55, ok=False),
+        "top_band": _variant("top_band", 71, ok=False),
+    })  # fmt: skip
+    first = _variant("centered_overlay", 40, ok=False)
+    out = await compositeqa.best_free_variant(first, render, limit=3)
+    assert out.template == "top_band" and out.score == 71
+
+
+async def test_the_ladder_is_capped():
+    render, asked = _ladder({})
+    await compositeqa.best_free_variant(_variant("centered_overlay", 10, ok=False), render, limit=2)
+    assert len(asked) == 2, "two rungs, however many layouts exist"
+
+
+async def test_the_inspector_can_steer_the_ladder_even_when_the_measurements_are_happy():
+    """The inspector saw something no measurement could -- a tofu glyph, a word
+    baked into the tablecloth. Keeping the frame it just rejected because the
+    numbers like it is exactly the shrug this package exists to remove."""
+    render, asked = _ladder({"split_card": _variant("split_card", 70)})
+    first = _variant("centered_overlay", 99)  # deterministically clean
+    out = await compositeqa.best_free_variant(
+        first,
+        render,
+        codes=finalgate.as_codes(["text_covers_subject"]),
+        must_change=True,
+    )
+    assert out.template == "split_card" and asked
+
+
+def test_the_inspectors_reasons_translate_into_the_ladders_vocabulary():
+    assert finalgate.as_codes(["text_covers_subject"]) == {"text_over_subject"}
+    assert finalgate.as_codes(["subject_cut_off"]) == {"subject_cut_by_window"}
+    # ...and the two the picture is to blame for map to no layout at all.
+    assert finalgate.as_codes(["artefacts", "stray_text_in_photo"]) == set()
+    assert finalgate.picture_faults(["artefacts", "text_cut_off"]) == ["artefacts"]
+
+
+# --------------------------------------------------------------------------- #
+# wired into the pipeline: who pays for a repair, and who never does
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+async def world(monkeypatch):
+    w = await build_world(monkeypatch)
+    _quiet(monkeypatch)
+    yield w
+    await compose.shutdown()
+
+
+def _quiet(monkeypatch):
+    """The background gate passes everything; this file is about the gate that
+    comes after it."""
+
+    async def clean(image, **kw):
+        return bggate.Verdict([], "")
+
+    monkeypatch.setattr(bggate, "inspect", clean)
+
+
+def _fault_once(monkeypatch, *, faults, on=1):
+    """Make the deterministic check report `faults` for the first `on`
+    assessments of the ORIGINAL layout, and nothing for any other layout -- so
+    a template change is what clears it."""
+    real = compositeqa.assess
+    seen = {"n": 0}
+
+    def fake(report, *, template, **kw):
+        out = real(report, template=template, **kw)
+        if template == "centered_overlay" and seen["n"] < on:
+            seen["n"] += 1
+            return compositeqa.Assessment(
+                faults=list(faults), score=40, metrics=out.metrics, notes="scripted"
+            )
+        return out
+
+    monkeypatch.setattr(pipeline.compositeqa, "assess", fake)
+    return seen
+
+
+async def test_a_fault_a_template_change_fixes_costs_no_vendor_call(world, monkeypatch):
+    """The whole point of repairing before retrying. The layout is free to
+    change and the picture is not, so the picture is the last thing touched."""
+    _fault_once(monkeypatch, faults=["text_over_subject"], on=99)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"] and res["slides_ok"] == 1
+    assert len(world["provider"].requests) == 1, "one picture bought, not two"
+    (row,) = world["rows"].values()
+    assert row.status == "ready" and row.template != "centered_overlay"
+    assert row.cost_micros == 288_300 + 4_500, "the picture and the look, nothing more"
+
+
+async def test_a_picture_fault_on_the_generated_lane_costs_exactly_one_more(world, monkeypatch):
+    """No layout can cure a word baked into the tablecloth. That -- and only
+    that -- is worth buying a second picture for, and only ever one."""
+    world["final_verdicts"].extend([["artefacts"], []])
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"] and res["slides_ok"] == 1
+    assert len(world["provider"].requests) == 2, "exactly one more picture"
+    (row,) = world["rows"].values()
+    assert row.status == "ready"
+    assert row.cost_micros == 2 * 288_300 + 2 * 4_500, "both pictures and both looks"
+
+
+async def test_a_picture_fault_does_not_waste_renders_on_other_layouts(world, monkeypatch):
+    """No arrangement of a photograph with a melted hand in it is the right
+    arrangement. Trying three of them costs three seconds and risks shipping
+    the one the inspector happens to pass."""
+    rendered = []
+    real = compose.compose_with_report
+
+    async def counted(*a, **k):
+        rendered.append(1)
+        return await real(*a, **k)
+
+    monkeypatch.setattr(compose, "compose_with_report", counted)
+    world["final_verdicts"].extend([["artefacts"], []])
+    await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert len(rendered) == 2, "the first frame and the one over the bought picture"
+
+
+async def test_the_corrected_prompt_says_what_was_wrong_with_the_last_one(world, monkeypatch):
+    world["final_verdicts"].extend([["artefacts"], []])
+    await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    first, second = world["provider"].requests
+    assert finalgate.CORRECTIONS["artefacts"] in second.prompt
+    assert finalgate.CORRECTIONS["artefacts"] not in first.prompt
+
+
+async def _keep_first(first, render, **kw):
+    """No layout helps: the ladder comes back with what it was given."""
+    return first
+
+
+async def _final_check_on(world, monkeypatch, *, lane, buy):
+    """Drive _final_check directly on a real render, with the ladder blocked so
+    the refusal path is what is under test."""
+    monkeypatch.setattr(pipeline.compositeqa, "best_free_variant", _keep_first)
+    _fault_once(monkeypatch, faults=["text_over_subject"], on=99)
+    brief = CreativeBrief.model_validate(EXAMPLE)
+    slide = brief.units()[0]
+    brand = pipeline._snapshot(None, world["brand"])
+    png, report = await compose.compose_with_report(
+        brief, slide, brand, _photo(), "image/png", generated=False
+    )
+    final = compose.export_jpeg(png, brief.pixel_size())
+    return await pipeline._final_check(
+        world["ctx"], brief, slide, brand, uuid.uuid4(),
+        image=_photo(), mime="image/png", png=png, final=final, report=report,
+        generated=False, focus=None, subject=None, stage="slide1", lane=lane, buy=buy,
+    )  # fmt: skip
+
+
+async def test_a_lane_that_may_not_spend_refuses_with_something_the_agent_can_act_on(
+    world, monkeypatch
+):
+    """The owner sent this photograph. We do not quietly replace it with a
+    bought one because our own check did not like the card -- we say so, and
+    we say what would fix it."""
+    with pytest.raises(pipeline.CompositeRejected) as err:
+        await _final_check_on(world, monkeypatch, lane="brand_asset", buy=None)
+    assert err.value.faults == ["text_over_subject"]
+    assert "another photo" in err.value.hint and "DOCUMENT" in err.value.hint
+    assert "different layout" in err.value.hint
+    assert len(world["provider"].requests) == 0, "a free lane stays free, even refusing"
+    assert err.value.cost_micros == 4_500, "the looks it took are still on the ledger"
+
+
+async def test_a_lane_that_may_spend_is_offered_the_purchase_and_refuses_if_it_declines(
+    world, monkeypatch
+):
+    """The generated lane gets one corrected regeneration. When even that is
+    not available -- the per-slide cap is spent -- it refuses like the rest."""
+    offered = []
+
+    async def broke(faults, reasons, template):
+        offered.append((faults, reasons, template))
+        return None
+
+    with pytest.raises(pipeline.CompositeRejected) as err:
+        await _final_check_on(world, monkeypatch, lane="fake", buy=broke)
+    assert offered and offered[0][0] == ["text_over_subject"]
+    assert "refunded" in err.value.hint
+
+
+async def test_exhaustion_delivers_nothing_stores_nothing_and_refunds(world, monkeypatch):
+    """Refusing to render beats shipping a flawed frame -- and a refusal that
+    still charged, still uploaded and still sent would be the worst of both."""
+    _fault_once(monkeypatch, faults=["contrast_below_bar"], on=99)
+    monkeypatch.setattr(pipeline.compositeqa, "best_free_variant", _keep_first)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is False and res["reason"] == "generation_failed"
+    assert "final check" in res["errors"][0]
+    assert world["refunded"] == 1
+    assert not [k for k in world["blobs"] if k.endswith("composed.jpg")]
+    assert world["images"] == []
+    (row,) = world["rows"].values()
+    assert row.status == "failed" and row.cost_micros > 0, "the spend is still on the ledger"
+
+
+async def test_a_revision_is_looked_at_as_hard_as_a_first_version(world, monkeypatch):
+    """recompose had no picture check of ANY kind -- not the background gate,
+    not anything -- and it is the lane the owner already had to ask twice for."""
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert first["ok"]
+    before = len(world["inspected"])
+    res = await pipeline.recompose(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        changes={"cta": "Order today"},
+        owner_request="change the button",
+    )
+    assert res["ok"] and len(world["inspected"]) == before + 1
+    assert len(world["provider"].requests) == 1, "a revision is still free"
+
+
+async def test_the_switch_turns_the_whole_check_off(world, monkeypatch):
+    monkeypatch.setattr(pipeline.settings, "composite_gate_enabled", False)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"] and world["inspected"] == []
+    (row,) = world["rows"].values()
+    assert row.quality_score is None
+
+
+async def test_the_mock_provider_is_not_sent_to_the_inspector(world, monkeypatch):
+    """Exactly as the background gate exempts it: the mock draws a gradient for
+    local development and there is no model output to judge."""
+    world["provider"].name = "mock"
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"] and world["inspected"] == []
+
+
+async def test_the_looks_at_a_carousel_happen_at_the_same_time(world, monkeypatch):
+    """One vision call per delivered slide, ~2-5s each. Slides are already
+    built concurrently, so a six-slide carousel waits for one of them rather
+    than six -- but only if the call is made inside the per-slide work, which
+    is what this pins."""
+    import asyncio
+
+    state = {"in_flight": 0, "peak": 0}
+
+    async def slow(image, **copy):
+        state["in_flight"] += 1
+        state["peak"] = max(state["peak"], state["in_flight"])
+        try:
+            await asyncio.sleep(0.05)
+            return bggate.Verdict([], "", cost_micros=4_500, score=90)
+        finally:
+            state["in_flight"] -= 1
+
+    monkeypatch.setattr(finalgate, "inspect", slow)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
+    assert res["ok"] and res["slides_ok"] == 3
+    assert state["peak"] > 1, "the slides were inspected together, not one after another"
+
+
+def test_one_look_per_slide_is_what_the_settings_are_priced_for():
+    """The figure quoted in config.py, recomputed here so the two cannot drift:
+    a 819x1024 JPEG at the documented ~(w*h)/750 plus the rubric, answered in
+    JSON. Under 3% of what the picture it is checking costs."""
+    image_tokens = (819 * 1024) / 750
+    read = image_tokens + 600
+    per_slide = bggate.cost_micros(_Usage(round(read), 60))
+    assert 5_500 <= per_slide <= 6_500, per_slide
+    assert per_slide < 0.03 * 288_300, "a look is a rounding error against a picture"
+    assert 6 * per_slide < 40_000, "a six-slide carousel adds well under four cents"

@@ -588,7 +588,7 @@ class CreativeEvent(Base):
     __table_args__ = (
         CheckConstraint(
             "kind in ('created','approve','change_words','change_picture','revise',"
-            "'regenerate','publish','suggested','suggestion_taken')",
+            "'regenerate','publish','suggested','suggestion_taken','quality')",
             name="ck_creative_events_kind",
         ),
     )

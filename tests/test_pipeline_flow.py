@@ -17,7 +17,7 @@ from contextlib import contextmanager
 import pytest
 from PIL import Image
 
-from app.creative import bggate, compose, pipeline
+from app.creative import bggate, compose, finalgate, pipeline
 from app.creative.brief import EXAMPLE, EXAMPLE_CAROUSEL, POST_SIZE, CreativeBrief
 from app.creative.imagegen.base import ImageResult
 from app.telemetry.stages import Trace
@@ -99,6 +99,8 @@ async def build_world(monkeypatch) -> dict:
         "refunded": 0,
         "images": [],
         "lines": [],
+        "inspected": [],
+        "final_verdicts": [],
         "provider": _Provider(),
         "brand": types.SimpleNamespace(
             id=uuid.uuid4(),
@@ -160,6 +162,21 @@ async def build_world(monkeypatch) -> dict:
     monkeypatch.setattr(pipeline.r2, "public_url", lambda key: f"https://cdn.test/{key}")
     monkeypatch.setattr(pipeline.r2, "get", lambda key: w["blobs"][key][0])
 
+    # The final composite gate fails closed, exactly as the background gate
+    # does, and the fake provider here is not the exempt "mock" -- so without
+    # a fake every flow test would (rightly) refuse to deliver anything.
+    # Scripted the same way _clean() scripts the background gate: push
+    # reason lists onto w["final_verdicts"] to make the inspector object.
+    async def fake_final(image, **copy):
+        w["inspected"].append((image, copy))
+        queue = w["final_verdicts"]
+        reasons = queue.pop(0) if queue else []
+        if isinstance(reasons, Exception):
+            raise reasons
+        return bggate.Verdict(list(reasons), "", cost_micros=4_500, score=90 - 10 * len(reasons))
+
+    monkeypatch.setattr(finalgate, "inspect", fake_final)
+
     async def say(text, **kw):
         w["lines"].append(text)
         return True
@@ -208,8 +225,15 @@ async def test_a_carousel_goes_out_whole_at_one_size_as_jpeg(world, monkeypatch)
     # the generated source is kept lossless
     assert all(ct == "image/png" for k, (_, ct) in world["blobs"].items() if "-bg." in k)
     rows = list(world["rows"].values())
-    assert all(r.status == "ready" and r.cost_micros == 288_300 for r in rows)
+    # The picture, PLUS the look at the finished card. The inspector used to be
+    # free on the ledger and nowhere else: bggate read resp.usage and dropped
+    # it, so this row told the owner the slide cost $0.2883 when the gates
+    # around it had spent more on top.
+    assert all(r.status == "ready" and r.cost_micros == 288_300 + 4_500 for r in rows)
     assert all((r.width, r.height) == POST_SIZE for r in rows)
+    # ...and nothing is 'ready' until the final check has looked at it.
+    assert len(world["inspected"]) == 3
+    assert all(r.quality_score == 90 for r in rows), "the judge's score is kept"
 
 
 async def test_a_slide_that_never_passes_is_refunded_and_never_sent(world, monkeypatch):
@@ -261,7 +285,7 @@ async def test_a_single_post_uses_the_same_settings_as_a_carousel_slide(world, m
     assert [f["kind"] for f in res["remembered"]] == ["brand_colours"]
     assert "never add a memory" in res["remembered_hint"].lower()
     (row,) = world["rows"].values()
-    assert row.cost_micros == 2 * 288_300
+    assert row.cost_micros == 2 * 288_300 + 4_500, "both pictures and the final look"
     assert world["images"] == [(res["image_urls"][0], EXAMPLE["headline"])]
 
 

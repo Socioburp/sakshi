@@ -55,6 +55,29 @@ KEYS: tuple[str, ...] = (
 # inferred at the call site.
 PICTURE_REASONS = frozenset({"stray_text_in_photo", "artefacts"})
 
+# What each reason means to the deterministic checker, so ONE repair ladder can
+# be steered by either of them: the cure for "the words are on the jar" does
+# not depend on who noticed it. The two picture faults map to nothing, because
+# no arrangement of a photograph with a word baked into it is acceptable --
+# those are the ones worth buying another picture for.
+AS_CODE: dict[str, str] = {
+    "text_cut_off": "headline_at_floor",
+    "text_hard_to_read": "scrim_saturated",
+    "text_covers_subject": "text_over_subject",
+    "subject_cut_off": "subject_cut_by_window",
+}
+
+
+def as_codes(reasons: list[str]) -> set[str]:
+    """The inspector's reasons in the repair ladder's vocabulary."""
+    return {AS_CODE[r] for r in reasons if r in AS_CODE}
+
+
+def picture_faults(reasons: list[str]) -> list[str]:
+    """The reasons only a different PICTURE can cure."""
+    return [r for r in reasons if r in PICTURE_REASONS]
+
+
 # reason -> the sentence added to a regeneration prompt, in the same voice as
 # bggate.CORRECTIONS: what the photograph should BE, so it helps a vendor that
 # ignores prohibitions. The three that describe the picture itself reuse
@@ -190,13 +213,16 @@ async def inspect(
 
 
 __all__ = [
+    "AS_CODE",
     "CORRECTIONS",
     "KEYS",
     "PICTURE_REASONS",
     "InspectionUnavailable",
     "Verdict",
+    "as_codes",
     "available",
     "corrected",
     "inspect",
+    "picture_faults",
     "prompt_for",
 ]
