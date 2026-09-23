@@ -912,13 +912,17 @@ async def test_a_lane_that_may_spend_is_offered_the_purchase_and_refuses_if_it_d
     offered = []
 
     async def broke(faults, reasons, template):
+        # The shape the real one uses: no picture, and what the attempt cost.
         offered.append((faults, reasons, template))
-        return None
+        return None, "", 12_000
 
     with pytest.raises(pipeline.CompositeRejected) as err:
         await _final_check_on(world, monkeypatch, lane="fake", buy=broke)
     assert offered and offered[0][0] == ["text_over_subject"]
     assert "refunded" in err.value.hint
+    assert err.value.cost_micros == 4_500 + 12_000, (
+        "an attempt that bought nothing was still paid for, and says so"
+    )
 
 
 async def test_exhaustion_delivers_nothing_stores_nothing_and_refunds(world, monkeypatch):
