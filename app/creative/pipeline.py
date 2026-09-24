@@ -51,7 +51,9 @@ from app.creative import (
     bggate,
     claims,
     compose,
+    compositeqa,
     dedupe,
+    finalgate,
     photoreal,
     photoref,
     product,
@@ -683,8 +685,23 @@ async def generate(
         else:
             ok_urls.append(res)
 
+    # What the final check would have the agent say. A slide it refused is not
+    # "try again": on the owner's own photograph nothing would change, and on a
+    # generated one the corrected retry has already been bought and refused.
+    # The hint reached the agent only on revisions, because this path flattened
+    # every failure into "generation_failed" and dropped it.
+    refused = [r for r in results if isinstance(r, CompositeRejected)]
+    quality_hint = next((r.hint for r in refused if r.hint), "")
+
     if failures and not ok_urls:
         _refund(ctx, group_id, billable, "creative_failed")
+        if quality_hint and len(refused) == len(failures):
+            return {
+                "ok": False,
+                "reason": "composite_quality",
+                "errors": failures[:3],
+                "hint": quality_hint,
+            }
         return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
     if failed_billable:
         # Partial carousel: refund only the paid slides that did not ship.
@@ -745,6 +762,15 @@ async def generate(
             "that failed the check. Tell the owner plainly, in one line, which slide is missing "
             "and offer to try that slide again with regenerate_image."
         )
+        if quality_hint:
+            out["hint"] = quality_hint
+            out["note"] = (
+                f"{len(ok_urls)} of {len(units)} slides were made and sent; the rest did not pass "
+                "the last look at the finished card and were refunded (see failed_slides). We "
+                "never send a card that failed the check. Tell the owner plainly, in one line, "
+                "which slide is missing, and offer what `hint` says instead of another "
+                "generation."
+            )
     if brief.is_story():
         out["format"] = "story"
         out["story_note"] = (
@@ -1384,11 +1410,18 @@ async def _plan_photos(
 
 
 def _set_template(brief: CreativeBrief, slide: Slide, template: str) -> None:
-    """Change one slide's layout in the brief itself -- units() rebuilds a
-    single post's slide from the brief, so the slide object alone is not it."""
-    if brief.is_carousel():
-        slide.template_id = template
-    else:
+    """Change one slide's layout, in the brief AND in the slide object in hand.
+
+    units() builds a single post's Slide detached from the brief and stamps the
+    brief's template_id onto it, and template_for() reads the slide's first --
+    so setting the brief's alone changed nothing the compositor would see. The
+    repair ladder re-rendered the very layout it was trying to leave, scored
+    that frame, returned it under the new name, and the creative row recorded a
+    template the picture had never been set in. A free repair that repaired
+    nothing and said it had is worse than one that refuses.
+    """
+    slide.template_id = template
+    if not brief.is_carousel():
         brief.template_id = template
         for sl in brief.slides:
             sl.template_id = None
@@ -1816,8 +1849,12 @@ async def _generate_checked(
     register: dict | None,
     stage: str,
     floor: tuple[int, int] | None = None,
+    budget_micros: int | None = None,
 ):
     """Generate, inspect, and regenerate until a picture passes -- or fail.
+
+    `budget_micros` is what is left of this slide's vendor cap; None means
+    the whole of settings.imagegen_gate_budget_micros.
 
     `floor` is the window the picture must cover (never enlarged to). A
     vendor that picks its own size from a ratio (replicate, bfl) is held to
@@ -1832,7 +1869,11 @@ async def _generate_checked(
     the slide is failed and refunded, and the owner is told.
     """
     attempts = max(1, int(settings.imagegen_gate_attempts))
-    budget = int(settings.imagegen_gate_budget_micros or 0)
+    # `budget_micros` is what is LEFT of this slide's cap. The final check can
+    # buy one more picture for a slide that already bought some, and without
+    # this it would open a second full cap -- one credit in, twice the vendor
+    # spend out, which is the hole the cap was put there to close.
+    budget = int(settings.imagegen_gate_budget_micros if budget_micros is None else budget_micros)
     gw, gh = size
     cannot = _shape_the_vendor_cannot_make(provider, (gw, gh), floor or (gw, gh))
     if cannot:
@@ -1878,7 +1919,20 @@ async def _generate_checked(
                 reasons.append("duplicate_of_earlier_slide")
         if not reasons and inspected:
             with ctx.trace.stage(f"{stage}:inspect{attempt}"):
-                verdict = await bggate.inspect(res.data)
+                try:
+                    verdict = await bggate.inspect(res.data)
+                except bggate.InspectionUnavailable as exc:
+                    # The pictures this slide has already bought were bought
+                    # whether or not the inspector ever answered about them.
+                    exc.cost_micros += cost
+                    raise
+            # The look is paid for whatever it decides, and a slide rejected
+            # twice pays for three of them. This used to be read and dropped,
+            # so the row told the owner the slide cost what the pictures cost
+            # while the gate around them had spent more on top -- and once the
+            # final check started pricing ITS looks, the ledger disagreed with
+            # itself about which inspections count.
+            cost += int(verdict.cost_micros or 0)
             reasons, notes = list(verdict.reasons), verdict.notes
         if not reasons:
             if rejections:
@@ -1918,6 +1972,304 @@ async def _generate_checked(
         f"no acceptable picture in {len(rejections)} attempts ({', '.join(seen)})",
         cost_micros=cost,
         rejections=rejections,
+    )
+
+
+class CompositeRejected(RuntimeError):
+    """The finished card did not pass the final check, and no free rearrangement
+    of it passed either.
+
+    Nothing is delivered and nothing is stored: the slide fails and is
+    refunded, exactly as a rejected background is. Refusing to render beats
+    shipping a flawed frame -- the owner pays a lot and the first result is
+    supposed to need no revision, so a card nobody would have approved is not
+    an acceptable thing to send while we wait to be told.
+
+    Carries `cost_micros` like BackgroundRejected so vendor spend that really
+    happened is not lost from the ledger, and `hint` so the agent can say
+    something useful instead of "it failed".
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cost_micros: int = 0,
+        faults: list[str] | None = None,
+        reasons: list[str] | None = None,
+        hint: str = "",
+    ):
+        super().__init__(message)
+        self.cost_micros = cost_micros
+        self.faults = list(faults or [])
+        self.reasons = list(reasons or [])
+        self.hint = hint
+
+
+_OWNER_PHOTO_REFUSAL = (
+    "The finished card did not pass the final check, and no other layout fixed it. This "
+    "picture is the owner's own, so it is never replaced with a bought one without being "
+    "asked. Tell the owner in one plain sentence what is wrong with it, and offer the two "
+    "things that would fix it: another photo (ask for the original sent as a DOCUMENT, "
+    "because WhatsApp shrinks a photo sent as a picture), or a different layout."
+)
+_GENERATED_REFUSAL = (
+    "The finished card did not pass the final check. Another layout was tried and a "
+    "corrected picture was bought, and neither passed, so nothing was delivered and the "
+    "credit is refunded. Tell the owner plainly and suggest a shorter headline or a "
+    "different subject for the picture."
+)
+
+
+def _copy_for_gate(brief: CreativeBrief, slide: Slide, brand_snapshot) -> dict[str, str]:
+    """The words the card is supposed to show, for the inspector's prompt.
+
+    Without them the inspector cannot do the one thing here that no
+    measurement can: tell the headline it is meant to see from lettering the
+    image model invented into a shop sign.
+    """
+    return {
+        "headline": str(slide.headline or brief.headline or ""),
+        "subhead": str(slide.subhead or brief.subhead or ""),
+        "cta": str(brief.cta or ""),
+        "brand": str(getattr(brand_snapshot, "name", "") or ""),
+    }
+
+
+async def _final_check(
+    ctx: ToolContext,
+    brief: CreativeBrief,
+    slide: Slide,
+    brand_snapshot,
+    creative_id: uuid.UUID,
+    *,
+    image: bytes,
+    mime: str,
+    png: bytes,
+    final: bytes,
+    report: dict,
+    generated: bool,
+    focus: tuple[int, int, int, int] | None,
+    subject: tuple[int, int, int, int] | None,
+    stage: str,
+    lane: str,
+    buy: Any = None,
+) -> dict:
+    """Look at the finished card, repair it for free, and only then spend.
+
+    This runs on EVERY lane -- generated, owner photo, product studio, reused
+    and recomposed -- after the export and before anything is uploaded or
+    marked ready. Until it passes, nothing has been delivered and nothing is
+    stored, which is the point: before this, no check in the product had ever
+    looked at the frame the client receives.
+
+    The order is deliberate and it is about money. First the deterministic
+    measurements, which are free. Then up to `composite_free_variants`
+    re-composes of the SAME picture into other layouts, which cost 3.2-5.6s of
+    Chromium each (measured) and nothing at the vendor. Only when no
+    arrangement of the picture they already have is good enough may `buy` be
+    called, and only the generated lane passes one: an owner's photograph, a
+    studio built from it and a reused background are never replaced with a
+    bought picture, because the owner did not ask us to replace their picture.
+    A free lane with nothing good enough refuses, with something the agent can
+    act on.
+
+    Returns what should be delivered, or raises CompositeRejected.
+    """
+    w, h = brief.pixel_size()
+    started = brief.template_for(slide)
+    copy = _copy_for_gate(brief, slide, brand_snapshot)
+    # The mock draws a gradient for tests and local development, so there is no
+    # model output to judge. That is the background gate's exemption, and this
+    # is keyed on the same thing IT is keyed on: the image provider this run is
+    # configured with. It used to be keyed on the LANE, and "recomposed",
+    # "brand_asset", "product_studio" and "reused" are not provider names --
+    # so in a wholly mocked run (CI, or a developer with IMAGEGEN_PROVIDER=mock
+    # and no ANTHROPIC_API_KEY) every revision and every free-lane slide was
+    # sent to an inspector that is not there, died on InspectionUnavailable,
+    # and no revision could be made at all.
+    looked_at = settings.imagegen_provider != "mock"
+    spent = 0
+    source: dict[str, Any] = {"image": image, "mime": mime, "size": compose.image_size(image)}
+    # The subject box is used where the pipeline ALREADY has one, and it is
+    # never gone looking for here. An owner's photograph arrives with its
+    # subject located (_plan_photos, once, before the charge) and a product
+    # studio reports where it stood its cut-out; both are free and both are
+    # exactly the cases where a window can behead something. Running the
+    # salient-object model again on a generated picture would add ~2s of
+    # serialised CPU per slide -- 12s on a carousel -- to answer a question
+    # that picture cannot get wrong: it is made for its window, so no window
+    # crops it, and the inspector reads text_covers_subject on the frame
+    # itself. Measure what is known; do not buy an opinion twice.
+    found: dict[str, Any] = {"subject": subject if subject is not None else focus}
+
+    def look(template: str, a_png: bytes, a_final: bytes, a_report: dict):
+        return compositeqa.Variant(
+            template,
+            a_png,
+            a_final,
+            a_report,
+            compositeqa.assess(
+                a_report,
+                template=template,
+                jpeg=a_final,
+                source_size=source["size"],
+                subject=found["subject"],
+                focus=focus,
+            ),
+        )
+
+    async def render(template: str):
+        """The same picture, set in another layout. Free: no vendor call."""
+        was = brief.template_for(slide)
+        _set_template(brief, slide, template)
+        try:
+            with ctx.trace.stage(f"{stage}:variant_{template}"):
+                fresh = await compose.check_layout(brief, slide, brand_snapshot)
+                v_png, v_report = await compose.compose_with_report(
+                    brief,
+                    slide,
+                    brand_snapshot,
+                    source["image"],
+                    source["mime"],
+                    layout=fresh,
+                    generated=generated,
+                    focus=focus,
+                    subject=subject,
+                    keep_sources=brief.is_reel(),
+                )
+                v_final = await asyncio.to_thread(compose.export_jpeg, v_png, (w, h))
+        except (
+            compose.TextDoesNotFit,
+            compose.PictureMismatch,
+            compose.PhotoTooSmall,
+            compose.BrandFontUnavailable,
+        ) as exc:
+            # This layout cannot take this slide -- the copy does not fit it,
+            # or a picture made for one window does not fill another's. Not a
+            # failure: just one fewer free option.
+            log.info(
+                "composite_variant_unavailable",
+                position=slide.position,
+                template=template,
+                why=repr(exc)[:140],
+            )
+            return None
+        finally:
+            _set_template(brief, slide, was)
+        return look(template, v_png, v_final, v_report)
+
+    async def inspected(variant):
+        nonlocal spent
+        if not looked_at:
+            return None
+        with ctx.trace.stage(f"{stage}:final_gate"):
+            try:
+                verdict = await finalgate.inspect(variant.jpeg, **copy)
+            except finalgate.InspectionUnavailable as exc:
+                # An outage is a refusal, and a refusal still shows what it
+                # cost: the attempts the model answered before it gave up, plus
+                # every look this slide had already paid for. _build_one adds
+                # the picture on top.
+                exc.cost_micros += spent
+                raise
+        spent += int(verdict.cost_micros or 0)
+        return verdict
+
+    free = max(0, int(settings.composite_free_variants))
+    paid = max(0, int(settings.composite_paid_retries)) if buy is not None else 0
+
+    for purchase in range(paid + 1):
+        first = look(brief.template_for(slide), png, final, report)
+        best = await compositeqa.best_free_variant(first, render, limit=free)
+        verdict = await inspected(best)
+
+        curable = (
+            verdict is not None
+            and not verdict.ok
+            and (set(verdict.reasons) - finalgate.PICTURE_REASONS)
+        )
+        if curable:
+            # The inspector saw something the measurements could not. Try the
+            # layouts its reasons point at, and look once more -- once, so a
+            # disagreeing inspector cannot spend the afternoon. Reasons that
+            # are the PICTURE's fault skip this: no arrangement of a
+            # photograph with a melted hand in it is the right arrangement,
+            # and rendering three of them to find that out wastes three
+            # seconds and risks shipping the fourth.
+            moved = await compositeqa.best_free_variant(
+                best, render, limit=free, codes=finalgate.as_codes(verdict.reasons),
+                must_change=True,
+            )  # fmt: skip
+            if moved is not best:
+                second = await inspected(moved)
+                if second is not None and second.ok and moved.assessment.ok:
+                    best, verdict = moved, second
+                elif second is not None and len(second.reasons) < len(verdict.reasons):
+                    best, verdict = moved, second
+
+        if best.assessment.ok and (verdict is None or verdict.ok):
+            _set_template(brief, slide, best.template)
+            return {
+                "png": best.png,
+                "final": best.jpeg,
+                "report": best.report,
+                "template": best.template,
+                "image": source["image"],
+                "mime": source["mime"],
+                "cost_micros": spent,
+                "score": verdict.score if verdict is not None else best.score,
+                "qa": best.assessment.as_dict(),
+                "reasons": [],
+                # What the inspector SAW, even when it passed the card: a note
+                # about a frame nobody objected to is exactly what a later
+                # calibration against the owner's answer needs.
+                "notes": verdict.notes if verdict is not None else best.assessment.notes,
+                "bought": purchase,
+                "was_template": started,
+            }
+
+        faults = list(best.assessment.faults)
+        reasons = list(verdict.reasons) if verdict is not None else []
+        if purchase == paid:
+            break
+        # Nothing free was good enough. The generated lane may buy ONE more
+        # picture, corrected by what was wrong with this one.
+        again, again_mime, extra = await buy(faults, reasons, brief.template_for(slide))
+        # Paid for whether or not it produced anything usable: the spend is
+        # real, so it goes on the tally that rides home on the refusal too.
+        spent += int(extra or 0)
+        if again is None:
+            break
+        source["image"], source["mime"] = again, again_mime
+        source["size"] = compose.image_size(source["image"])
+        _set_template(brief, slide, started)
+        with ctx.trace.stage(f"{stage}:recompose"):
+            layout_again = await compose.check_layout(brief, slide, brand_snapshot)
+            png, report = await compose.compose_with_report(
+                brief, slide, brand_snapshot, source["image"], source["mime"],
+                layout=layout_again, generated=generated, focus=focus, subject=subject,
+                keep_sources=brief.is_reel(),
+            )  # fmt: skip
+            final = await asyncio.to_thread(compose.export_jpeg, png, (w, h))
+
+    _set_template(brief, slide, started)
+    log.error(
+        "composite_refused",
+        creative_id=str(creative_id),
+        position=slide.position,
+        lane=lane,
+        faults=faults,
+        reasons=reasons,
+        cost_micros=spent,
+    )
+    said = ", ".join(faults + reasons) or "the final check"
+    raise CompositeRejected(
+        f"the finished slide did not pass the final check ({said})",
+        cost_micros=spent,
+        faults=faults,
+        reasons=reasons,
+        hint=_GENERATED_REFUSAL if buy is not None else _OWNER_PHOTO_REFUSAL,
     )
 
 
@@ -2083,6 +2435,56 @@ async def _build_one(
         image, mime, job_id = res.data, res.mime, res.job_id
         gate = {"attempts": len(rejections) + 1, "rejections": rejections, "raw": res.raw}
 
+        async def buy(faults, reasons, template, _prompt=prompt, _negative=negative):
+            """One more picture for this slide, corrected by what was wrong.
+
+            Only the generated lane has this. It stays inside the SAME
+            per-slide cap the background gate spends from, so a slide cannot
+            quietly cost two caps because the final check asked for a second
+            picture. When there is not enough left in the cap for one honest
+            call, the answer is no.
+
+            Returns (picture, mime, what it cost) -- and the cost even when
+            there is no picture, because a rejected retry was still paid for
+            and the ledger has to show it whether or not the slide ships.
+            """
+            left = int(settings.imagegen_gate_budget_micros or 0)
+            if left:
+                left -= int(cost_micros or 0)
+                if left < int(getattr(provider, "cost_micros_per_image", 0) or 0):
+                    log.warning(
+                        "composite_retry_budget_reached",
+                        creative_id=str(creative_id),
+                        position=slide.position,
+                        spent_micros=int(cost_micros or 0),
+                    )
+                    return None, "", 0
+            try:
+                again, extra, more = await _generate_checked(
+                    ctx,
+                    provider,
+                    brief,
+                    slide,
+                    creative_id,
+                    finalgate.corrected(
+                        _prompt,
+                        reasons + faults,
+                        template=template,
+                        text_box=_text_box_in_window(layout, window),
+                    ),
+                    _negative,
+                    generation_size_for_window(window_size, (w, h)),
+                    register,
+                    f"{stage}:retry",
+                    floor=window_size,
+                    budget_micros=left,
+                )
+            except BackgroundRejected as exc:
+                return None, "", int(exc.cost_micros or 0)
+            gate["attempts"] += len(more) + 1
+            gate["rejections"].extend(more)
+            return again.data, again.mime, int(extra or 0)
+
     with ctx.trace.stage(f"{stage}:compose"):
         png, report = await compose.compose_with_report(
             brief,
@@ -2100,6 +2502,49 @@ async def _build_one(
         # PNG all the way to here; this is the single lossy encode. It also
         # refuses any frame that is not exactly the post size.
         final = await asyncio.to_thread(compose.export_jpeg, png, (w, h))
+
+    # Nothing is uploaded, stored or delivered until the finished frame has
+    # been looked at -- measured, repaired for free where it can be, and shown
+    # to the inspector. Every lane, including the ones that never cost money.
+    template = brief.template_for(slide)
+    checked: dict | None = None
+    if settings.composite_gate_enabled:
+        try:
+            checked = await _final_check(
+                ctx,
+                brief,
+                slide,
+                brand_snapshot,
+                creative_id,
+                image=image,
+                mime=mime,
+                png=png,
+                final=final,
+                report=report,
+                generated=generated,
+                focus=focus,
+                subject=subject,
+                stage=stage,
+                lane=provider_name,
+                buy=(
+                    buy
+                    if provider_name not in PHOTO_LANES | {"reused"} and gate is not None
+                    else None
+                ),
+            )
+        except (CompositeRejected, bggate.InspectionUnavailable) as exc:
+            # The picture this slide had already bought was bought whatever the
+            # check then decided -- and an inspector that could not be reached
+            # decides nothing at all. Both refusals only know what THEY spent,
+            # so the rest is added here or the failed row understates the loss.
+            exc.cost_micros += int(cost_micros or 0)
+            raise
+        png, final, report = checked["png"], checked["final"], checked["report"]
+        image, mime, template = checked["image"], checked["mime"], checked["template"]
+        # Everything the final check spent: the looks, and any picture it
+        # bought. When it refuses instead, the same figure rides out on
+        # CompositeRejected.cost_micros and lands on the failed row.
+        cost_micros += int(checked["cost_micros"] or 0)
 
     with ctx.trace.stage(f"{stage}:upload"):
         if kept_key is not None:
@@ -2132,6 +2577,39 @@ async def _build_one(
         c.cost_micros = int(cost_micros or 0)
         c.status = "ready"
         c.timings = dict(ctx.trace.timings)
+        if checked is not None:
+            # quality_score has been on this table since migration 0004 and no
+            # code has ever written it. The verdict goes beside the owner's own
+            # answer ('approve', 'change_picture', ...) so the thresholds can
+            # one day be calibrated against approvals instead of a guess.
+            c.quality_score = checked["score"]
+            c.template = template
+            events.record(
+                db,
+                kind="quality",
+                account_id=ctx.account_id,
+                brand_id=ctx.brand_id,
+                brief_id=c.brief_id,
+                creative_id=creative_id,
+                meta={
+                    # The QA dict carries a "score" of its own and used to be
+                    # splatted LAST, so the deterministic number quietly
+                    # overwrote the verdict this row exists to record: the
+                    # column said 78 and the event beside it said 96, and the
+                    # correlation against the owner's answer -- the one way
+                    # this product gets smarter -- was being built on the wrong
+                    # figure. Both are kept, under names that cannot collide.
+                    **checked["qa"],
+                    "lane": provider_name,
+                    "template": template,
+                    "was_template": checked["was_template"],
+                    "score": checked["score"],
+                    "measured_score": checked["qa"]["score"],
+                    "reasons": checked["reasons"],
+                    "inspector_notes": checked["notes"],
+                    "bought": checked["bought"],
+                },
+            )
     if gate is not None:
         # The generation record: exactly what was asked for and what it took.
         log.info(
@@ -2218,6 +2696,29 @@ async def _recompose_one(
             kept=generated and rebuilt is None,
         )
         final = await asyncio.to_thread(compose.export_jpeg, png, brief.pixel_size())
+    # A revision is looked at exactly as hard as a first version. It is the
+    # lane that had NO picture check of any kind, and it is the one the owner
+    # already had to ask twice for.
+    checked: dict | None = None
+    if settings.composite_gate_enabled:
+        checked = await _final_check(
+            ctx,
+            brief,
+            slide,
+            brand_snapshot,
+            creative_id,
+            image=image,
+            mime=mime,
+            png=png,
+            final=final,
+            report=report,
+            generated=generated,
+            focus=focus,
+            subject=(rebuilt or {}).get("subject"),
+            stage=stage,
+            lane="recomposed",
+        )
+        png, final, report = checked["png"], checked["final"], checked["report"]
     with ctx.trace.stage(f"{stage}:upload"):
         key = r2.key_for(str(ctx.brand_id), str(creative_id), "composed.jpg")
         url = r2.put(key, final, "image/jpeg")
@@ -2231,6 +2732,28 @@ async def _recompose_one(
         c.composed_key, c.composed_url, c.status = key, url, "ready"
         c.video_key, c.video_url = video_key, video_url
         c.timings = dict(ctx.trace.timings)
+        if checked is not None:
+            c.quality_score, c.template = checked["score"], checked["template"]
+            c.cost_micros = int(c.cost_micros or 0) + int(checked["cost_micros"] or 0)
+            events.record(
+                db,
+                kind="quality",
+                account_id=ctx.account_id,
+                brand_id=ctx.brand_id,
+                brief_id=c.brief_id,
+                creative_id=creative_id,
+                meta={
+                    # Splatted first, for the reason _build_one's copy gives.
+                    **checked["qa"],
+                    "lane": "recomposed",
+                    "template": checked["template"],
+                    "was_template": checked["was_template"],
+                    "score": checked["score"],
+                    "measured_score": checked["qa"]["score"],
+                    "reasons": checked["reasons"],
+                    "inspector_notes": checked["notes"],
+                },
+            )
     return video_url or url
 
 
@@ -2435,6 +2958,8 @@ def _contain_revision(
     """
     failures: list[str] = []
     legibility = True
+    quality = True
+    hint = ""
     for (slide, cid, _, _), res in zip(pairs, results, strict=True):
         if not isinstance(res, BaseException):
             continue
@@ -2444,9 +2969,11 @@ def _contain_revision(
             position=slide.position,
             error=str(res)[:300],
         )
-        _mark_failed(cid, str(res))
+        _mark_failed(cid, str(res), cost_micros=getattr(res, "cost_micros", 0))
         failures.append(f"slide {slide.position}: {res}")
         legibility = legibility and isinstance(res, compose.LegibilityError)
+        quality = quality and isinstance(res, CompositeRejected)
+        hint = hint or getattr(res, "hint", "")
     if not failures:
         return None
     if legibility:
@@ -2455,6 +2982,17 @@ def _contain_revision(
             "reason": "legibility",
             "errors": failures[:3],
             "hint": _LEGIBILITY_HINT,
+        }
+    if quality:
+        # A revision never buys a picture, so the final check refusing one is
+        # the end of the line for THIS arrangement -- and the agent can do
+        # something about that, if it is told what. "generation_failed" with a
+        # stack trace is not something anybody can act on.
+        return {
+            "ok": False,
+            "reason": "composite_quality",
+            "errors": failures[:3],
+            "hint": hint,
         }
     return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
 

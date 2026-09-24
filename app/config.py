@@ -142,6 +142,54 @@ class Settings(BaseSettings):
     # a prompt that fails three times is a prompt problem, not bad luck. The cap
     # stops the RETRYING -- it never lowers the settings of a call. 0 = no cap.
     imagegen_gate_budget_micros: int = 900_000
+    # The final check: the deterministic composite QA and the vision gate that
+    # follows it both run on the EXPORTED JPEG of every delivered slide, on
+    # every lane -- generated, owner photo, product studio, reused and
+    # recomposed. Nothing is stored 'ready' or sent until both have passed.
+    # Off only where there is no inspector to call (the test suite fakes it
+    # the way it fakes the background gate); a creative made with it off is a
+    # creative nobody looked at, which is the hole this closes.
+    composite_gate_enabled: bool = True
+    # How many times one slide may be re-composed into another layout to fix
+    # what the final check found. Each is a layout measurement and a full
+    # render -- 3.2-5.6s with a warm browser, measured, not the ~1s this
+    # comment used to claim -- and NO vendor call, which is the point: the
+    # owner buys a second picture only when no arrangement of the one they have
+    # is good enough. Two is enough to reach a layout of the other kind from
+    # any starting layout, and only a fault or type driven to its floor opens
+    # the ladder at all (compositeqa.SWEEP_REPAIRS), so a clean card pays none
+    # of this.
+    composite_free_variants: int = 2
+    # ...and how many corrected regenerations the picture may be worth after
+    # that. Only the GENERATED lane ever spends this: an owner's photograph, a
+    # product studio built from one and a reused background are never
+    # re-bought, because the owner did not ask us to replace their picture.
+    # Held inside imagegen_gate_budget_micros like every other vendor call.
+    composite_paid_retries: int = 1
+    # What the inspector costs, in micro-dollars per thousand tokens, for the
+    # ledger only. The model is a setting (ANTHROPIC_MODEL), so its price has
+    # to be one too. The defaults are Sonnet-class list prices: $3/Mtok in,
+    # $15/Mtok out.
+    #
+    # One delivered slide is one vision call on the exported JPEG scaled to a
+    # 819x1024 long edge. At the documented ~(w*h)/750 that image is ~1,120
+    # tokens and the rubric another ~530, and the answer is JSON plus a short
+    # note -- ~60 output tokens, capped at 300 by INSPECT_MAX_TOKENS. So
+    # $0.0058 a slide, $0.0094 if the inspector uses its whole allowance:
+    # 2.0% of the $0.2883 the picture costs. A single post adds one call; a
+    # six-slide carousel adds six, $0.035 ($0.057 worst case). Latency is
+    # ~2-5s per call, and slides are already built concurrently, so a carousel
+    # pays that once rather than six times.
+    #
+    # The repair ladder costs time rather than money, and only on a slide the
+    # final check objected to: up to composite_free_variants renders that
+    # composed at 3.2-5.6s each, and up to five layouts may be attempted before
+    # two of them compose (a picture generated for one window does not fill
+    # another's), so a repaired slide adds ~10s and at worst ~20s. A slide
+    # whose only blemish is a saturated scrim is NOT repaired, which is what
+    # keeps this off the ordinary path. A carousel pays it concurrently too.
+    inspector_input_micros_per_ktok: int = 3000
+    inspector_output_micros_per_ktok: int = 15000
     # Seconds of silence after which the owner is told the job is still going.
     # A metric to watch and a message to send -- never a limit on the output.
     slow_notice_s: int = 60
