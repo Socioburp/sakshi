@@ -50,6 +50,9 @@ CORNER_TOLERANCE = 24
 FILL_TOLERANCE = 40
 # Alpha below this is "not ink" when the mark is trimmed to its box.
 INK_ALPHA = 8
+# The least of the picture that must survive the ground fill for the result to
+# be a mark at all.
+MIN_INK_SHARE = 0.005
 # Room left around the ink, as a share of the trimmed mark's longer side, so
 # a thin outline is not cut by its own box.
 TRIM_MARGIN = 0.02
@@ -73,24 +76,47 @@ def remove_ground(rgba):
     """`rgba` with a uniform ground made transparent, or None when the ground
     is not uniform (a mark on a photograph, a gradient) and nothing is done.
     The fill runs from every corner, so a ground enclosed by the mark's own
-    strokes (the counter of an O) stays -- that is part of the mark."""
+    strokes (the counter of an O) stays -- that is part of the mark.
+
+    The fill runs over a MASK, never over the picture. It used to be painted
+    into the colour channels as the ground plus 128 and every pixel of that
+    colour then deleted, which deleted whatever of the MARK happened to be
+    that colour: a flat 50% grey rule under a wordmark on white lost the rule,
+    and the stored aspect came from the truncated box, so the compositor sized
+    the mark for the wrong shape. In the limit -- a black mark on a mid-grey
+    ground, sentinel (0,0,0) -- the whole mark went, and a PNG that loads
+    fine and paints nothing is exactly what FIT_JS's logo_not_loaded cannot
+    see.
+    """
     from PIL import ImageDraw
 
     rgb = rgba.convert("RGB")
-    ground = _uniform_ground(rgb)
-    if ground is None:
+    if _uniform_ground(rgb) is None:
         return None
     w, h = rgb.size
-    # A sentinel no photograph of a logo contains, painted over the ground.
-    sentinel = tuple((c + 128) % 256 for c in ground)
-    work = rgb.copy()
+    arr = np.asarray(rgb, dtype=np.int16)
+    reached = np.zeros((h, w), dtype=bool)
     for corner in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
-        if work.getpixel(corner) != sentinel:
-            ImageDraw.floodfill(work, corner, sentinel, thresh=FILL_TOLERANCE)
-    arr = np.asarray(work, dtype=np.uint8)
-    ground_px = np.all(arr == np.array(sentinel, dtype=np.uint8), axis=2)
+        # Pillow's own measure of "within thresh of the seed": the sum of the
+        # per-channel differences, so a JPEG's ringing around the letters is
+        # inside it and a pale brand colour next to white is not.
+        seed = np.array(rgb.getpixel(corner), dtype=np.int16)
+        near = np.abs(arr - seed).sum(axis=2) <= FILL_TOLERANCE
+        # .copy(): fromarray hands back an image sharing the array's buffer
+        # read-only, and floodfill's write goes to a copy-on-write nothing
+        # here can read back -- the fill silently does nothing.
+        mask = Image.fromarray(np.where(near, 255, 0).astype(np.uint8), "L").copy()
+        # Two values go in and a third is painted, so what the fill REACHED is
+        # told apart from what merely looks like the ground.
+        ImageDraw.floodfill(mask, corner, 1)
+        reached |= np.asarray(mask) == 1
     alpha = np.asarray(rgba.getchannel("A"), dtype=np.uint8).copy()
-    alpha[ground_px] = 0
+    alpha[reached] = 0
+    if float((alpha > INK_ALPHA).mean()) < MIN_INK_SHARE:
+        # A fill that leaves no ink has not found a ground, it has eaten the
+        # mark -- a pale mark on white, touching the edge. Keep the original.
+        log.warning("logo_ground_fill_left_no_ink", size=f"{w}x{h}")
+        return None
     out = rgba.copy()
     out.putalpha(Image.fromarray(alpha, "L"))
     return out

@@ -1068,6 +1068,54 @@ def test_a_logo_on_white_is_stored_as_the_mark_alone():
     assert logo.prepare(b"not an image", None) == (b"not an image", {})
 
 
+def _two_colour_mark(bar: int, ground=(255, 255, 255)) -> bytes:
+    """A word in the brand's green with a flat second-colour bar under it."""
+    im = Image.new("RGB", (900, 300), ground)
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle([60, 70, 520, 190], radius=18, fill=(20, 110, 70))
+    d.rectangle([60, 215, 520, 245], fill=(bar, bar, bar))
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_the_ground_fill_never_deletes_part_of_the_mark_by_its_colour():
+    """remove_ground painted the fill into the COLOUR channels as the ground
+    plus 128 and then deleted every pixel of that colour, so whatever of the
+    mark happened to be that colour went with the ground: a flat 50% grey bar
+    under a wordmark on white (sentinel 127), with `aspect` then recorded from
+    the truncated box so the compositor sized the mark for the wrong shape.
+    In the limit -- a black mark on a mid-grey ground, sentinel (0,0,0) -- the
+    whole mark became transparent, and a PNG that loads fine and paints
+    nothing is what FIT_JS's logo_not_loaded cannot see."""
+    from app.creative import logo
+
+    boxes = {}
+    for bar in (120, 127, 128):
+        _, info = logo.prepare(_two_colour_mark(bar), "image/png")
+        boxes[bar] = (info["width"], info["height"], info["aspect"])
+    assert boxes[127] == boxes[120] == boxes[128], boxes
+    assert boxes[127][1] > 180, "the bar is part of the mark, not part of the ground"
+
+    black_on_grey = Image.new("RGB", (600, 600), (128, 128, 128))
+    ImageDraw.Draw(black_on_grey).ellipse([100, 100, 500, 500], fill=(0, 0, 0))
+    buf = io.BytesIO()
+    black_on_grey.save(buf, "PNG")
+    png, info = logo.prepare(buf.getvalue(), "image/png")
+    alpha = Image.open(io.BytesIO(png)).convert("RGBA").getchannel("A")
+    assert alpha.getextrema()[1] == 255, "the mark survives its own ground"
+    assert info["ground_removed"] and 380 < info["width"] < 460
+
+    # A pale mark the fill would swallow whole: the original is kept instead
+    # of a transparent rectangle.
+    pale = Image.new("RGB", (400, 400), (255, 255, 255))
+    ImageDraw.Draw(pale).rectangle([20, 20, 380, 380], fill=(248, 248, 248))
+    buf = io.BytesIO()
+    pale.save(buf, "PNG")
+    _, info = logo.prepare(buf.getvalue(), "image/png")
+    assert not info["ground_removed"]
+
+
 def test_the_mark_is_sized_by_area_inside_the_caps_and_a_wide_mark_is_a_wordmark():
     """A 1:3 emblem was 47x140 inside a 119px box, indented 36px; an 8:1
     mark with no vision flag was sized as an emblem, 119x15."""
