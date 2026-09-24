@@ -495,3 +495,26 @@ async def test_a_revision_on_top_of_a_running_job_is_guarded_too(world, monkeypa
         world["ctx"], brief_id=uuid.UUID(first["brief_id"]), new_prompt="a brass thali"
     )
     assert res["reason"] == "already_making_one" and world["charged"] == 1
+
+
+async def test_a_job_that_fails_says_so_instead_of_leaving_still_working_as_the_last_word(
+    world, monkeypatch
+):
+    """The owner heard "still working" five times and then nothing for ten
+    minutes. When nothing can be delivered the pipeline says so itself, the
+    same way it sends "Making it..." itself -- the model may be out of turns,
+    and the reaper's 45 minutes is far too long to learn it from."""
+    _clean(monkeypatch)
+
+    async def never(ctx, provider, brief, slide, *a, **k):
+        raise pipeline.BackgroundRejected("no acceptable picture", cost_micros=576_600)
+
+    monkeypatch.setattr(pipeline, "_generate_checked", never)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is False and res["reason"] == "generation_failed"
+    assert res["told_owner"] is True and "Do not repeat" in res["note"]
+    assert world["refunded"] == 1
+    last = world["lines"][-1]
+    assert "not sending it" in last and "credit is back" in last
+    assert "Still working" not in last and world["images"] == []

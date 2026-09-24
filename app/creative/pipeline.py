@@ -179,6 +179,38 @@ _OVER_TIME: dict[str, str] = {
 # quoted window runs out. Three at most -- WhatsApp is not a log.
 _NOTICE_AT = (1, 3)
 
+# Nothing was made and nothing is coming. Sent by the pipeline itself, exactly
+# as "Making it..." is, so it cannot be lost to a model that has run out of
+# turns or to a turn that died.
+_FAILED_LINE: dict[str, str] = {
+    "hi": "Yeh theek nahi bana, isliye bhej nahi raha. {money} Dobara banaoon?",
+    "en": (
+        "This did not come out the way it has to, so I am not sending it. {money} "
+        "Want me to try again?"
+    ),
+}
+_FAILED_MONEY: dict[str, dict[str, str]] = {
+    "hi": {"refunded": "Credit wapas aa gaya hai.", "free": "Kuch charge nahi hua."},
+    "en": {"refunded": "Your credit is back.", "free": "Nothing was charged."},
+}
+
+
+async def tell_them_it_failed(ctx: ToolContext, locale: str, *, refunded: int) -> None:
+    """Say that nothing is coming, in the chat, now.
+
+    Forty-five minutes is how long the reaper takes to notice a dead worker; a
+    job that fails in front of us must not borrow any of that silence. The
+    last thing the owner read was "still working", and leaving that as the
+    final word is the whole of "it's roaming in circles".
+    """
+    lang = ((locale or "en").split("-")[0]).lower()
+    money = _FAILED_MONEY.get(lang, _FAILED_MONEY["en"])["refunded" if refunded else "free"]
+    line = _FAILED_LINE.get(lang, _FAILED_LINE["en"]).format(money=money)
+    try:
+        await ctx.progress(line)
+    except Exception:  # noqa: BLE001 - the refund is done; a missed line must not undo it
+        log.warning("failure_line_failed", account_id=str(getattr(ctx, "account_id", "")))
+
 
 class _Delivery:
     """Gets the pictures to the owner, and says so when the job is slow.
@@ -835,15 +867,31 @@ async def generate(
 
     if failures and not ok_urls:
         _refund(ctx, group_id, billable, "creative_failed")
+        # The owner is mid-conversation with a chat whose last line was "still
+        # working". Said here, not left to the model: the model may be out of
+        # turns or the turn may die, and then "still working" is the final
+        # word about a picture that is never coming.
+        await tell_them_it_failed(ctx, locale, refunded=billable)
+        told = (
+            "The owner has ALREADY been told in the chat that it could not be made and "
+            "that the credit is back. Do not repeat it. Answer only what they say next."
+        )
         if quality_hint and len(refused) == len(failures):
             return {
                 "ok": False,
                 "reason": "composite_quality",
                 "errors": failures[:3],
+                "told_owner": True,
+                "note": told,
                 "hint": quality_hint,
             }
-        return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
-
+        return {
+            "ok": False,
+            "reason": "generation_failed",
+            "errors": failures[:3],
+            "told_owner": True,
+            "note": told,
+        }
     if failed_billable:
         # Partial carousel: refund only the paid slides that did not ship.
         _refund(ctx, group_id, failed_billable, "partial_carousel")
