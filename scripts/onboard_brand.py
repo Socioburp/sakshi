@@ -419,9 +419,10 @@ async def screen_folders(products: Plan, references: Plan) -> list[str]:
             products.rejected.append(
                 Note(
                     item.name,
-                    f"this is a finished post, not a photograph ({seen[1] or 'words laid on top'})."
-                    " If our design team made it, it belongs in --refs -- check the two folders "
-                    "are not the wrong way round",
+                    f"design has been laid on top of this, so it is not a plain photograph "
+                    f"({seen[1] or 'words laid on top'}). If our team made it, it belongs in "
+                    "--refs -- check the two folders are not the wrong way round. If the client "
+                    "added a price or a logo in an app, ask for the picture without it",
                 )
             )
         else:

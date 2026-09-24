@@ -613,9 +613,11 @@ async def test_a_finished_creative_passed_as_a_product_photo_is_refused(tmp_path
     assert [i.name for i in products.stored] == ["jar.jpg"]
     refusal = products.rejected[0]
     assert refusal.name == "anaya_diwali_post.jpg"
-    assert "finished post" in refusal.reason and "--refs" in refusal.reason
-    # And the words a person needs to fix it in one move.
+    assert "not a plain photograph" in refusal.reason and "--refs" in refusal.reason
+    # And the words a person needs to fix it in one move -- either move, since
+    # the same answer comes back for a client photo with a price added in an app.
     assert "wrong way round" in refusal.reason
+    assert "added a price or a logo in an app" in refusal.reason
 
 
 async def test_a_raw_product_photo_passed_as_a_reference_is_refused(tmp_path, monkeypatch):

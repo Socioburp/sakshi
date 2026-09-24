@@ -40,7 +40,8 @@ Rules for the person holding the phone:
   anything under 600px on the short edge or visibly soft.
 - **One product per photo**, unless the post is genuinely about a set.
 - **Nothing written on the image.** No price stickers added in an app, no
-  borders, no watermark, no logo pasted on. Those are added later, by us.
+  borders, no watermark, no logo pasted on. Those are added later, by us, and
+  the command refuses a product photo that already has any of them.
 - **Plain, uncluttered backgrounds** wherever possible. A busy background
   survives, but a plain one gives the layout more places to put the words.
 
@@ -175,21 +176,21 @@ still onboarding the client.
 A refused photo is not stored at all, so once the client sends a better one
 you simply put it in the folder and re-run.
 
-### "this is a finished post, not a photograph"
+### "design has been laid on top of this"
 
 The command also looks at *what each file is*, not just which folder you typed
 it into, because the two paths sit next to each other on one line and swapping
 them is easy:
 
-| It says | What happened |
-|---|---|
-| `this is a finished post, not a photograph ... it belongs in --refs` | One of our own creatives was in the `--products` folder |
-| `this is a plain photograph, not one of our creatives ... belongs in --products` | A raw client photo was in the `--refs` folder |
+| It says | What happened | What to do |
+|---|---|---|
+| `design has been laid on top of this ... it belongs in --refs` | One of our own creatives was in the `--products` folder | Move it to the refs folder and re-run |
+| the same line, but the file is the client's | The client added a price, a logo or a border in an app | Ask for the picture without it |
+| `this is a plain photograph, not one of our creatives ... belongs in --products` | A raw client photo was in the `--refs` folder | Move it to the products folder and re-run |
 
-Move that file to the other folder and re-run. This matters more than it
-sounds: a finished post filed as a product photo is a picture the system will
-build a new post *on top of*, so the client's first creative would go out with
-two headlines and two logos on it.
+This matters more than it sounds: a finished post filed as a product photo is
+a picture the system will build a new post *on top of*, so the client's first
+creative would go out with two headlines and two logos on it.
 
 The check needs a vision model. Without one the run says `the files were not
 checked for being in the wrong folder` and imports everything as it stands — so
