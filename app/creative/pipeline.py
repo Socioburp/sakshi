@@ -2253,18 +2253,23 @@ _GENERATED_REFUSAL = (
 )
 
 
-def _copy_for_gate(brief: CreativeBrief, slide: Slide, brand_snapshot) -> dict[str, str]:
-    """The words the card is supposed to show, for the inspector's prompt.
+def _copy_for_gate(brief: CreativeBrief, slide: Slide, brand_snapshot) -> dict[str, Any]:
+    """What the card is supposed to show, for the inspector's prompt.
 
-    Without them the inspector cannot do the one thing here that no
+    Without the copy the inspector cannot do the one thing here that no
     measurement can: tell the headline it is meant to see from lettering the
     image model invented into a shop sign.
+
+    `has_logo` comes from the compositor's own rule, not a second guess at it,
+    so the inspector is told about the mark that is actually on the card: a
+    logo image, or the brand's name set as type because there is no image.
     """
     return {
         "headline": str(slide.headline or brief.headline or ""),
         "subhead": str(slide.subhead or brief.subhead or ""),
         "cta": str(brief.cta or ""),
         "brand": str(getattr(brand_snapshot, "name", "") or ""),
+        "has_logo": bool(compose.logo_image(brand_snapshot)),
     }
 
 

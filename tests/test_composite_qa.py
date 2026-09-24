@@ -604,6 +604,37 @@ def test_the_supplied_copy_reaches_the_inspector():
     assert "not the supplied copy" in prompt
 
 
+def test_a_brand_with_no_logo_is_never_told_its_logo_is_absent():
+    """The client's card that started this: no logo image, so the mark is the
+    brand NAME set as letterspaced type -- legible, clean, exactly what the
+    compositor is designed to do. The inspector was shown a rubric that says
+    'missing where one is expected', saw no logo, and said so on every layout
+    and every picture until the credit was refunded."""
+    none = finalgate.prompt_for("Weekend Sale", brand="Vajas Sunny", has_logo=False)
+    assert "missing" not in none, "nothing in the prompt invites the answer"
+    assert "NO logo image" in none and "set as type" in none
+    # ...and it is still judged, as a wordmark, on the things that ARE faults.
+    for word in ("clipped", "illegible", "clashes"):
+        assert word in none
+
+
+def test_a_brand_that_has_a_logo_is_asked_about_it_exactly_as_before():
+    have = finalgate.prompt_for("Weekend Sale", brand="Kadamba", has_logo=True)
+    assert "missing where one is expected" in have
+    assert finalgate.prompt_for("Weekend Sale", brand="Kadamba") == have, "the default"
+
+
+def test_the_mark_the_card_carries_is_the_mark_the_inspector_is_told_about():
+    """One rule, one owner. The compositor decides what the mark IS; a second
+    reading of the brand in the gate is how the two drift apart."""
+    brand = types.SimpleNamespace(logo_src=None, logo_url=None)
+    assert compose.logo_image(brand) is None
+    brand.logo_url = "https://cdn.test/mark.png"
+    assert compose.logo_image(brand) == "https://cdn.test/mark.png"
+    brand.logo_src = "data:image/png;base64,AAA"
+    assert compose.logo_image(brand) == "data:image/png;base64,AAA", "the inlined one wins"
+
+
 def test_a_regeneration_prompt_keeps_the_picture_wording_and_adds_the_layout():
     """One vocabulary: the picture faults reuse the background gate's own
     sentences, and the layout sentence is the one the first prompt used."""
@@ -1077,6 +1108,16 @@ async def test_a_verdict_a_layout_can_still_cure_keeps_its_whole_free_ladder(wor
     assert len(world["provider"].requests) == 1, "and cured it without buying anything"
     (row,) = world["rows"].values()
     assert row.status == "ready" and row.template != "centered_overlay"
+
+
+async def test_the_gate_is_told_there_is_no_logo_when_the_brand_has_none(world, monkeypatch):
+    """The fact has to travel: compose picks the mark, and the gate several
+    hundred lines away has to know which of the two it is looking at."""
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"]
+    ((_image, copy),) = world["inspected"]
+    assert copy["has_logo"] is False, "this brand's snapshot carries no logo at all"
+    assert copy["brand"] == "Kadamba Naturals", "and the name that is set in its place"
 
 
 async def _keep_first(first, render, **kw):

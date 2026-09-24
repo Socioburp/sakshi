@@ -144,17 +144,39 @@ CORRECTIONS |= {
 }
 
 
+# What the inspector is looking at where the mark should be. A brand with no
+# logo image gets its NAME set as letterspaced type (compose._brand_context
+# falls back to it), and an inspector told only "a logo or brand name" reads
+# that as a logo that is not there -- which it then reports, on every layout
+# and over every picture, for ever. So it is told which of the two it is, and
+# when there is no image the wordmark is judged as a wordmark.
+_MARK_WITH_LOGO = (
+    '  "logo_problem": a logo or brand name that is missing where one is expected, '
+    "stretched, distorted, illegible, or on a ground that clashes with it,\n"
+)
+_MARK_WORDMARK_ONLY = (
+    '  "logo_problem": this brand has NO logo image, so its name is set as type instead -- '
+    "that wordmark is the mark, and it is correct for the card to carry no other. Judge the "
+    "wordmark itself: true only when it is clipped, stretched, distorted, illegible, or on a "
+    "ground that clashes with it. Never answer true because no logo image appears,\n"
+)
+
+
 def prompt_for(
     headline: str = "",
     subhead: str = "",
     cta: str = "",
     brand: str = "",
+    has_logo: bool = True,
 ) -> str:
     """The rubric, carrying the copy the card is supposed to show.
 
     Without the copy the inspector cannot do the one thing it is here for that
     no measurement can: tell the headline apart from lettering the image model
     invented, and notice that a Devanagari conjunct came out as a tofu box.
+
+    `has_logo` says whether the brand has a logo IMAGE. It is not a hint: with
+    it wrong, a brand that has no mark to show is refused for not showing one.
     """
     wanted = [
         f'  headline: "{headline}"' if headline else "",
@@ -184,9 +206,8 @@ def prompt_for(
         "subject, a face, or the product, hiding part of it,\n"
         '  "subject_cut_off": the main subject is cut off by the edge of the image or by a '
         "panel, band or card edge,\n"
-        '  "logo_problem": a logo or brand name that is missing where one is expected, '
-        "stretched, distorted, illegible, or on a ground that clashes with it,\n"
-        '  "stray_text_in_photo": lettering, numerals, labels, signage or pseudo-writing '
+        + (_MARK_WITH_LOGO if has_logo else _MARK_WORDMARK_ONLY)
+        + '  "stray_text_in_photo": lettering, numerals, labels, signage or pseudo-writing '
         "INSIDE the photograph that is not the supplied copy, however small or garbled,\n"
         '  "artefacts": melted, fused or duplicated objects, malformed hands or faces, '
         "seams or tiling,\n"
@@ -233,6 +254,7 @@ async def inspect(
     subhead: str = "",
     cta: str = "",
     brand: str = "",
+    has_logo: bool = True,
 ) -> Verdict:
     """Look at one finished creative. Raises InspectionUnavailable, never guesses.
 
@@ -242,7 +264,7 @@ async def inspect(
     """
     verdict = await bggate.inspect(
         image,
-        prompt=prompt_for(headline, subhead, cta, brand),
+        prompt=prompt_for(headline, subhead, cta, brand, has_logo),
         keys=KEYS,
         scored=True,
     )

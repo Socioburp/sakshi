@@ -419,6 +419,17 @@ def _palette(brand: Any) -> dict[str, str]:
     return palette
 
 
+def logo_image(brand: Any) -> str | None:
+    """The mark's picture, or None when the brand has none and text is used.
+
+    Two things have to agree about this and used to read it separately: the
+    template context below, which falls back to the brand NAME set as a
+    wordmark, and the final gate, whose inspector reports a logo absent unless
+    it is told there was never one to show.
+    """
+    return getattr(brand, "logo_src", None) or getattr(brand, "logo_url", None)
+
+
 def _brand_context(brand: Any) -> dict[str, Any]:
     palette = _palette(brand)
     faces = dict(getattr(brand, "fonts", {}) or {})
@@ -445,7 +456,7 @@ def _brand_context(brand: Any) -> dict[str, Any]:
         "logo_aspect": aspect,
         "name": getattr(brand, "name", ""),
         # Prefer the inlined data URI; fall back to the remote URL, then to text.
-        "logo_url": getattr(brand, "logo_src", None) or getattr(brand, "logo_url", None),
+        "logo_url": logo_image(brand),
         **palette,
         # Set per layout in render_html: the brand's ink where it can be read,
         # a readable ink where it cannot. See `readable_on`.
