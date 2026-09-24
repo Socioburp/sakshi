@@ -643,8 +643,10 @@ async def run(args: argparse.Namespace) -> int:
     _report(references, "Reference creatives")
     if not refstyle.available() and reference_files:
         print("  note     no vision model configured: the style pass was skipped")
-    for note in screen_notes:
-        print(f"\n  note     {note}")
+    if screen_notes:
+        _line("Which folder each file belongs in")
+        for note in screen_notes:
+            print(f"  note     {note}")
 
     _line("Brand kit")
     for note in unreadable_anchors:
