@@ -1289,9 +1289,18 @@ def fit_background(
     and used whole it shipped sideways, cropped on the unrotated pixels.
     """
     with Image.open(BytesIO(image)) as im:
+        # A file that carries an orientation tag is not the picture it holds,
+        # so its bytes are never handed on untouched -- not even when the
+        # uprighted picture is exactly the window. A 1350x1080 phone photo
+        # whose EXIF says "portrait" came back as the sideways landscape it
+        # was stored as, with the rotation flag still set and every check
+        # below skipped, from the one function whose docstring promises
+        # orientation is honoured first. Chromium's image-orientation hid it
+        # in the rendered frame; nothing else would.
+        turned = im.getexif().get(0x0112, 1) not in (0, 1)
         im = ImageOps.exif_transpose(im)
         im = im.convert("RGB")
-        if im.size == (width, height):
+        if im.size == (width, height) and not turned:
             return image
         scale = max(width / im.width, height / im.height)
         crop = max(im.width * scale - width, im.height * scale - height)

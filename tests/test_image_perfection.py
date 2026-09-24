@@ -353,6 +353,26 @@ def test_an_exif_rotated_jpeg_is_uprighted_before_it_is_cropped():
     assert box is not None and box[2] - box[0] > box[3] - box[1] and box[3] < 675, box
 
 
+def test_a_photo_that_needed_turning_is_never_handed_on_as_its_stored_bytes():
+    """fit_background returned the ORIGINAL bytes whenever the uprighted
+    picture was exactly the window -- so a 1350x1080 file whose EXIF says
+    portrait came back as the sideways landscape it was stored as, rotation
+    flag still set, from the one function whose docstring promises
+    orientation is honoured first. Chromium's image-orientation hid it in the
+    rendered frame; the checks this branch skipped (PictureMismatch,
+    PhotoTooSmall) and any consumer reading the bytes as pixels would not."""
+    sideways = _photo(1350, 1080, [40, 40, 300, 300], orientation=6)
+    out = compose.fit_background(sideways, 1080, 1350)
+    assert out != sideways, "the stored bytes are not the picture they hold"
+    assert compose.image_size(out) == (1080, 1350)
+    with Image.open(io.BytesIO(out)) as im:
+        assert im.getexif().get(0x0112) is None, "the flag is spent, not carried on"
+    # A file with nothing to honour is still handed on untouched: no re-encode
+    # is spent on a picture that is already the window.
+    upright = _photo(1080, 1350, [40, 40, 300, 300])
+    assert compose.fit_background(upright, 1080, 1350) is upright
+
+
 def test_the_subject_box_comes_from_the_mask_even_when_the_cut_is_refused(monkeypatch):
     from app.creative import product
     from tests.test_product_lane import _box_mask, _fake_remove
