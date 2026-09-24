@@ -104,6 +104,7 @@ def test_no_frame_is_generated_that_the_compositor_would_then_refuse():
     never retried. Shorter still it raised a bare ValueError out of the slide
     with no name on it. Neither height is reachable from the six templates
     today, so this pins the rule rather than a cure for a live bug."""
+    worst = (0.0, None)
     for width in (892, 1080):
         for height in range(340, 1400):
             try:
@@ -112,7 +113,12 @@ def test_no_frame_is_generated_that_the_compositor_would_then_refuse():
                 continue
             crop = gen.crop_for(frame, (width, height))
             assert crop <= compose.GENERATED_CROP_TOLERANCE, (width, height, frame, crop)
-            compose.fit_background(_photo(*frame, (10, 10, 60, 60)), width, height, generated=True)
+            if crop > worst[0]:
+                worst = (crop, (frame, (width, height)))
+    # crop_for is the quantity fit_background measures, so the worst frame the
+    # sweep found is the one to hand it.
+    frame, window = worst[1]
+    compose.fit_background(_photo(*frame, (10, 10, 60, 60)), *window, generated=True)
     # A window no legal frame covers is refused by name, not by ValueError
     # escaping from inside the slide.
     for window in ((1080, 300), (892, 280)):
@@ -1519,9 +1525,20 @@ async def test_a_tall_emblem_is_drawn_at_its_own_box_flush_with_the_margin(chrom
     )
     im = Image.open(io.BytesIO(out)).convert("RGB")
     lb = rep["boxes"]["logo"]
-    reds = [x for x in range(int(lb["l"]) - 5, int(lb["r"]) + 5)
-            if im.getpixel((x, int((lb["t"] + lb["b"]) / 2)))[0] > 150]  # fmt: skip
-    assert reds and abs(min(reds) - lb["l"]) <= 3, "the ink starts where the box starts"
+    # The mark's own red, not the plate's: the plate under a mark is a wash of
+    # the same hue and a plain "red channel over 150" counted it as ink, which
+    # made this pass or fail on where the plate's rounded corner happened to
+    # fall rather than on where the mark starts.
+    y = int((lb["t"] + lb["b"]) / 2)
+    reds = [
+        x
+        for x in range(int(lb["l"]) - 5, int(lb["r"]) + 5)
+        if im.getpixel((x, y))[0] > 185 and im.getpixel((x, y))[1] < 60
+    ]
+    # Flush but for the margin logo.prepare leaves around the ink, which is a
+    # share of the mark's longer side and so grows with the drawn mark.
+    slack = logo.TRIM_MARGIN * (lb["b"] - lb["t"]) + 2
+    assert reds and 0 <= min(reds) - lb["l"] <= slack, "the ink starts where the box starts"
 
 
 async def test_a_prepared_jpeg_logo_is_not_a_white_rectangle_on_the_panel(chromium):
