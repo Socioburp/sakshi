@@ -1113,6 +1113,34 @@ async def test_a_retry_that_was_paid_for_and_then_refused_is_still_on_the_ledger
     assert row.cost_micros == 2 * 288_300 + 2 * 4_500, "both pictures and both looks"
 
 
+async def test_the_quality_event_records_the_verdict_that_was_kept_not_the_measurement(
+    world, monkeypatch
+):
+    """quality_score keeps the inspector's verdict, and the event row beside it
+    is the only thing a later calibration against the owner's answer has to
+    correlate. The row used to carry the DETERMINISTIC score under the same
+    key, because the QA dict was splatted after it and has a "score" of its
+    own -- so the column said one number and the row said another."""
+    recorded: list[dict] = []
+    monkeypatch.setattr(pipeline.events, "record", lambda db, **kw: recorded.append(kw))
+
+    async def strict(image, **copy):
+        world["inspected"].append((image, copy))
+        return bggate.Verdict([], "a little empty on the left", cost_micros=4_500, score=1)
+
+    monkeypatch.setattr(finalgate, "inspect", strict)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"]
+
+    (row,) = world["rows"].values()
+    (quality,) = [r for r in recorded if r["kind"] == "quality"]
+    assert row.quality_score == 1
+    assert quality["meta"]["score"] == 1, "the verdict the column kept"
+    assert quality["meta"]["measured_score"] > 1, "and the measurement, under its own name"
+    assert quality["meta"]["inspector_notes"] == "a little empty on the left"
+    assert quality["meta"]["faults"] == [] and quality["meta"]["reasons"] == []
+
+
 async def test_an_inspector_outage_does_not_lose_the_picture_it_had_already_bought(
     world, monkeypatch
 ):

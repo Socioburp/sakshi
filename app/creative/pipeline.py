@@ -1992,6 +1992,10 @@ async def _final_check(
                 "score": verdict.score if verdict is not None else best.score,
                 "qa": best.assessment.as_dict(),
                 "reasons": [],
+                # What the inspector SAW, even when it passed the card: a note
+                # about a frame nobody objected to is exactly what a later
+                # calibration against the owner's answer needs.
+                "notes": verdict.notes if verdict is not None else best.assessment.notes,
                 "bought": purchase,
                 "was_template": started,
             }
@@ -2350,12 +2354,22 @@ async def _build_one(
                 brief_id=c.brief_id,
                 creative_id=creative_id,
                 meta={
+                    # The QA dict carries a "score" of its own and used to be
+                    # splatted LAST, so the deterministic number quietly
+                    # overwrote the verdict this row exists to record: the
+                    # column said 78 and the event beside it said 96, and the
+                    # correlation against the owner's answer -- the one way
+                    # this product gets smarter -- was being built on the wrong
+                    # figure. Both are kept, under names that cannot collide.
+                    **checked["qa"],
                     "lane": provider_name,
                     "template": template,
                     "was_template": checked["was_template"],
                     "score": checked["score"],
+                    "measured_score": checked["qa"]["score"],
+                    "reasons": checked["reasons"],
+                    "inspector_notes": checked["notes"],
                     "bought": checked["bought"],
-                    **checked["qa"],
                 },
             )
     if gate is not None:
@@ -2487,11 +2501,15 @@ async def _recompose_one(
                 brief_id=c.brief_id,
                 creative_id=creative_id,
                 meta={
+                    # Splatted first, for the reason _build_one's copy gives.
+                    **checked["qa"],
                     "lane": "recomposed",
                     "template": checked["template"],
                     "was_template": checked["was_template"],
                     "score": checked["score"],
-                    **checked["qa"],
+                    "measured_score": checked["qa"]["score"],
+                    "reasons": checked["reasons"],
+                    "inspector_notes": checked["notes"],
                 },
             )
     return video_url or url
