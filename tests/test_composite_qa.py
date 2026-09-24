@@ -1035,13 +1035,43 @@ async def test_exhaustion_delivers_nothing_stores_nothing_and_refunds(world, mon
     monkeypatch.setattr(pipeline.compositeqa, "best_free_variant", _keep_first)
     res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
 
-    assert res["ok"] is False and res["reason"] == "generation_failed"
+    # "generation_failed" with a stack trace under it is not something anybody
+    # can act on, and it was all the first build ever said: the hint the final
+    # check raises reached the agent on revisions only.
+    assert res["ok"] is False and res["reason"] == "composite_quality"
     assert "final check" in res["errors"][0]
+    assert "refunded" in res["hint"]
     assert world["refunded"] == 1
     assert not [k for k in world["blobs"] if k.endswith("composed.jpg")]
     assert world["images"] == []
     (row,) = world["rows"].values()
     assert row.status == "failed" and row.cost_micros > 0, "the spend is still on the ledger"
+
+
+async def test_a_refused_owner_photo_asks_for_another_photo_not_another_generation(
+    world, monkeypatch
+):
+    """A first build, not a revision. The owner's own photograph cannot be
+    replaced by a bought one, so "try that slide again with regenerate_image"
+    is the one thing the agent must not offer -- and it was the only thing the
+    tool result ever said, because generate() dropped the refusal's hint."""
+    real = pipeline._final_check
+
+    async def refuse_slide_two(ctx, brief, slide, *a, **k):
+        if slide.position != 2:
+            return await real(ctx, brief, slide, *a, **k)
+        raise pipeline.CompositeRejected(
+            "the finished slide did not pass the final check (text_over_subject)",
+            faults=["text_over_subject"],
+            hint=pipeline._OWNER_PHOTO_REFUSAL,
+        )
+
+    monkeypatch.setattr(pipeline, "_final_check", refuse_slide_two)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
+
+    assert res["ok"] and res["slides_ok"] == 2 and res["slides_failed"] == 1
+    assert "another photo" in res["hint"] and "DOCUMENT" in res["hint"]
+    assert "regenerate_image" not in res["note"]
 
 
 async def test_a_retry_that_was_paid_for_and_then_refused_is_still_on_the_ledger(
@@ -1055,7 +1085,7 @@ async def test_a_retry_that_was_paid_for_and_then_refused_is_still_on_the_ledger
     world["final_verdicts"].extend([["artefacts"], ["artefacts"]])
     res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
 
-    assert res["ok"] is False and res["reason"] == "generation_failed"
+    assert res["ok"] is False and res["reason"] == "composite_quality"
     assert len(world["provider"].requests) == 2, "one retry, as allowed"
     assert world["refunded"] == 1
     assert not [k for k in world["blobs"] if k.endswith("composed.jpg")]

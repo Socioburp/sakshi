@@ -679,8 +679,23 @@ async def generate(
         else:
             ok_urls.append(res)
 
+    # What the final check would have the agent say. A slide it refused is not
+    # "try again": on the owner's own photograph nothing would change, and on a
+    # generated one the corrected retry has already been bought and refused.
+    # The hint reached the agent only on revisions, because this path flattened
+    # every failure into "generation_failed" and dropped it.
+    refused = [r for r in results if isinstance(r, CompositeRejected)]
+    quality_hint = next((r.hint for r in refused if r.hint), "")
+
     if failures and not ok_urls:
         _refund(ctx, group_id, billable, "creative_failed")
+        if quality_hint and len(refused) == len(failures):
+            return {
+                "ok": False,
+                "reason": "composite_quality",
+                "errors": failures[:3],
+                "hint": quality_hint,
+            }
         return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
     if failed_billable:
         # Partial carousel: refund only the paid slides that did not ship.
@@ -738,6 +753,15 @@ async def generate(
             "that failed the check. Tell the owner plainly, in one line, which slide is missing "
             "and offer to try that slide again with regenerate_image."
         )
+        if quality_hint:
+            out["hint"] = quality_hint
+            out["note"] = (
+                f"{len(ok_urls)} of {len(units)} slides were made and sent; the rest did not pass "
+                "the last look at the finished card and were refunded (see failed_slides). We "
+                "never send a card that failed the check. Tell the owner plainly, in one line, "
+                "which slide is missing, and offer what `hint` says instead of another "
+                "generation."
+            )
     if brief.is_story():
         out["format"] = "story"
         out["story_note"] = (
