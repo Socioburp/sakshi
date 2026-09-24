@@ -925,6 +925,46 @@ async def test_a_kept_picture_keeps_the_lane_it_was_made_in(monkeypatch):
         await compose.shutdown()
 
 
+async def test_one_unreadable_photo_costs_one_slide_and_not_the_whole_job(monkeypatch):
+    """The owner's photographs are read once, up front, before the layout
+    gate -- which put the read outside the per-slide gather that exists so
+    one bad slide does not discard the good ones. A single storage or decode
+    failure then raised straight out of generate(): the agent got a tool
+    error instead of a result, and a transient R2 hiccup on one slide of a
+    carousel cost the owner the other two."""
+    from app.creative import pipeline
+    from tests import test_pipeline_flow as flow
+
+    world = await flow.build_world(monkeypatch)
+    try:
+        flow._clean(monkeypatch)
+        asset_id = "55555555-5555-5555-5555-555555555555"
+        snap = pipeline.BrandAssetSnapshot(
+            asset_id, "assets/gone.jpg", "image/jpeg", "shop", "shop"
+        )
+        blobs = world["blobs"]
+
+        def get(key):
+            if key == "assets/gone.jpg":
+                raise RuntimeError("R2 502")
+            return blobs[key][0]
+
+        monkeypatch.setattr(pipeline, "_resolve_photos", lambda *a, **k: {2: asset_id})
+        monkeypatch.setattr(pipeline, "_load_assets", lambda *a, **k: {asset_id: snap})
+        monkeypatch.setattr(pipeline.r2, "get", get)
+
+        res = await pipeline.generate(world["ctx"], _carousel("lower_third"))
+        assert res["ok"] is True, res
+        assert res["slides_ok"] == 2 and res["slides_failed"] == 1, res
+        shipped = {r.slide_position for r in world["rows"].values() if r.status == "ready"}
+        assert shipped == {1, 3}, shipped
+        # The two generated slides shipped; the photo slide was never charged,
+        # so there is nothing to refund for it.
+        assert res["credits_charged"] == 2 and world["refunded"] == 0, res
+    finally:
+        await compose.shutdown()
+
+
 async def test_regenerating_a_slide_that_shows_the_owners_photo_says_so(monkeypatch):
     """regenerate_image re-ran the free lane and handed back the same photo,
     a revision spent on nothing."""

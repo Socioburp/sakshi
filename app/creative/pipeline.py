@@ -1282,7 +1282,17 @@ async def _plan_photos(
     units: list[Slide], assets: dict[str, BrandAssetSnapshot], resolved: dict[int, str]
 ) -> dict[int, PhotoPlan]:
     """Every owner photograph this job will use, read once (the mask is the
-    slow part, and it used to run inside the render of every slide)."""
+    slow part, and it used to run inside the render of every slide).
+
+    One asset that will not come back is one slide's problem, never the job's.
+    This runs before the layout gate and outside the per-slide gather, so an
+    exception here leaves the agent with a tool error instead of a result --
+    a transient R2 hiccup on slide 3 of a carousel would cost the owner the
+    other five. A read that fails is logged and left out; _build_one tries
+    that one asset again inside its own slide, under the gather that fails
+    slides one at a time. Nothing is substituted: the owner asked for their
+    photograph, so the slide either gets it or fails saying so.
+    """
     plans: dict[int, PhotoPlan] = {}
     by_asset: dict[str, PhotoPlan] = {}
     for u in units:
@@ -1290,7 +1300,11 @@ async def _plan_photos(
         if not ref or ref not in assets:
             continue
         if ref not in by_asset:
-            by_asset[ref] = await asyncio.to_thread(_read_photo, assets[ref])
+            try:
+                by_asset[ref] = await asyncio.to_thread(_read_photo, assets[ref])
+            except Exception as exc:  # noqa: BLE001 - one asset, one slide
+                log.warning("owner_photo_unreadable", asset_id=ref, error=str(exc)[:200])
+                continue
         plans[u.position] = by_asset[ref]
     return plans
 
