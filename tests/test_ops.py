@@ -75,3 +75,55 @@ def test_the_worker_blocks_for_exactly_what_the_client_is_built_for():
     from app.queue import client, worker
 
     assert worker.DEQUEUE_BLOCK is client.DEQUEUE_BLOCK
+
+
+# --------------------------------------------------------------------------- #
+# a service that cannot make a picture must not call itself ready
+# --------------------------------------------------------------------------- #
+def _ready(monkeypatch, **over):
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    for k, v in over.items():
+        monkeypatch.setattr(main.settings, k, v)
+    monkeypatch.setattr(main, "_probe", lambda: {"postgres": "ok", "redis": "ok"})
+    monkeypatch.setattr(main.settings, "instagram_mock", True)
+    monkeypatch.setattr(main.settings, "anthropic_model", "m")
+    monkeypatch.setattr(main.settings, "r2_public_base_url", "https://r2")
+    monkeypatch.setattr(main.settings, "voyage_api_key", "v")
+    with TestClient(main.app) as client:
+        return client.get("/health/ready").json()
+
+
+def test_a_vendor_with_no_key_is_not_ready(monkeypatch):
+    """The picture IS the product, and this probe said "ready" while the
+    service could not make one. An owner waiting for an image that was never
+    coming was the only sign, and the answer was a log hunt."""
+    body = _ready(monkeypatch, env="prod", imagegen_provider="openai", openai_api_key="")
+
+    assert body["ok"] is False
+    assert body["checks"]["imagegen_key"] == "MISSING"
+
+
+def test_a_vendor_with_its_key_is_ready(monkeypatch):
+    body = _ready(monkeypatch, env="prod", imagegen_provider="openai", openai_api_key="sk-x")
+
+    assert body["ok"] is True
+    assert body["checks"]["imagegen_key"] == "set"
+
+
+def test_the_gradient_stand_in_is_not_a_picture_provider_in_production(monkeypatch):
+    """'mock' draws a gradient for development. Live, it means every client is
+    being sent a placeholder, which is worse than an outage because it looks
+    like it worked."""
+    body = _ready(monkeypatch, env="prod", imagegen_provider="mock")
+
+    assert body["ok"] is False
+    assert "NOT A REAL PICTURE PROVIDER" in body["checks"]["imagegen_provider"]
+
+
+def test_the_gradient_stand_in_is_fine_off_production(monkeypatch):
+    body = _ready(monkeypatch, env="dev", imagegen_provider="mock")
+
+    assert body["ok"] is True

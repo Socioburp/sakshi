@@ -427,7 +427,7 @@ def test_no_notice_says_what_the_last_one_already_said():
     delivery = pipeline._Delivery(_Chat(), CreativeBrief.model_validate(EXAMPLE), 1, "en")
     said = [delivery.notice_at(pipeline.settings.slow_notice_s * m) for m in pipeline._NOTICE_AT]
     assert len(set(said)) == len(said) == 2
-    assert said[0].startswith("Still working") and "1 minutes in" in said[0]
+    assert said[0].startswith("Still working") and "1 minute in" in said[0]
     assert "3 minutes in" in said[1]
     hindi = pipeline._Delivery(_Chat(), CreativeBrief.model_validate(EXAMPLE), 1, "hi")
     assert "minute ho gaye" in hindi.notice_at(60)
