@@ -641,6 +641,61 @@ async def test_type_on_the_product_is_a_violation_the_compositor_refuses(chromiu
     assert out["violations"] == [] and "subject" in out["boxes"]
 
 
+async def test_the_owners_product_is_never_stood_in_the_frame_as_a_thumbnail(monkeypatch):
+    """place() scaled the cut to whatever the free rectangle left and nothing
+    checked the result was big enough to see: a long headline and subhead on
+    poster_stack or lower_third stood a bottle at 0.19 scale, 174x310 on a
+    1080x1350 card -- 3.7% of the frame, a postage stamp on an empty paper
+    sweep -- and FIT_JS reported no violation, because the subject WAS inside
+    the window, clear of the words and inside the safe zone. Small is not a
+    violation of the frame, it is a violation of the point."""
+    from app.creative import pipeline, product
+    from tests.test_product_lane import _box_mask, _fake_remove, _striped_product
+
+    _fake_remove(monkeypatch, _box_mask(0.4, 0.6))
+    world = await _photo_world(monkeypatch, _striped_product(), "product")
+    try:
+        brief = _brief("poster_stack", long=True)
+        # What the old code would have delivered, measured on the layout the
+        # owner asked for.
+        asked = await compose.check_layout(brief, brief.units()[0], _brand())
+        w, h = brief.pixel_size()
+        win = compose.photo_window(asked, w, h)
+        size = (win[2] - win[0], win[3] - win[1])
+        cut = product.cutout(_striped_product())
+        before = product.place_share(cut.rgba.size, size, pipeline._free_rect(asked, win, w, h))
+        assert before < product.MIN_PLACE_SHARE, before
+
+        res = await pipeline.generate(world["ctx"], brief)
+        assert res["ok"] and res["credits_charged"] == 0, res
+        assert res["template_switches"]["1"]["why"] == "product_too_small_for_window", res
+        (row,) = world["rows"].values()
+        assert row.imagegen_provider == "product_studio"
+        # On the layout it was moved to, the product covers the floor.
+        moved = await compose.check_layout(brief, brief.units()[0], _brand())
+        win = compose.photo_window(moved, w, h)
+        size = (win[2] - win[0], win[3] - win[1])
+        after = product.place_share(cut.rgba.size, size, pipeline._free_rect(moved, win, w, h))
+        assert after >= product.MIN_PLACE_SHARE, (before, after)
+    finally:
+        await compose.shutdown()
+
+
+def test_the_product_gate_and_the_compositor_place_it_the_same_way():
+    """One formula, not two that drift: the gate decides the layout from the
+    size place() will actually composite the cut at."""
+    from app.creative import product
+
+    cut = Image.new("RGBA", (900, 1600), (0, 0, 0, 0))
+    ImageDraw.Draw(cut).rectangle([0, 0, 899, 1599], fill=(40, 90, 160, 255))
+    canvas = Image.new("RGB", (1080, 1350), (200, 200, 200))
+    free = (90, 662, 990, 1058)
+    _, box = product.place(cut, canvas, free)
+    assert (box[2] - box[0], box[3] - box[1]) == product.placed_size(cut.size, canvas.size, free)
+    # The measured worst case the floor exists for: a bottle at 3% of a post.
+    assert product.place_share(cut.size, canvas.size, free) < product.MIN_PLACE_SHARE
+
+
 def test_a_plate_never_reaches_the_product():
     """The plate under the words feathers 10% of the width past them; it
     stops at the subject's box. It was a black slab over the jar."""

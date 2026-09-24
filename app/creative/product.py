@@ -74,6 +74,18 @@ MAX_PLACE_UPSCALE = 1.25
 # Room kept between the product and the edge of the space it stands in, as a
 # share of the window's width.
 PLACE_MARGIN = 0.04
+# The least of the photo window the product may cover: its longer side over
+# the window's shorter one. There was no floor at all -- place() took whatever
+# the free rectangle left -- so a long headline and subhead on poster_stack or
+# lower_third stood a 900x1600 bottle at 0.19 scale, 174x310 on a 1080x1350
+# card: 3.7% of the frame, a postage stamp on an empty paper sweep, with FIT_JS
+# reporting no violation because the subject was inside the window, clear of
+# the words and inside the safe zone. The product is what the owner judges the
+# card by, so the layout moves to one whose window has room before the frame
+# is made, and the job is refused by name when none has. Measured: ordinary
+# and long copy clear this on every panel layout (0.64 to 0.89); only the
+# full-bleed layouts at the copy's limit fall under it.
+MIN_PLACE_SHARE = 0.38
 
 # Where the product goes when NO measured layout is at hand (a caller without
 # the layout report; tests): (top, bottom, max_width, anchor) as fractions of
@@ -378,6 +390,30 @@ def _contact_shadow(product: Image.Image, canvas: Image.Image, x: int, y: int) -
     return Image.alpha_composite(wide, tight)
 
 
+def placed_size(
+    cut: tuple[int, int], window: tuple[int, int], free: tuple[int, int, int, int]
+) -> tuple[int, int]:
+    """The size `place` will composite the cut product at: the largest it fits
+    inside `free` with PLACE_MARGIN kept on every side, never enlarged past
+    MAX_PLACE_UPSCALE. The pipeline measures the product with this before the
+    layout is charged for, so the gate and the compositor share one formula
+    instead of two that drift apart."""
+    margin = int(round(window[0] * PLACE_MARGIN))
+    zone_w = max(1, free[2] - free[0] - 2 * margin)
+    zone_h = max(1, free[3] - free[1] - 2 * margin)
+    scale = min(zone_w / cut[0], zone_h / cut[1], MAX_PLACE_UPSCALE)
+    return max(1, int(cut[0] * scale)), max(1, int(cut[1] * scale))
+
+
+def place_share(
+    cut: tuple[int, int], window: tuple[int, int], free: tuple[int, int, int, int]
+) -> float:
+    """How much of the photo window the placed product covers, as its longer
+    side over the window's shorter one. Held to MIN_PLACE_SHARE."""
+    pw, ph = placed_size(cut, window, free)
+    return max(pw, ph) / max(1, min(window))
+
+
 def place(
     cut: Image.Image,
     canvas: Image.Image,
@@ -392,9 +428,9 @@ def place(
     W, H = canvas.size
     margin = int(round(W * PLACE_MARGIN))
     fl, ft, fr, fb = free
-    zone_w, zone_h = max(1, fr - fl - 2 * margin), max(1, fb - ft - 2 * margin)
-    scale = min(zone_w / cut.width, zone_h / cut.height, MAX_PLACE_UPSCALE)
-    pw, ph = max(1, int(cut.width * scale)), max(1, int(cut.height * scale))
+    zone_w = max(1, fr - fl - 2 * margin)
+    pw, ph = placed_size(cut.size, canvas.size, free)
+    scale = pw / cut.width
     product = cut.resize((pw, ph), Image.LANCZOS)
     x = int(round(fl + margin + zone_w * anchor - pw / 2))
     x = max(fl + margin, min(x, fr - margin - pw))

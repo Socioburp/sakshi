@@ -513,6 +513,12 @@ async def generate(
     )
     if too_small:
         return too_small
+    # And the owner's product is never stood in the frame as a thumbnail: the
+    # copy that leaves it no room moves the slide to a layout with a window,
+    # or the job is refused asking for shorter copy -- again before the charge.
+    thumbnail = await _product_size_gate(brief, units, photos, layouts, brand_snapshot, switches)
+    if thumbnail:
+        return thumbnail
     units = brief.units()
 
     with session_scope() as db:
@@ -1513,6 +1519,95 @@ async def _photo_resolution_gate(
     }
 
 
+_SMALL_PRODUCT_HINT = (
+    "Nothing was made and nothing was charged. On the slide(s) named the copy leaves so "
+    "little of the picture clear that the owner's product would be composited as a thumbnail "
+    "on an empty backdrop, and no layout has room for it at this length. Shorten the headline "
+    "or the subhead and call the tool again -- the product is what the owner judges the card "
+    "by, and a card that shows it small needs a revision on the first result."
+)
+
+
+def _product_share(
+    plan: PhotoPlan, layout: dict | None, w: int, h: int
+) -> tuple[float, tuple[int, int]]:
+    """How much of its window the product on this slide would cover, and that
+    window's size."""
+    win = compose.photo_window(layout, w, h)
+    size = (win[2] - win[0], win[3] - win[1])
+    free = _free_rect(layout, win, w, h)
+    return product.place_share(plan.cut.rgba.size, size, free), size
+
+
+async def _product_size_gate(
+    brief: CreativeBrief,
+    units: list[Slide],
+    photos: dict[int, PhotoPlan],
+    layouts: dict[int, dict],
+    brand_snapshot,
+    switches: dict[int, tuple[str, str, str]],
+) -> dict | None:
+    """Move -- or refuse -- any product slide whose cut-out the copy would
+    shrink below product.MIN_PLACE_SHARE of its window.
+
+    place() scaled the cut to whatever the free rectangle left, with no floor
+    at all: a long headline and subhead on poster_stack or lower_third stood a
+    bottle at 174x310 on a 1080x1350 card and FIT_JS reported nothing wrong,
+    because the subject WAS inside the window, clear of the words and inside
+    the safe zone. Small is not a violation of the frame, it is a violation of
+    the point, so it is settled here -- before the charge, where a layout with
+    a real window can still be chosen -- and not by refusing a finished render.
+    Mirrors _photo_resolution_gate, which does the same for a photo with too
+    few pixels.
+    """
+    w, h = brief.pixel_size()
+    small = []
+    for slide in units:
+        plan = photos.get(slide.position)
+        if plan is None or not plan.cut_ok:
+            continue
+        share, size = _product_share(plan, layouts.get(slide.position), w, h)
+        if share >= product.MIN_PLACE_SHARE:
+            continue
+        was = brief.template_for(slide)
+        found = None
+        for name in PANEL_TEMPLATES:
+            if name == was:
+                continue
+            _set_template(brief, slide, name)
+            trial = brief.units()[units.index(slide)] if not brief.is_carousel() else slide
+            try:
+                report = await compose.check_layout(brief, trial, brand_snapshot)
+            except compose.TextDoesNotFit:
+                continue
+            if _product_share(plan, report, w, h)[0] >= product.MIN_PLACE_SHARE:
+                found, layouts[slide.position] = name, report
+                break
+        if found is None:
+            _set_template(brief, slide, was)
+            small.append(
+                {
+                    "slide": slide.position,
+                    "asset_id": plan.asset_id,
+                    "window": f"{size[0]}x{size[1]}",
+                    "covers": f"{share:.0%}",
+                }
+            )
+            continue
+        switches[slide.position] = (was, found, "product_too_small_for_window")
+        log.info("product_layout_for_size", position=slide.position, was=was, now=found)
+    if not small:
+        return None
+    log.warning("product_too_small_refused", slides=small)
+    return {
+        "ok": False,
+        "reason": "product_too_small",
+        "charged": 0,
+        "slides": small,
+        "hint": _SMALL_PRODUCT_HINT,
+    }
+
+
 def cutout_key(brand_id: str, creative_id: str) -> str:
     """Where a product-studio creative keeps its cut-out (see cutout_png)."""
     return r2.key_for(brand_id, creative_id, "cutout.png")
@@ -2219,6 +2314,12 @@ async def _revision_guard(
                 stuck.append({"slide": slide.position, "why": "no stored cut-out"})
                 continue
             free = _free_rect(layout, window, w, h)
+            if product.place_share(rgba.size, size, free) < product.MIN_PLACE_SHARE:
+                # The new copy leaves the product a thumbnail's worth of room.
+                # Rebuilding it there would hand back a worse card than the one
+                # the owner already has, for free, and call it a revision.
+                stuck.append({"slide": slide.position, "why": "no room for the product"})
+                continue
             png, box = product.studio(
                 rgba,
                 size[0],
