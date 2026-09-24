@@ -60,7 +60,7 @@ from app.creative import (
 )
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
 from app.creative.imagegen import ImageRequest, get_provider
-from app.creative.imagegen.base import generation_size_for_window
+from app.creative.imagegen.base import crop_for, generation_size_for_window
 from app.db import repo
 from app.db.models import Account, Brand, BrandAsset, Brief, Creative
 from app.db.session import session_scope
@@ -1551,20 +1551,30 @@ def _text_box_in_window(
     return ((left - wl) / ww, (top - wt) / wh, (right - wl) / ww, (bottom - wt) / wh)
 
 
-# How far a non-exact vendor's frame may stray from the ratio asked for: a
-# 0.5% difference is under a pixel of trim at the window; the 896x1088 that a
-# "4:5" once came back as is 2.9%, and it was silently cropped and enlarged.
-SIZE_RATIO_TOLERANCE = 0.005
-
-
 def _size_fault(provider, got: tuple[int, int], asked: tuple[int, int], floor) -> str:
-    """Why `got` is not the frame that was asked for, or '' when it is."""
+    """Why `got` is not the frame that was asked for, or '' when it is.
+
+    A vendor that picks its own size is held to the one thing that matters
+    downstream: covering the WINDOW the compositor will fit it to, within the
+    pixels the compositor allows. This used to state its own percentage of the
+    asked ratio (0.5%), which is a different quantity from the one
+    fit_background measures and disagreed with it in both directions. It let
+    through -- and paid for -- frames the compositor then refused: 0.5% of a
+    1080x1920 story's ratio is up to 9.6px of window crop against the 4px of
+    compose.GENERATED_CROP_TOLERANCE, and PictureMismatch is deliberately not
+    retried, so the slide failed after the money was spent. It also added to
+    the asked frame's own allowance instead of counting the trim once. Both
+    errors disappear when the gate measures what the compositor measures.
+    """
     if getattr(provider, "exact_size", False):
         return "" if got == asked else f"asked {asked[0]}x{asked[1]}, got {got[0]}x{got[1]}"
-    want = asked[0] / asked[1]
-    if abs(got[0] / got[1] - want) / want > SIZE_RATIO_TOLERANCE:
-        return f"ratio {got[0]}x{got[1]} is not {asked[0]}x{asked[1]}"
     need = floor or asked
+    crop = crop_for(got, need)
+    if crop > compose.GENERATED_CROP_TOLERANCE:
+        return (
+            f"ratio {got[0]}x{got[1]} does not cover the {need[0]}x{need[1]} window "
+            f"(crop {crop:.1f}px)"
+        )
     if got[0] < need[0] or got[1] < need[1]:
         return f"{got[0]}x{got[1]} is below the {need[0]}x{need[1]} it must cover"
     return ""
@@ -1597,8 +1607,8 @@ async def _generate_checked(
 
     `floor` is the window the picture must cover (never enlarged to). A
     vendor that picks its own size from a ratio (replicate, bfl) is held to
-    the ratio within SIZE_RATIO_TOLERANCE and to the floor; one that returns
-    exactly what it is asked is held to exactly that.
+    covering that window within the compositor's own crop tolerance; one that
+    returns exactly what it is asked is held to exactly that.
 
     Every attempt is the SAME call at the SAME settings; only the prompt gains
     a sentence about what was wrong, and the seed moves. Reasons to reject:

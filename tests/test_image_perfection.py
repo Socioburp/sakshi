@@ -941,7 +941,39 @@ def test_every_vendor_is_held_to_the_frame_it_was_asked_for():
     assert "ratio" in pipeline._size_fault(loose, (896, 1088), (1600, 2000), (1080, 1350))
     assert pipeline._size_fault(loose, (1592, 1990), (1600, 2000), (1080, 1350)) == ""
     assert "below" in pipeline._size_fault(loose, (1000, 1250), (1600, 2000), (1080, 1350))
-    assert pipeline.SIZE_RATIO_TOLERANCE == 0.005
+
+
+def test_the_size_gate_refuses_exactly_what_the_compositor_refuses():
+    """The gate used to state its own percentage of the asked ratio (0.5%),
+    which is a different quantity from the pixels fit_background measures
+    against the window. The two disagreed in both directions: a 1440x1118 for
+    a 1080x842 split_card window is inside 0.5% of the ratio, so the gate
+    accepted it and the vendor was paid -- and then fit_background refused it
+    at 4.5px of crop, and PictureMismatch is deliberately never retried, so
+    the slide failed with the money gone. On a story the gap is wider still:
+    0.5% of the ratio is up to 9.6px of crop against the compositor's 4px."""
+    from app.creative import pipeline
+
+    loose = types.SimpleNamespace(exact_size=False)
+    for got, asked, window in (
+        ((1440, 1118), (1600, 1248), (1080, 842)),
+        ((1413, 2520), (1440, 2560), (1080, 1920)),
+        ((1563, 1960), (1600, 2000), (1080, 1350)),
+    ):
+        fault = pipeline._size_fault(loose, got, asked, window)
+        with pytest.raises(compose.PictureMismatch):
+            compose.fit_background(_photo(*got, (10, 10, 60, 60)), *window, generated=True)
+        assert fault, f"{got} covers {window} for the gate but not for the compositor"
+
+    # And it does not refuse what the compositor would take: every frame the
+    # gate passes fits the window it was measured against.
+    for got, asked, window in (
+        ((1600, 2000), (1600, 2000), (1080, 1350)),
+        ((1592, 1990), (1600, 2000), (1080, 1350)),
+        ((1264, 1584), (1600, 2000), (1080, 1350)),
+    ):
+        assert pipeline._size_fault(loose, got, asked, window) == ""
+        compose.fit_background(_photo(*got, (10, 10, 60, 60)), *window, generated=True)
 
 
 async def test_a_vendor_that_picks_its_own_size_is_rejected_until_it_covers_the_window(monkeypatch):
