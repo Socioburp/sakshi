@@ -61,7 +61,7 @@ from app.creative import (
     shotplan,
 )
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
-from app.creative.imagegen import ImageRequest, get_provider
+from app.creative.imagegen import ImageRequest, get_provider, providers
 from app.creative.imagegen.base import crop_for, generation_size_for_window
 from app.db import repo
 from app.db.models import Account, Brand, BrandAsset, Brief, Creative
@@ -80,35 +80,104 @@ class CreativeFailed(Exception):
 
 
 # --------------------------------------------------------------------------- #
+# What ONE vendor call may take. OpenAI documents "up to 2 minutes" for a
+# gpt-image-2 render at the size and setting this pipeline asks for, and
+# nothing here is allowed to buy a cheaper call to beat it.
+VENDOR_CEILING_S = 120
+# ...and what happens after the last picture lands: the composite render
+# (3.2-5.6s measured), the export, the vision look at the finished card (2-5s)
+# and the repair ladder when it objects (~10s, ~20s at worst), rounded up.
+COMPOSITING_S = 40
+
+
+def paid_attempts() -> int:
+    """How many vendor calls one slide may really make.
+
+    IMAGEGEN_GATE_ATTEMPTS is the ceiling, but IMAGEGEN_GATE_BUDGET_MICROS
+    stops the retrying well before it: at the list price of one picture the
+    budget pays for three. Derived rather than typed, because the time the
+    chat promises the owner is built on it -- move either setting and the
+    promise moves with it instead of quietly becoming a lie.
+    """
+    attempts = max(1, int(settings.imagegen_gate_attempts))
+    budget = int(settings.imagegen_gate_budget_micros or 0)
+    per_call = providers.price_micros(settings.imagegen_provider)
+    if budget and per_call:
+        attempts = min(attempts, max(1, budget // per_call))
+    return attempts
+
+
+def working_window(slides: int) -> tuple[int, int]:
+    """Seconds this job may honestly take: (a clean first picture, the last
+    attempt the budget allows). Slides run IMAGEGEN_CONCURRENCY at a time, so
+    a carousel wider than that waits more than once.
+
+    This is the number the chat quotes. It used to be a flat "about 90
+    seconds" under a comment admitting it had never been measured, while the
+    gate above it allowed three paid calls of up to two minutes each. Ten
+    minutes of "still working" later the owner wrote "it's taking too much
+    time" -- and they were right, because we had told them ninety seconds.
+    """
+    lanes = max(1, int(settings.imagegen_concurrency))
+    waves = -(-max(1, slides) // lanes)
+    return (
+        VENDOR_CEILING_S * waves + COMPOSITING_S,
+        VENDOR_CEILING_S * paid_attempts() * waves + COMPOSITING_S,
+    )
+
+
+def working_minutes(slides: int) -> tuple[int, int]:
+    """The same window in whole minutes: the low end rounded down and the high
+    end rounded up, so the range brackets the truth instead of flattering it."""
+    low, high = working_window(slides)
+    return max(1, low // 60), max(2, -(-high // 60))
+
+
 _WORKING: dict[str, str] = {
-    "hi": "Bana raha hoon… {secs} second.",
-    "kn": "Maadta iddini… {secs} second.",
-    "ta": "Panren… {secs} second.",
-    "te": "Chestunna… {secs} second.",
-    "mr": "Banavtoy… {secs} second.",
-    "ml": "Cheyyunnu… {secs} second.",
-    "en": "Making it… about {secs} seconds.",
+    "hi": "Bana raha hoon… achhi quality mein {low}-{high} minute lagte hain.",
+    "kn": "Maadta iddini… {low}-{high} nimisha.",
+    "ta": "Panren… {low}-{high} nimidam.",
+    "te": "Chestunna… {low}-{high} nimishalu.",
+    "mr": "Banavtoy… {low}-{high} minute lagtat.",
+    "ml": "Cheyyunnu… {low}-{high} minute.",
+    "en": "Making it… it takes {low}-{high} minutes at this quality.",
 }
 
 
 def working_line(locale: str | None, slides: int) -> str:
     lang = ((locale or "en").split("-")[0]).lower()
-    # NOT MEASURED YET at gpt-image-2 / high / 1600x2000 -- OpenAI documents "up
-    # to 2 minutes" per image. Set from the recorded p50 once there is one.
-    return _WORKING.get(lang, _WORKING["en"]).format(secs=90 if slides <= 1 else 120)
+    low, high = working_minutes(slides)
+    return _WORKING.get(lang, _WORKING["en"]).format(low=low, high=high)
 
 
+# Every notice carries a number that has moved since the last one -- how long
+# it has been, and on a carousel how much is done. The owner read the
+# identical sentence five times across ten minutes; a line that says nothing
+# new is not a progress report, it is noise.
 _STILL_WORKING: dict[str, str] = {
-    "hi": "Abhi ban raha hai… {done}/{total} taiyaar. Achhi quality mein thoda time lagta hai.",
-    "en": "Still working… {done} of {total} ready. The high-quality pictures take a little longer.",
+    "hi": "Abhi ban raha hai… {mins} minute ho gaye, {done}/{total} taiyaar.",
+    "en": "Still working… {mins} minutes in, {done} of {total} ready.",
 }
 _STILL_WORKING_ONE: dict[str, str] = {
-    "hi": "Abhi ban raha hai… achhi quality mein thoda time lagta hai.",
-    "en": "Still working on it… the high-quality picture takes a little longer.",
+    "hi": "Abhi ban raha hai… {mins} minute ho gaye. Check paas hote hi bhejta hoon.",
+    "en": "Still working… {mins} minutes in. It goes to you the moment it passes our check.",
 }
-# Notices go out this many seconds-multiples after the start: 1x, 3x, 7x of
-# SLOW_NOTICE_S. Three at most -- WhatsApp is not a log.
-_NOTICE_AT = (1, 3, 7)
+# The last word, sent once the job runs past the window it was quoted. After
+# this the chat is quiet on purpose: the job either delivers or says it could
+# not be made, so the owner hears again either way.
+_OVER_TIME: dict[str, str] = {
+    "hi": (
+        "{high} minute se zyada lag raha hai. Quality kam karke jaldi nahi bhejunga — "
+        "nahi bana to credit wapas, aur main bataunga."
+    ),
+    "en": (
+        "This is past the {high} minutes I said. I will not send a worse picture to be "
+        "quick — if it cannot be made, the credit comes back and I will tell you."
+    ),
+}
+# Notices go out at 1x and 3x SLOW_NOTICE_S, then one closing line when the
+# quoted window runs out. Three at most -- WhatsApp is not a log.
+_NOTICE_AT = (1, 3)
 
 
 class _Delivery:
@@ -129,6 +198,10 @@ class _Delivery:
         self.hold = total > 1 and settings.carousel_delivery == "ordered"
         self._lock = asyncio.Lock()
         self._watch: asyncio.Task | None = None
+        # The window the owner was quoted, so the closing notice names the
+        # same number the opening line did.
+        self.over_s = working_window(total)[1]
+        self.over_min = working_minutes(total)[1]
 
     def caption(self, position: int) -> str:
         if self.total <= 1:
@@ -171,20 +244,33 @@ class _Delivery:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
 
+    def notice_at(self, elapsed: float) -> str:
+        """What the owner hears `elapsed` seconds in. Never twice the same
+        sentence: the minutes move, and on a carousel so does the count."""
+        table = _STILL_WORKING_ONE if self.total <= 1 else _STILL_WORKING
+        return table.get(self.lang, table["en"]).format(
+            mins=max(1, round(elapsed / 60)), done=len(self.ready), total=self.total
+        )
+
+    async def _say(self, line: str, elapsed: float) -> None:
+        log.info("slow_notice", elapsed_s=elapsed, done=len(self.ready), total=self.total)
+        try:
+            await self.ctx.progress(line)
+        except Exception:  # noqa: BLE001 - a missed notice must never cost the creative
+            log.warning("slow_notice_failed")
+
     async def _notices(self) -> None:
-        elapsed = 0
+        elapsed = 0.0
         for mult in _NOTICE_AT:
-            wait = settings.slow_notice_s * mult - elapsed
-            await asyncio.sleep(wait)
-            elapsed += wait
-            table = _STILL_WORKING_ONE if self.total <= 1 else _STILL_WORKING
-            done = len(self.ready)
-            line = table.get(self.lang, table["en"]).format(done=done, total=self.total)
-            log.info("slow_notice", elapsed_s=elapsed, done=done, total=self.total)
-            try:
-                await self.ctx.progress(line)
-            except Exception:  # noqa: BLE001 - a missed notice must never cost the creative
-                log.warning("slow_notice_failed")
+            await asyncio.sleep(settings.slow_notice_s * mult - elapsed)
+            elapsed = settings.slow_notice_s * mult
+            await self._say(self.notice_at(elapsed), elapsed)
+        # Past the window the owner was quoted. One honest line, and then the
+        # chat stays quiet: the job either delivers or says it could not be
+        # made, so nobody is left listening to the same sentence for ever.
+        await asyncio.sleep(max(0.0, self.over_s - elapsed))
+        closing = _OVER_TIME.get(self.lang, _OVER_TIME["en"]).format(high=self.over_min)
+        await self._say(closing, self.over_s)
 
 
 # Credits at or below this get a one-line nudge from the agent. Finding out at
@@ -703,6 +789,7 @@ async def generate(
                 "hint": quality_hint,
             }
         return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
+
     if failed_billable:
         # Partial carousel: refund only the paid slides that did not ship.
         _refund(ctx, group_id, failed_billable, "partial_carousel")

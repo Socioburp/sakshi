@@ -377,6 +377,83 @@ async def test_a_failed_send_is_reported_not_assumed():
     assert await delivery.send(1, "u1") is False and delivery.sent == {1: False}
 
 
+# --------------------------------------------------------------------------- #
+# what the chat promises, and how the waiting ends
+# --------------------------------------------------------------------------- #
+def test_the_time_the_chat_promises_is_the_time_the_gate_actually_allows(monkeypatch):
+    """working_line said "about 90 seconds" under a comment admitting the
+    number had never been measured, while the gate above it bought up to three
+    pictures of up to two minutes each. The owner waited ten minutes on a
+    ninety-second promise and wrote "it's taking too much time"."""
+    monkeypatch.setattr(pipeline.settings, "imagegen_provider", "openai")
+    monkeypatch.setattr(pipeline.settings, "imagegen_cost_micros", 0)
+    monkeypatch.setattr(pipeline.settings, "imagegen_gate_attempts", 6)
+    monkeypatch.setattr(pipeline.settings, "imagegen_gate_budget_micros", 900_000)
+    monkeypatch.setattr(pipeline.settings, "imagegen_concurrency", 4)
+
+    # $0.90 of budget against $0.2883 a picture is three tries, not six.
+    assert pipeline.paid_attempts() == 3
+    low, high = pipeline.working_window(1)
+    assert low == pipeline.VENDOR_CEILING_S + pipeline.COMPOSITING_S
+    assert high == 3 * pipeline.VENDOR_CEILING_S + pipeline.COMPOSITING_S
+    line = pipeline.working_line("en", 1)
+    assert "90 second" not in line and "2-7 minutes" in line
+    assert "{low}" not in pipeline.working_line("hi", 1) and "90" not in pipeline.working_line(
+        "hi", 1
+    )
+    # A carousel wider than the lanes waits through more than one round of calls.
+    assert pipeline.working_window(6)[1] == 2 * (high - pipeline.COMPOSITING_S) + (
+        pipeline.COMPOSITING_S
+    )
+
+
+def test_a_smaller_budget_shortens_the_promise_and_never_the_work(monkeypatch):
+    """The promise is derived, so it cannot drift away from the code. The only
+    honest way to quote a shorter time is to allow fewer RETRIES; nothing here
+    may make the picture worse to hit a number."""
+    monkeypatch.setattr(pipeline.settings, "imagegen_provider", "openai")
+    monkeypatch.setattr(pipeline.settings, "imagegen_cost_micros", 0)
+    monkeypatch.setattr(pipeline.settings, "imagegen_gate_attempts", 6)
+    monkeypatch.setattr(pipeline.settings, "imagegen_gate_budget_micros", 300_000)
+    assert pipeline.paid_attempts() == 1 and pipeline.working_minutes(1) == (2, 3)
+    monkeypatch.setattr(pipeline.settings, "imagegen_gate_budget_micros", 0)
+    assert pipeline.paid_attempts() == 6, "no cap means the attempt count is the whole truth"
+
+
+def test_no_notice_says_what_the_last_one_already_said():
+    """Five copies of "Still working on it... the high-quality picture takes a
+    little longer" is not a progress report. Every line carries a number that
+    has moved since the owner last read one."""
+    delivery = pipeline._Delivery(_Chat(), CreativeBrief.model_validate(EXAMPLE), 1, "en")
+    said = [delivery.notice_at(pipeline.settings.slow_notice_s * m) for m in pipeline._NOTICE_AT]
+    assert len(set(said)) == len(said) == 2
+    assert said[0].startswith("Still working") and "1 minutes in" in said[0]
+    assert "3 minutes in" in said[1]
+    hindi = pipeline._Delivery(_Chat(), CreativeBrief.model_validate(EXAMPLE), 1, "hi")
+    assert "minute ho gaye" in hindi.notice_at(60)
+
+
+async def test_the_waiting_ends_with_one_honest_line_instead_of_going_silent(monkeypatch):
+    """After the last notice the chat used to say nothing at all, for ever.
+    The owner is told once that the job has run past the window it was quoted,
+    and then left alone: from there it either arrives or says it failed."""
+    monkeypatch.setattr(pipeline.settings, "slow_notice_s", 0.02)
+    chat = _Chat()
+    delivery = pipeline._Delivery(chat, CreativeBrief.model_validate(EXAMPLE), 1, "en")
+    assert delivery.over_min == pipeline.working_minutes(1)[1], "the same number it quoted"
+    delivery.over_s, delivery.over_min = 0.1, 7  # the quoted window, compressed
+    delivery.start()
+    await asyncio.sleep(0.16)
+    await delivery.stop()
+
+    assert len(chat.lines) == 3
+    assert [line.startswith("Still working") for line in chat.lines] == [True, True, False]
+    assert "past the 7 minutes I said" in chat.lines[2]
+    assert "worse picture" in chat.lines[2] and "credit comes back" in chat.lines[2]
+    await asyncio.sleep(0.15)
+    assert len(chat.lines) == 3, "the wait ends; it does not roam in circles"
+
+
 def test_there_is_no_tier_and_no_deadline_that_changes_the_output():
     import inspect as pyinspect
 
