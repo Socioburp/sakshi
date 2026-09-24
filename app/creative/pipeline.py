@@ -772,8 +772,9 @@ async def generate(
         }
         out["template_note"] = (
             "Their own photo is in this creative, so the layout of the slide(s) named in "
-            "template_switches was changed to keep the words off the subject (or to show a "
-            "small photo without enlarging it). Do not mention this unless they ask."
+            "template_switches was changed to keep the words off the subject, to show a "
+            "small photo without enlarging it, or to give their product room to be seen. "
+            "Do not mention this unless they ask."
         )
     if not delivered:
         # Never tell the model the owner has seen something they have not. The
@@ -1042,15 +1043,15 @@ async def regenerate_image(
         own = _owner_photo_slides(rows, slide_position)
         photo_slides = {r["slide"] for r in _owner_photo_slides(rows, None)}
         every_slide_is_a_photo = bool(rows) and photo_slides >= {c.slide_position for c in rows}
-    # The refusal is the whole truth only when there is nothing else to redo.
-    # Asked to redo a six-slide carousel whose slide 1 is the owner's
-    # shopfront, it used to refuse all six -- so "the pictures all look the
-    # same, make them different" regenerated nothing, and the hint sent the
-    # agent to create_creative, which charges for six and throws away the five
-    # the owner was happy with. A mixed carousel now redoes the generated
-    # slides and keeps the photographs, which is what was asked for.
-    # Only when no slide was named: asked to redo THIS slide and this slide is
-    # a photograph, the refusal is exactly right and nothing else is implied.
+    # The refusal below is the whole truth only when there is nothing else to
+    # redo. Asked to redo a six-slide carousel whose slide 1 is the owner's
+    # shopfront, it refused all six -- so "the pictures all look the same,
+    # make them different" regenerated nothing, and the hint sent the agent to
+    # create_creative, which charges for six and throws away the five the
+    # owner was happy with. A mixed carousel keeps the photographs and redoes
+    # the generated slides, which is what was asked for. Named explicitly, a
+    # photo slide is still refused: there the owner asked for THAT slide, and
+    # regenerating it really would hand back the same photo.
     mixed = own and slide_position is None and not every_slide_is_a_photo
     keep_photos = sorted(photo_slides) if mixed else []
     if own and not keep_photos:
