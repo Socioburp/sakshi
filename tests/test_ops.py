@@ -53,3 +53,25 @@ async def test_one_good_dequeue_forgets_the_bad_ones(monkeypatch):
 
     assert await worker.run_once() is False
     assert worker._dequeue_failures == 0
+
+
+def test_the_socket_outlasts_the_block_it_waits_on():
+    """A BRPOP that blocks longer than the client will wait to READ it fails
+    every single time. Raising the block to 30s while the socket read timeout
+    stayed at 10 did exactly that in production: every dequeue raised "Timeout
+    reading from socket", jobs only moved when the reaper re-pushed them, and
+    owners waited minutes for a reply. The two are set together or not at all."""
+    from app.queue import client
+
+    assert client.SOCKET_TIMEOUT > client.DEQUEUE_BLOCK, (
+        f"socket read timeout {client.SOCKET_TIMEOUT}s must outlast the "
+        f"{client.DEQUEUE_BLOCK}s block, with room for the round trip"
+    )
+
+
+def test_the_worker_blocks_for_exactly_what_the_client_is_built_for():
+    """One number, one place. The worker used to keep its own copy, which is
+    how it drifted away from the socket timeout in the first place."""
+    from app.queue import client, worker
+
+    assert worker.DEQUEUE_BLOCK is client.DEQUEUE_BLOCK

@@ -52,10 +52,23 @@ STALE_RUNNING = timedelta(minutes=30)
 STALE_QUEUED = timedelta(seconds=90)
 
 
+# How long one BRPOP waits for a job, and how long the client will wait to read
+# the answer. These two MUST be set together, and they live here side by side
+# because they were not: the block was raised to 30s while the socket read
+# timeout stayed at 10, so the server was still holding the call open when the
+# client gave up, and EVERY dequeue raised "Timeout reading from socket". Jobs
+# then only moved when the reaper re-pushed them, and owners waited minutes for
+# a reply. The read timeout must outlast the block, with room for the round trip.
+DEQUEUE_BLOCK = 30
+SOCKET_TIMEOUT = DEQUEUE_BLOCK + 10
+
+
 def get_redis() -> redis.Redis:
     global _client
     if _client is None:
-        _client = redis.Redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=10)
+        _client = redis.Redis.from_url(
+            settings.redis_url, decode_responses=True, socket_timeout=SOCKET_TIMEOUT
+        )
     return _client
 
 
