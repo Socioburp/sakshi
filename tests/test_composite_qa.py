@@ -1093,6 +1093,9 @@ async def test_a_verdict_about_the_brands_mark_is_paid_for_once_and_never_again(
     (row,) = world["rows"].values()
     assert row.status == "failed"
     assert row.cost_micros == 288_300 + 4_500, "the one picture and the one look"
+    # ...and the owner is not told about a ladder and a purchase that, rightly,
+    # never happened.
+    assert "BRAND MARK" in res["hint"] and "nothing more was spent" in res["hint"]
 
 
 async def test_a_verdict_a_layout_can_still_cure_keeps_its_whole_free_ladder(world, monkeypatch):

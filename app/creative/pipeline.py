@@ -2251,6 +2251,26 @@ _GENERATED_REFUSAL = (
     "credit is refunded. Tell the owner plainly and suggest a shorter headline or a "
     "different subject for the picture."
 )
+_SETTLED_REFUSAL = (
+    "The finished card did not pass the final check, and the objection is to the BRAND MARK "
+    "on it -- not to the layout and not to the photograph. No layout change and no other "
+    "picture can move that, so nothing further was tried and nothing more was spent. Tell "
+    "the owner in one plain sentence that this one could not be finished, and do not promise "
+    "that trying again will help."
+)
+
+
+def _settled_or(final_say: list[str], buy: Any) -> str:
+    """What the agent is told to say about a refusal.
+
+    The generated lane's line describes a ladder that was swept and a picture
+    that was bought. Against a settled verdict neither happened, and telling
+    the owner we tried everything when we deliberately tried nothing is the
+    kind of small lie that makes the next sentence unbelievable.
+    """
+    if final_say:
+        return _SETTLED_REFUSAL
+    return _GENERATED_REFUSAL if buy is not None else _OWNER_PHOTO_REFUSAL
 
 
 def _copy_for_gate(brief: CreativeBrief, slide: Slide, brand_snapshot) -> dict[str, Any]:
@@ -2415,6 +2435,7 @@ async def _final_check(
 
     free = max(0, int(settings.composite_free_variants))
     paid = max(0, int(settings.composite_paid_retries)) if buy is not None else 0
+    final_say: list[str] = []
 
     for purchase in range(paid + 1):
         first = look(brief.template_for(slide), png, final, report)
@@ -2522,7 +2543,7 @@ async def _final_check(
         cost_micros=spent,
         faults=faults,
         reasons=reasons,
-        hint=_GENERATED_REFUSAL if buy is not None else _OWNER_PHOTO_REFUSAL,
+        hint=_settled_or(final_say, buy),
     )
 
 
