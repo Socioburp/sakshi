@@ -1,7 +1,7 @@
 """the onboarding kit in SQL: kind 'reference', and one row per file
 
-Revision ID: 0015
-Revises: 0014
+Revision ID: 0016
+Revises: 0015
 
 When a brand is onboarded, SocioBurp's designers hand over five to ten
 finished creatives as the example of what this brand should look like. Those
@@ -44,8 +44,8 @@ and NOT blanket uniqueness on the tables:
 
 from alembic import op
 
-revision = "0015"
-down_revision = "0014"
+revision = "0016"
+down_revision = "0015"
 branch_labels = None
 depends_on = None
 
