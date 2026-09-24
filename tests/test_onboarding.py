@@ -110,6 +110,48 @@ def test_the_photo_query_excludes_reference_assets():
     assert "'logo'" in sql and "'reference'" in sql and "NOT IN" in sql.upper()
 
 
+async def test_the_agent_is_never_offered_a_reference_creative_as_a_photo():
+    """list_brand_assets told the model that any id it returns may go in
+    reference_asset_id and that those slides are free. A seeded brand has five
+    to ten 'reference' rows, labelled with what they show, so the model picked
+    one -- and _resolve_photos never loads a reference, so the id was dropped
+    and the slide fell through to the image model. The owner was charged a
+    credit for a generated picture on a post where their own photograph
+    existed, and the reference rows ate a third of the 25 this tool returns."""
+    import uuid
+
+    from app.agent import tools
+
+    seen: dict[str, object] = {}
+
+    class _Db:
+        def scalars(self, stmt):
+            seen["sql"] = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            return types.SimpleNamespace(all=lambda: [])
+
+        def get(self, model, key):
+            return None
+
+    @contextmanager
+    def _scope():
+        yield _Db()
+
+    original, tools.session_scope = tools.session_scope, _scope
+    try:
+        ctx = types.SimpleNamespace(brand_id=uuid.uuid4())
+        out = await tools._list_brand_assets(ctx, {})
+    finally:
+        tools.session_scope = original
+
+    assert out["assets"] == []
+    sql = str(seen["sql"])
+    assert "'reference'" not in sql
+    # A whitelist, so a kind nobody has thought of yet is not offered either.
+    assert "IN (" in sql.upper() and "NOT IN" not in sql.upper()
+    for kind in photoref.USABLE_KINDS | {"logo"}:
+        assert f"'{kind}'" in sql
+
+
 # --------------------------------------------------------------------------- #
 # the style pass: strict, or there is no style
 # --------------------------------------------------------------------------- #

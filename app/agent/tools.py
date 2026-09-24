@@ -18,7 +18,7 @@ from sqlalchemy import select
 from app.agent import buttons
 from app.agent.context import ToolContext
 from app.billing import credits
-from app.creative import brandkit, compose, pipeline
+from app.creative import brandkit, compose, photoref, pipeline
 from app.creative.brief import CreativeBrief, Grounding, check_brand_rules, settable_copy
 from app.db import repo
 from app.db.models import (
@@ -1206,9 +1206,21 @@ async def _list_brand_assets(ctx: ToolContext, args: dict) -> dict:
     from app.creative import shotlist
 
     with session_scope() as db:
+        # The same whitelist the picture path itself works from, plus the mark.
+        # A brand seeded at onboarding has five to ten 'reference' rows -- our
+        # own finished creatives, labelled with what they show -- and this tool
+        # tells the model every id here may go in reference_asset_id and that
+        # those slides are free. _resolve_photos then drops the id (it never
+        # loads a reference) and the slide falls through to the image model, so
+        # the owner is charged for a generated picture on a post where their
+        # own photograph existed. Offering one at all was the bug; the rows
+        # also ate a third of the 25 this tool can return.
         rows = db.scalars(
             select(BrandAsset)
-            .where(BrandAsset.brand_id == ctx.brand_id)
+            .where(
+                BrandAsset.brand_id == ctx.brand_id,
+                BrandAsset.kind.in_(tuple(photoref.USABLE_KINDS | {"logo"})),
+            )
             .order_by(BrandAsset.created_at.desc())
             .limit(25)
         ).all()
