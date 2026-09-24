@@ -495,11 +495,24 @@ async def best_free_variant(
             return first
     best = None if must_change else first
     tried: list[str] = []
-    for template in order_for(first.template, codes)[:limit]:
+    # The limit counts variants that actually COMPOSED, not layouts attempted.
+    # A layout that cannot take this slide rendered nothing, so it was not a
+    # rung: counting it as one spent the whole allowance on layouts that must
+    # fail. A picture generated for the full-bleed window fits none of the
+    # three panel layouts, and those are exactly the three this ladder leads
+    # with when the words are on the subject -- so the generated lane reached
+    # the paid retry having built nothing at all, and the owner bought a second
+    # picture that a free layout change would have fixed. Bounded anyway: there
+    # are only ever five other layouts, and none of them is a vendor call.
+    built = 0
+    for template in order_for(first.template, codes):
+        if built >= limit:
+            break
         tried.append(template)
         variant = await render(template)
         if variant is None:
             continue
+        built += 1
         if best is None or (variant.ok, variant.score) > (best.ok, best.score):
             best = variant
         if best.ok and best is not first:

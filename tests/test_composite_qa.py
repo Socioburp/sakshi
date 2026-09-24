@@ -752,9 +752,37 @@ async def test_the_best_scoring_variant_wins_when_none_is_clean():
 
 
 async def test_the_ladder_is_capped():
-    render, asked = _ladder({})
+    """Two rungs, however many layouts exist -- and a rung is a variant that
+    composed, which is what the cap is about: two more frames of Chromium."""
+    render, asked = _ladder({t: _variant(t, 50, ok=False) for t in compose.TEMPLATES})
     await compositeqa.best_free_variant(_variant("centered_overlay", 10, ok=False), render, limit=2)
-    assert len(asked) == 2, "two rungs, however many layouts exist"
+    assert len(asked) == 2
+
+
+async def test_the_cap_counts_variants_that_composed_not_layouts_attempted():
+    """The cap used to count layouts ATTEMPTED, and that made the free repair a
+    no-op on the only lane that can spend. A picture generated for the
+    full-bleed window fits none of the three panel layouts, and those are the
+    three the ladder leads with when the words are on the subject -- so both
+    rungs were spent on renders that must fail, and the slide went on to buy a
+    second picture while two layouts that compose cleanly were never tried."""
+    render, asked = _ladder({"lower_third": _variant("lower_third", 88)})
+    out = await compositeqa.best_free_variant(
+        _variant("centered_overlay", 62, ok=False), render, limit=2
+    )
+    assert asked[:3] == list(compositeqa.WORDS_OFF_PICTURE), "all three refused the picture"
+    assert out.template == "lower_third" and out.ok, "and the fourth took it, for nothing"
+
+
+async def test_a_slide_no_layout_can_take_tries_them_all_and_still_spends_nothing():
+    """The other side of that: when nothing composes, the ladder is bounded by
+    the layouts that exist -- five renders, no vendor call -- and hands back
+    the frame it came in with for the caller to refuse."""
+    render, asked = _ladder({})
+    first = _variant("centered_overlay", 10, ok=False)
+    out = await compositeqa.best_free_variant(first, render, limit=2)
+    assert out is first
+    assert asked == compositeqa.order_for("centered_overlay", {"text_over_subject"})
 
 
 async def test_the_inspector_can_steer_the_ladder_even_when_the_measurements_are_happy():
