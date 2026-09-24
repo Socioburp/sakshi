@@ -301,6 +301,43 @@ def claim_gate(brief: CreativeBrief, brand: Any) -> dict[str, Any] | None:
     }
 
 
+def in_flight_gate(db: Any, brand_id: uuid.UUID, slides: int) -> dict | None:
+    """One creative at a time, per brand. Returns the tool result to hand
+    back, or None when nothing of theirs is being made.
+
+    Checked here, beside claim_gate, rather than in the tool: when the owner
+    nudges -- "it's taking too much time" -- the model's instinct is to call
+    create_creative again, and nothing stopped it. That charged a second
+    credit, bought a second set of pictures nobody asked for, and started a
+    second stream of "still working" notices on top of the first, which is why
+    one slow job read as a bot roaming in circles. The queue's dedupe_key only
+    ever covered webhook retries of the same inbound message.
+
+    Rows older than STUCK_AFTER belong to the reaper, not to this guard: a job
+    whose worker died must never wedge the brand out of making another.
+    """
+    row = repo.in_flight_creative(db, brand_id, datetime.now(UTC) - STUCK_AFTER)
+    if row is None:
+        return None
+    low, high = working_minutes(slides)
+    return {
+        "ok": False,
+        "reason": "already_making_one",
+        "charged": 0,
+        "brief_id": str(row.brief_id),
+        "creative_id": str(row.id),
+        "eta_minutes": [low, high],
+        "hint": (
+            "Their picture is ALREADY being made -- nothing was charged and nothing new "
+            f"was started. It takes {low}-{high} minutes and it will be sent the moment it "
+            "passes our check. Tell them that in ONE short line. Do not offer to try "
+            "again and do not call this tool again for this brand until it has arrived; "
+            "if they want the words or the picture changed, that is revise_creative or "
+            "regenerate_image once it is here."
+        ),
+    }
+
+
 def claim_notes(brief: CreativeBrief, brand: Any) -> list[dict[str, str]]:
     """Advice-level claims to soften next time; never a gate."""
     prefs = getattr(brand, "template_prefs", None) or {}
@@ -544,6 +581,15 @@ async def generate(
         if brand is None:
             return {"ok": False, "reason": "unknown_brand"}
 
+        # Before anything else, including the browser work below: this brand
+        # is allowed one creative in flight. A revision comes through here
+        # too, and is guarded the same -- it charges, generates and starts its
+        # own notice loop exactly as a fresh creative does, so a "make it
+        # again" on top of a running job is the same double spend.
+        busy = in_flight_gate(db, ctx.brand_id, len(units))
+        if busy:
+            return busy
+
         violations = check_brand_rules(brief, brand)
         if violations:
             return {
@@ -610,6 +656,14 @@ async def generate(
     units = brief.units()
 
     with session_scope() as db:
+        # Asked again in the transaction that charges. The gate above runs
+        # before several seconds of layout and photo work, so two requests
+        # that arrived together could both have passed it; here the loser
+        # still walks away before a credit moves.
+        busy = in_flight_gate(db, ctx.brand_id, len(units))
+        if busy:
+            return busy
+
         billable_positions = {
             u.position for u in units if not resolved.get(u.position) and u.position not in reuse
         }

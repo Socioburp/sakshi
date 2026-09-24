@@ -86,7 +86,9 @@ TOOLS: list[dict[str, Any]] = [
             "being promoted -- do not gather every detail first. May return "
             "reason=grid_deviation (nothing charged) when the post would break the look of "
             "their own grid; then ask them, and call again with grid_override or the "
-            "adjusted_brief."
+            "adjusted_brief. May return reason=already_making_one (nothing charged) when "
+            "one of theirs is still being made -- say so in one line; never call this "
+            "again to reassure a waiting owner."
         ),
         "input_schema": {
             "type": "object",

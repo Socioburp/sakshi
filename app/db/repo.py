@@ -330,3 +330,27 @@ def creatives_for_brief(db: Session, brief_id: uuid.UUID) -> list[Creative]:
             .order_by(Creative.slide_position.asc())
         ).all()
     )
+
+
+# The statuses that mean "a worker is making this right now". 'ready' and
+# everything past it are finished; 'failed' and 'expired' are over.
+IN_FLIGHT = ("pending", "generating", "composing")
+
+
+def in_flight_creative(db: Session, brand_id: uuid.UUID, since: datetime) -> Creative | None:
+    """The brand's oldest creative that is still being made, or None.
+
+    `since` excludes rows so old the reaper (pipeline.STUCK_AFTER) already owns
+    them: a job whose worker died must never wedge the brand out of ever
+    making another picture.
+    """
+    return db.scalar(
+        select(Creative)
+        .where(
+            Creative.brand_id == brand_id,
+            Creative.status.in_(IN_FLIGHT),
+            Creative.created_at >= since,
+        )
+        .order_by(Creative.created_at.asc())
+        .limit(1)
+    )
