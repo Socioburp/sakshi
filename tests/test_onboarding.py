@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from sqlalchemy.exc import IntegrityError
 
 from app.creative import brandkit, compose, photoref, refstyle, shotplan
 
@@ -777,10 +778,25 @@ class _FakeDb:
         return types.SimpleNamespace(all=lambda: out)
 
     def add(self, row):
+        if any(getattr(r, "storage_key", None) == row.storage_key for r in self.rows):
+            # What the unique index added in migration 0015 does when another
+            # run of the command stored this file while this one was reading a
+            # folder and running a vision pass over it.
+            raise IntegrityError("uq_brand_assets_onboarding_key", None, Exception())
         self.rows.append(row)
 
     def flush(self):
         pass
+
+    @contextmanager
+    def begin_nested(self):
+        """A savepoint: what the command rolls back to when it loses that race."""
+        before = list(self.rows)
+        try:
+            yield
+        except Exception:
+            self.rows[:] = before
+            raise
 
 
 def _fake_session(brand, rows, memories=None):
@@ -865,6 +881,37 @@ async def test_a_dry_run_writes_nothing_at_all(tmp_path, monkeypatch, capsys):
     assert brand.template_prefs == {}
     # ...but it still shows the kit it would set, which is what a dry run is for.
     assert "frame_card" in out and "DRY RUN" in out
+
+
+async def test_two_staff_running_it_at_once_do_not_store_everything_twice(
+    tmp_path, monkeypatch, capsys
+):
+    """Idempotency was read-then-write with nothing in the database to enforce
+    it: the run reads what is stored, then downloads a folder and runs a vision
+    pass over it, and writes minutes later. Two people onboarding the same brand
+    at once both read an empty set and both insert. The free photo lane would
+    then hold two rows for the same jar, and _resolve_photos de-duplicates by
+    asset id rather than by content -- so one photograph could win two slides of
+    one carousel, which is exactly what it says must not happen."""
+    brand = _Brand(palette={"primary": "#123B2E"})
+    brand.template_prefs = {}
+    rows: list = []
+    monkeypatch.setattr(onboard, "session_scope", _fake_session(brand, rows))
+    monkeypatch.setattr(onboard.r2, "put", lambda key, data, mime=None: f"https://cdn.test/{key}")
+    monkeypatch.setattr(onboard.settings, "anthropic_api_key", "")
+    monkeypatch.setattr(onboard.settings, "anthropic_model", "")
+
+    args = _run_args(tmp_path, dry_run=False)
+    assert await onboard.run(args) == 0
+    assert len(rows) == 2
+
+    # The second run reads an empty set -- it read it before the first one
+    # wrote -- and only finds out at the insert, from the unique index.
+    monkeypatch.setattr(onboard, "stored_keys", lambda db, brand_id: set())
+    assert await onboard.run(args) == 0
+
+    assert len(rows) == 2
+    assert "already stored by another run" in capsys.readouterr().out
 
 
 def test_a_style_anchor_carries_everything_the_next_run_needs_to_count_it():

@@ -211,7 +211,9 @@ hash of its own bytes, so:
   this time.
 
 This means re-running is always safe, and is the normal way to work: add
-photos to the Drive folder, run it again, read the summary.
+photos to the Drive folder, run it again, read the summary. It is safe even if
+two of you run it for the same brand at the same time — the database refuses
+the second copy of a file and the run says `already stored by another run`.
 
 Two things to know:
 

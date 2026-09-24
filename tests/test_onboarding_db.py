@@ -165,6 +165,56 @@ def test_the_second_onboarding_run_stores_nothing_twice(brand, monkeypatch):
         assert f"onboarding/{brand}/photo/{digest}.jpg" in keys
 
 
+def test_the_database_refuses_the_same_onboarding_file_twice(brand):
+    """The command reads what is stored, then spends minutes downloading a folder
+    and running a vision pass over it, and writes after. Two staff onboarding the
+    same brand at once both read an empty set and both insert. Nothing in the
+    schema stopped them, so the free photo lane held two rows for the same jar --
+    and _resolve_photos de-duplicates by asset id, not by content, so the same
+    photograph could win two slides of one carousel."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db.session import session_scope
+
+    key = f"onboarding/{brand}/photo/deadbeef.jpg"
+    with session_scope() as db:
+        _asset(db, brand, "product", "a jar", key)
+
+    with pytest.raises(IntegrityError):
+        with session_scope() as db:
+            _asset(db, brand, "product", "the same jar again", key)
+
+    # Only the onboarding lane. WhatsApp keys carry the message id and are
+    # unique already; making them unique in the schema would turn a re-delivered
+    # message into a crash loop in the queue handler instead of a spare row.
+    chat_key = f"published/2026/01/01/{brand}/{uuid.uuid4()}-product.jpg"
+    with session_scope() as db:
+        _asset(db, brand, "product", "from whatsapp", chat_key)
+        _asset(db, brand, "product", "from whatsapp again", chat_key)
+
+
+def test_a_brief_can_still_collect_more_than_one_memory(brand):
+    """The onboarding uniqueness must not spread to 'brief:<id>'. One brief gets
+    a 'feedback' row when the revision that produced it was made and a
+    'style_anchor' row when the owner approves it -- and votes._remember swallows
+    what it raises, so a blanket index would silently stop recording approvals."""
+    from app.config import settings
+    from app.db.session import session_scope
+    from app.memory import embed
+
+    if not settings.voyage_api_key:
+        pytest.skip("no VOYAGE_API_KEY: a memory written without one is unretrievable")
+
+    ref = f"brief:{uuid.uuid4()}"
+    with session_scope() as db:
+        embed.remember(
+            db, brand_id=brand, kind="feedback", content="Owner asked: warmer", source_ref=ref
+        )
+        embed.remember(
+            db, brand_id=brand, kind="style_anchor", content="Owner approved it", source_ref=ref
+        )
+
+
 def test_a_brand_seeded_with_references_alone_is_still_asked_for_photos(brand):
     """The founder's plan is that our team's reference set goes up first and the
     client's raw photos follow. The photo-day checklist counted everything that

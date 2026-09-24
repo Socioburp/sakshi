@@ -57,6 +57,7 @@ from pathlib import Path
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.creative import brandkit, photo_quality, refstyle
@@ -530,21 +531,40 @@ def memory_ref(item: Item) -> str:
     return f"onboarding:{item.digest[:16]}"
 
 
-def store(db, brand_id: uuid.UUID, item: Item) -> BrandAsset:
+def store(db, brand_id: uuid.UUID, item: Item) -> bool:
+    """Write the asset. False when another run stored this file first.
+
+    The read that decided this file was new happened before a folder was
+    downloaded and a vision pass run over it, which is minutes earlier, so two
+    staff onboarding the same brand at once both see it as new. Migration 0015
+    makes (brand_id, storage_key) unique for onboarding keys, and losing that
+    race is not an error: the file IS stored, by the other run, which is what
+    was wanted. The savepoint is what keeps the rest of the import alive -- a
+    failed insert poisons its transaction, so without one the first collision
+    would take every asset after it down with it.
+
+    R2 is written either way and deliberately so: the key is the content hash,
+    so both runs put identical bytes at an identical key.
+    """
     url = r2.put(item.key, item.data, item.mime)
-    row = BrandAsset(
-        brand_id=brand_id,
-        kind=item.kind,
-        label=item.label,
-        storage_key=item.key,
-        url=url,
-        mime=item.mime,
-        width=item.width,
-        height=item.height,
-    )
-    db.add(row)
-    db.flush()
-    return row
+    try:
+        with db.begin_nested():
+            db.add(
+                BrandAsset(
+                    brand_id=brand_id,
+                    kind=item.kind,
+                    label=item.label,
+                    storage_key=item.key,
+                    url=url,
+                    mime=item.mime,
+                    width=item.width,
+                    height=item.height,
+                )
+            )
+            db.flush()
+    except IntegrityError:
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -651,9 +671,11 @@ async def run(args: argparse.Namespace) -> int:
     # memories are written after, in another: embedding talks to Voyage, and a
     # Voyage outage inside the same transaction would roll back the whole
     # import and leave the brand with nothing after a twenty-minute upload.
+    raced = 0
     with session_scope() as db:
         for item in products.stored + fresh_references:
-            store(db, brand_id, item)
+            if not store(db, brand_id, item):
+                raced += 1
         if kit is not None:
             decided = brandkit.seed_from_references(db.get(Brand, brand_id), kit)
 
@@ -666,14 +688,22 @@ async def run(args: argparse.Namespace) -> int:
                     if memory_ref(item) in known_refs:
                         skipped_memories += 1
                         continue
-                    embed.remember(
-                        db,
-                        brand_id=brand_id,
-                        kind="style_anchor",
-                        content=ref.as_prose(brand_name),
-                        meta={**ref.as_meta(), "file": item.name},
-                        source_ref=memory_ref(item),
-                    )
+                    try:
+                        # Same race as the assets, same answer: the anchor is
+                        # written, by the other run. A savepoint, so one
+                        # collision does not roll back the anchors before it.
+                        with db.begin_nested():
+                            embed.remember(
+                                db,
+                                brand_id=brand_id,
+                                kind="style_anchor",
+                                content=ref.as_prose(brand_name),
+                                meta={**ref.as_meta(), "file": item.name},
+                                source_ref=memory_ref(item),
+                            )
+                    except IntegrityError:
+                        skipped_memories += 1
+                        continue
                     written += 1
         except Exception as exc:  # noqa: BLE001 - the import stands; say what is missing
             written = 0
@@ -681,6 +711,11 @@ async def run(args: argparse.Namespace) -> int:
 
     _line("Written")
     print(f"  {len(products.stored)} product photo(s), {len(fresh_references)} reference(s)")
+    if raced:
+        print(
+            f"  {raced} of those were already stored by another run of this command "
+            "finishing at the same time; nothing is duplicated"
+        )
     if memory_failed:
         print(f"  0 style anchor(s): {memory_failed}. Re-run to write them; nothing duplicates.")
     elif settings.voyage_api_key:
