@@ -1257,24 +1257,32 @@ async def test_the_looks_at_a_carousel_happen_at_the_same_time(world, monkeypatc
     """One vision call per delivered slide, ~2-5s each. Slides are already
     built concurrently, so a six-slide carousel waits for one of them rather
     than six -- but only if the call is made inside the per-slide work, which
-    is what this pins."""
+    is what this pins.
+
+    The check is a meeting, not a stopwatch. An earlier version gave the fake
+    inspector a short sleep and asserted that two calls overlapped, which is a
+    race the machine decides: the compositor renders under one global lock, so
+    a slide's look is finished long before the next slide's render is, and on
+    a slower runner no two ever overlapped. Here every slide but the last
+    WAITS for the others, so the three can only meet if they are genuinely in
+    flight together. A sequential pass after the renders leaves the first call
+    waiting alone and the timeout fails the test instead of hanging it."""
     import asyncio
 
-    state = {"in_flight": 0, "peak": 0}
+    slides = len(EXAMPLE_CAROUSEL["slides"])
+    arrived, everyone = [], asyncio.Event()
 
-    async def slow(image, **copy):
-        state["in_flight"] += 1
-        state["peak"] = max(state["peak"], state["in_flight"])
-        try:
-            await asyncio.sleep(0.05)
-            return bggate.Verdict([], "", cost_micros=4_500, score=90)
-        finally:
-            state["in_flight"] -= 1
+    async def meet(image, **copy):
+        arrived.append(1)
+        if len(arrived) == slides:
+            everyone.set()
+        await asyncio.wait_for(everyone.wait(), timeout=30)
+        return bggate.Verdict([], "", cost_micros=4_500, score=90)
 
-    monkeypatch.setattr(finalgate, "inspect", slow)
+    monkeypatch.setattr(finalgate, "inspect", meet)
     res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
     assert res["ok"] and res["slides_ok"] == 3
-    assert state["peak"] > 1, "the slides were inspected together, not one after another"
+    assert len(arrived) == slides, "every delivered slide is looked at"
 
 
 def test_one_look_per_slide_is_what_the_settings_are_priced_for():
