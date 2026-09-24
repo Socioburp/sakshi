@@ -1,10 +1,11 @@
 """The onboarding kit against a real database. Skips where there is none.
 
-Two things live in SQL and nowhere else, so they cannot be pinned by the unit
+Some of this lives in SQL and nowhere else, so it cannot be pinned by the unit
 tests in test_onboarding.py: the brand_assets kind CHECK has to accept
-'reference' (migration 0015), and _resolve_photos has to leave a reference
-creative out of the candidates it even loads. Both are the difference between
-a client's first post and a client's first post with two headlines on it.
+'reference' (migration 0015), _resolve_photos has to leave a reference creative
+out of the candidates it even loads, and the photo-day checklist has to count
+photographs rather than rows. The first two are the difference between a
+client's first post and a client's first post with two headlines on it.
 """
 
 from __future__ import annotations
@@ -162,6 +163,29 @@ def test_the_second_onboarding_run_stores_nothing_twice(brand, monkeypatch):
         keys = set(db.scalars(select(BrandAsset.storage_key).where(BrandAsset.brand_id == brand)))
         digest = hashlib.sha256(files[0].data).hexdigest()[:32]
         assert f"onboarding/{brand}/photo/{digest}.jpg" in keys
+
+
+def test_a_brand_seeded_with_references_alone_is_still_asked_for_photos(brand):
+    """The founder's plan is that our team's reference set goes up first and the
+    client's raw photos follow. The photo-day checklist counted everything that
+    was not the logo, so eight 'reference' rows read as eight photos: the one
+    mechanism that would have asked the owner for real ones switched itself off,
+    the free photo lane could never fire, and every creative was billed."""
+    from app.db.session import session_scope
+    from app.queue.handlers import usable_photo_count
+
+    with session_scope() as db:
+        for i in range(8):
+            _asset(db, brand, "reference", f"a post {i}", f"onboarding/{brand}/reference/r{i}.jpg")
+        assert usable_photo_count(db, brand) == 0
+
+        _asset(db, brand, "logo", "Logo", f"onboarding/{brand}/photo/logo.jpg")
+        assert usable_photo_count(db, brand) == 0
+
+        # Two real photographs, and the checklist is still owed: the bar is three.
+        _asset(db, brand, "product", "a jar", f"onboarding/{brand}/photo/p1.jpg")
+        _asset(db, brand, "shop", "the shopfront", f"onboarding/{brand}/photo/p2.jpg")
+        assert usable_photo_count(db, brand) == 2
 
 
 def test_a_style_anchor_is_written_once_per_reference(brand):

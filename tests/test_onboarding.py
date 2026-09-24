@@ -152,6 +152,29 @@ async def test_the_agent_is_never_offered_a_reference_creative_as_a_photo():
         assert f"'{kind}'" in sql
 
 
+def test_the_photo_day_checklist_does_not_count_our_own_creatives_as_photos():
+    """Staff upload the reference set first and the client's raw photos follow.
+    Counting everything that is not the logo made eight 'reference' rows read as
+    eight photos, so the checklist that asks the owner for real ones was never
+    sent -- and the free lane it feeds could never fire."""
+    import uuid
+
+    from app.queue.handlers import usable_photo_count
+
+    seen: dict[str, object] = {}
+
+    class _Db:
+        def scalar(self, stmt):
+            seen["sql"] = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            return None
+
+    assert usable_photo_count(_Db(), uuid.uuid4()) == 0
+    sql = str(seen["sql"])
+    assert "'reference'" not in sql and "'logo'" not in sql
+    for kind in photoref.USABLE_KINDS:
+        assert f"'{kind}'" in sql
+
+
 # --------------------------------------------------------------------------- #
 # the style pass: strict, or there is no style
 # --------------------------------------------------------------------------- #
