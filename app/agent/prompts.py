@@ -294,12 +294,18 @@ def missing_setup(brand: Any) -> list[str]:
     An owner who says they have no logo is a finished answer, not a gap: the
     creatives carry the brand name as a wordmark instead. Before this flag the
     bot asked for the logo on every single turn, forever.
+
+    An owner who says nothing is not a gap either, after the first time. A mark
+    on the post is worth having and the moment to ask is when it is missing --
+    once. `logo_asked` is stamped by the agent in the turn it asks, so silence
+    does not turn one useful question into a weekly one.
     """
     gaps = []
     if not getattr(brand, "category", None):
         gaps.append("industry")
     prefs = getattr(brand, "template_prefs", None) or {}
-    if not getattr(brand, "logo_url", None) and not prefs.get("no_logo"):
+    answered = prefs.get("no_logo") or prefs.get("logo_asked")
+    if not getattr(brand, "logo_url", None) and not answered:
         gaps.append("logo")
     return gaps
 
@@ -314,10 +320,21 @@ def _setup_block(brand: Any) -> str:
             "Ask what kind of business they run. One line, nothing else. The moment they "
             "answer, call update_brand(category=...) in the same turn -- do not just reply."
         ),
+        # Asking is worth one line and never two. Their mark belongs on the
+        # post, and without it every creative carries their name as type --
+        # which is a decent second best, not the thing they would choose. So
+        # ask at the end of a turn that is going well, in their own language,
+        # and record the asking: an owner who simply did not answer must not be
+        # asked again next week, and an owner being told a creative failed must
+        # not have a request for homework bolted onto the apology.
         "logo": (
-            "Ask them to send their logo as an image. One line, nothing else. If they say "
-            "they have no logo, call update_brand(no_logo=true) and never ask again; their "
-            "brand name will be set as a wordmark on every creative."
+            "Ask them to send their logo as an image: ONE short line in their language, at "
+            "the very end of your reply, nothing else. Then call update_brand(logo_asked=true) "
+            "in the same turn, so they are never asked a second time. If this turn is telling "
+            "them something went wrong or that something could not be made, leave the ask out "
+            "and do not record it -- a better turn will come. If they say they have no logo, "
+            "call update_brand(no_logo=true); their brand name is then set as a wordmark on "
+            "every creative, which is a finished answer, not a gap."
         ),
     }[nxt]
     return (

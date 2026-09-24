@@ -303,6 +303,13 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "description": "True when the owner says they have no logo; stops the ask.",
                 },
+                "logo_asked": {
+                    "type": "boolean",
+                    "description": (
+                        "True in the turn you actually asked them for their logo. They are "
+                        "asked once; this is what makes it once."
+                    ),
+                },
                 "daily_nudge": {
                     "type": "boolean",
                     "description": (
@@ -794,6 +801,7 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
         "always_say",
         "palette",
         "no_logo",
+        "logo_asked",
         "daily_nudge",
         "substantiated",
         "locality",
@@ -822,7 +830,7 @@ async def _update_brand(ctx: ToolContext, args: dict) -> dict:
                             "save it without the emoji or symbol and call the tool again."
                         ),
                     }
-            if key in ("no_logo", "daily_nudge"):
+            if key in ("no_logo", "logo_asked", "daily_nudge"):
                 brand.template_prefs = {**(brand.template_prefs or {}), key: bool(value)}
             elif key == "substantiated":
                 have = list((brand.template_prefs or {}).get("substantiated") or [])

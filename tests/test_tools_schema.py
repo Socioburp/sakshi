@@ -50,6 +50,15 @@ def test_revise_is_advertised_as_free():
     assert "FREE" in revise["description"]
 
 
+def test_the_agent_can_record_that_it_asked_for_the_logo():
+    """The ask is one line, once. Without a way to write down that it happened
+    it is one line every turn, which is how the bot nagged before."""
+    update = next(t for t in TOOLS if t["name"] == "update_brand")
+    props = update["input_schema"]["properties"]
+    assert props["logo_asked"]["type"] == "boolean"
+    assert props["no_logo"]["type"] == "boolean"
+
+
 def test_carousel_is_reachable_from_the_tool_surface():
     create = next(t for t in TOOLS if t["name"] == "create_creative")
     fmt = create["input_schema"]["properties"]["brief"]["properties"]["format"]

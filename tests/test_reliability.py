@@ -108,6 +108,46 @@ def test_no_logo_is_an_answer_not_a_gap():
     assert missing_setup(brand) == []
 
 
+def test_the_logo_is_asked_for_once_not_on_every_turn():
+    """A mark on the post is worth having, so the bot asks for it when there is
+    none -- and that is all. An owner who simply did not answer used to be
+    asked again on every turn for ever, because only 'I have no logo' closed
+    the gap. Silence is an answer too, once it has been recorded."""
+    from app.agent.prompts import _setup_block, missing_setup
+
+    brand = SimpleNamespace(category="sweets", logo_url=None, template_prefs={})
+    block = _setup_block(brand)
+    assert "update_brand(logo_asked=true)" in block, "the ask records itself"
+    assert "ONE short line in their language" in block, "not a lecture"
+    assert "something went wrong" in block, "and not bolted onto a refusal"
+
+    brand.template_prefs = {"logo_asked": True}
+    assert missing_setup(brand) == [] and _setup_block(brand) == ""
+
+
+async def test_recording_the_logo_ask_survives_as_a_brand_preference(monkeypatch):
+    """The flag is only worth anything if it is still there next turn, so it
+    goes where no_logo goes: template_prefs, through the tool the agent has."""
+    import types
+    from contextlib import contextmanager
+
+    from app.agent import tools as T
+    from app.agent.prompts import missing_setup
+
+    brand = types.SimpleNamespace(
+        name="Sri", category="food", logo_url=None, template_prefs={}, palette={}
+    )
+
+    @contextmanager
+    def scope():
+        yield types.SimpleNamespace(get=lambda model, key: brand)
+
+    monkeypatch.setattr(T, "session_scope", scope)
+    res = await T._update_brand(types.SimpleNamespace(brand_id="b"), {"logo_asked": True})
+    assert res["ok"] and brand.template_prefs["logo_asked"] is True
+    assert missing_setup(brand) == []
+
+
 # --------------------------------------------------------------------------- #
 # memory
 # --------------------------------------------------------------------------- #
