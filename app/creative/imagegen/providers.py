@@ -563,6 +563,14 @@ class ReplicateProvider(HttpImageProvider):
     POLL_TIMEOUT_S = 120.0
     TERMINAL = ("succeeded", "failed", "canceled")
 
+    @staticmethod
+    def delivered_ratio(width: int, height: int) -> float:
+        """The shape this vendor will actually render for an ask, which is
+        never the ask itself: one of eleven presets. The pipeline measures it
+        against the window before it spends anything, because no reroll can
+        move it -- the ratio is a function of the ask, not of the seed."""
+        return REPLICATE_RATIOS[nearest_ratio(width, height)]
+
     def __init__(self) -> None:
         self.model = settings.imagegen_replicate_model or "black-forest-labs/flux-schnell"
         self.cost_micros_per_image = _cost_for(self.name)

@@ -1580,6 +1580,43 @@ def _size_fault(provider, got: tuple[int, int], asked: tuple[int, int], floor) -
     return ""
 
 
+def _ratio_crop(ratio: float, window: tuple[int, int]) -> float:
+    """Pixels of `window` lost by any frame of `ratio` that covers it, at any
+    size. The shape alone decides this, so it can be measured before a vendor
+    is asked for anything."""
+    bw, bh = window
+    return bh * ratio - bw if ratio > bw / bh else bw / ratio - bh
+
+
+def _shape_the_vendor_cannot_make(provider, asked: tuple[int, int], window) -> str:
+    """Why this vendor can never render a picture for `window`, or ''.
+
+    A vendor that renders one of a fixed list of aspect ratios (replicate
+    picks the nearest of eleven) cannot be rerolled into a shape that is not
+    on the list: every attempt is the same call at the same settings, only the
+    seed moves, and a seed does not move the frame. Since the picture is now
+    generated for the WINDOW the layout shows, the windowed templates ask for
+    shapes no preset comes near -- split_card's 1080x842 is 1.282 and the
+    nearest preset is 5:4, which cuts 22px off the window. Left to the gate
+    that is IMAGEGEN_GATE_ATTEMPTS calls, all six charged at the vendor, all
+    six refused as wrong_size, on every slide of every job. It is the vendor's
+    limitation and it is knowable at the door, so it is named at the door and
+    nothing is asked of them.
+    """
+    delivered = getattr(provider, "delivered_ratio", None)
+    if delivered is None:
+        return ""
+    ratio = delivered(*asked)
+    lost = _ratio_crop(ratio, window)
+    if lost <= compose.GENERATED_CROP_TOLERANCE:
+        return ""
+    return (
+        f"{provider.name} renders {ratio:.4f}:1 for a {asked[0]}x{asked[1]} ask, and no "
+        f"picture of that shape covers this layout's {window[0]}x{window[1]} window "
+        f"({lost:.1f}px of it would be cut)"
+    )
+
+
 class BackgroundRejected(RuntimeError):
     """No acceptable picture in the allowed attempts. The slide fails; nothing
     that was rejected is ever delivered."""
@@ -1620,6 +1657,10 @@ async def _generate_checked(
     attempts = max(1, int(settings.imagegen_gate_attempts))
     budget = int(settings.imagegen_gate_budget_micros or 0)
     gw, gh = size
+    cannot = _shape_the_vendor_cannot_make(provider, (gw, gh), floor or (gw, gh))
+    if cannot:
+        log.error("imagegen_shape_unreachable", provider=provider.name, detail=cannot)
+        raise BackgroundRejected(cannot, cost_micros=0)
     sem = (register or {}).get("sem") or asyncio.Semaphore(1)
     # The mock draws a gradient for tests and local development; there is no
     # model output to inspect. Every real vendor is inspected, no exceptions.

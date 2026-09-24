@@ -976,6 +976,65 @@ def test_the_size_gate_refuses_exactly_what_the_compositor_refuses():
         compose.fit_background(_photo(*got, (10, 10, 60, 60)), *window, generated=True)
 
 
+def test_a_vendor_whose_shape_cannot_cover_the_window_is_refused_before_it_is_paid():
+    """replicate renders one of eleven fixed aspect ratios. Since the picture
+    is generated for the WINDOW the layout shows, the windowed templates ask
+    for shapes no preset comes near -- split_card's 1080x842 is 1.282 and the
+    nearest preset, 5:4, cuts 22px off the window. Every attempt is the same
+    call at the same settings, so all IMAGEGEN_GATE_ATTEMPTS were charged at
+    the vendor and all were refused as wrong_size, on every slide of every
+    job. The ratio is a function of the ask, not of the seed, so it is
+    measured at the door and nothing is asked of the vendor."""
+    from app.creative import pipeline
+    from app.creative.imagegen.providers import ReplicateProvider
+
+    rep = types.SimpleNamespace(name="replicate", delivered_ratio=ReplicateProvider.delivered_ratio)
+    # The windowed templates: refused by name, before the first call.
+    for asked, window in (
+        ((1600, 1248), (1080, 842)),  # split_card post
+        ((1536, 1344), (1080, 945)),  # top_band post
+        ((1248, 912), (892, 652)),  # frame_card post
+        ((1664, 1824), (1080, 1184)),  # split_card story
+    ):
+        why = pipeline._shape_the_vendor_cannot_make(rep, asked, window)
+        assert "replicate" in why and "would be cut" in why, (asked, window)
+    # A full-bleed post and story are 4:5 and 9:16 exactly: still served.
+    assert pipeline._shape_the_vendor_cannot_make(rep, (1600, 2000), (1080, 1350)) == ""
+    assert pipeline._shape_the_vendor_cannot_make(rep, (1440, 2560), (1080, 1920)) == ""
+    # A vendor that renders what it is asked declares nothing and is not gated.
+    plain = types.SimpleNamespace(name="x")
+    assert pipeline._shape_the_vendor_cannot_make(plain, (9, 16), (3, 4)) == ""
+
+
+async def test_a_vendor_that_cannot_make_the_shape_costs_nothing_and_fails_only_its_slide(
+    monkeypatch,
+):
+    from app.creative import pipeline
+    from tests import test_pipeline_flow as flow
+
+    world = await flow.build_world(monkeypatch)
+    try:
+        flow._clean(monkeypatch)
+        real = world["provider"]
+
+        class Fixed:
+            """A vendor that can only render 5:4, like replicate's presets."""
+
+            name = "fixed"
+            exact_size = False
+            requests = real.requests
+            delivered_ratio = staticmethod(lambda w, h: 1.25)
+            generate = real.generate
+
+        monkeypatch.setattr(pipeline, "get_provider", lambda: Fixed())
+        res = await pipeline.generate(world["ctx"], _brief("split_card"))
+        assert res["ok"] is False and res["reason"] == "generation_failed", res
+        assert "fixed renders" in res["errors"][0], res
+        assert real.requests == [], "nothing was asked of the vendor"
+    finally:
+        await compose.shutdown()
+
+
 async def test_a_vendor_that_picks_its_own_size_is_rejected_until_it_covers_the_window(monkeypatch):
     from app.creative import pipeline
     from tests import test_pipeline_flow as flow
