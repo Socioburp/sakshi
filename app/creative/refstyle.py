@@ -93,6 +93,24 @@ PROMPT = (
     "Every key is required. Use exactly the given values, lower case, no other words."
 )
 
+# The other question the vision model is asked about an onboarding file, and the
+# cheaper one: has anything been composited ONTO this image? It is how the
+# command catches the two folder arguments the wrong way round. The carve-out
+# for printed packaging is the whole difficulty of the question -- a jar with
+# its own label on it is a photograph of a jar, and a guard that called that a
+# finished post would refuse the most ordinary product photo there is.
+FINISHED_PROMPT = (
+    "Look at this image and decide ONE thing: has any graphic design been laid ON TOP of "
+    "it?\n"
+    'Answer with JSON only: {"finished": true|false, "why": "<up to 8 words>"}\n'
+    "true  -- a finished social media post: a headline, a caption, a price, a sticker or a "
+    "brand logo composited over or beside the picture.\n"
+    "false -- a plain photograph of a thing, a place or people, with nothing added.\n"
+    "Words printed on the product itself -- a label on a jar, a name on a box, a sign above "
+    "a shop -- are part of the photograph and DO NOT make it true. Judge only what was added "
+    "afterwards, in a design tool."
+)
+
 ATTEMPTS = 2
 LONG_EDGE = 1024
 
@@ -225,6 +243,26 @@ def _checked(data: dict[str, Any], summary: str) -> Reference:
     )
 
 
+def parse_finished(text: str) -> tuple[bool, str]:
+    """Yes or no, and why. Anything else is no answer at all.
+
+    Strict for the same reason `parse` is: "probably not a post" is the answer
+    that files our own design team's work as a photograph of a product.
+    """
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        raise ReferenceUnreadable(f"no JSON in the lettering check's answer: {text[:120]!r}")
+    try:
+        data: dict[str, Any] = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise ReferenceUnreadable(f"unparseable lettering check: {text[:120]!r}") from exc
+    verdict = data.get("finished")
+    if not isinstance(verdict, bool):
+        raise ReferenceUnreadable(f"finished={verdict!r} is not true or false")
+    why = data.get("why")
+    return verdict, " ".join(str(why).split())[:60] if isinstance(why, str) else ""
+
+
 def _thumbnail(image: bytes) -> bytes:
     """A copy for the model only. The file itself is stored untouched."""
     from io import BytesIO
@@ -239,13 +277,13 @@ def _thumbnail(image: bytes) -> bytes:
         return out.getvalue()
 
 
-async def _ask(image: bytes) -> str:
+async def _ask(image: bytes, prompt: str = PROMPT, max_tokens: int = 500) -> str:
     from anthropic import AsyncAnthropic
 
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
     resp = await client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=500,
+        max_tokens=max_tokens,
         messages=[
             {
                 "role": "user",
@@ -258,7 +296,7 @@ async def _ask(image: bytes) -> str:
                             "data": base64.b64encode(image).decode(),
                         },
                     },
-                    {"type": "text", "text": PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }
         ],
@@ -283,6 +321,29 @@ async def describe(image: bytes) -> Reference:
             log.warning("refstyle_retry", attempt=attempt, error=repr(exc)[:200])
             await asyncio.sleep(1.5 * attempt)
     raise ReferenceUnreadable(f"style pass failed {ATTEMPTS} times: {last!r}"[:300])
+
+
+async def looks_finished(image: bytes) -> tuple[bool, str] | None:
+    """Has design been laid on top of this image? With the model's own reason.
+
+    `None` means nobody could tell -- no model is configured, or it would not
+    answer in two tries. That is deliberately not a refusal. This pass is not a
+    guarantee, it is a check on which folder a human typed: the guarantee that
+    a reference creative is never composited over lives in the kind whitelist
+    (photoref.USABLE_KINDS) and holds whether or not this ever runs. Refusing
+    an onboarding because a vision call timed out would cost a paying client
+    their first day for nothing.
+    """
+    if not available():
+        return None
+    small = await asyncio.to_thread(_thumbnail, image)
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return parse_finished(await _ask(small, FINISHED_PROMPT, max_tokens=100))
+        except Exception as exc:  # noqa: BLE001 - API error or unusable answer: ask again
+            log.warning("refstyle_lettering_retry", attempt=attempt, error=repr(exc)[:200])
+            await asyncio.sleep(1.5 * attempt)
+    return None
 
 
 # --------------------------------------------------------------------------- #

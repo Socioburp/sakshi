@@ -175,6 +175,28 @@ still onboarding the client.
 A refused photo is not stored at all, so once the client sends a better one
 you simply put it in the folder and re-run.
 
+### "this is a finished post, not a photograph"
+
+The command also looks at *what each file is*, not just which folder you typed
+it into, because the two paths sit next to each other on one line and swapping
+them is easy:
+
+| It says | What happened |
+|---|---|
+| `this is a finished post, not a photograph ... it belongs in --refs` | One of our own creatives was in the `--products` folder |
+| `this is a plain photograph, not one of our creatives ... belongs in --products` | A raw client photo was in the `--refs` folder |
+
+Move that file to the other folder and re-run. This matters more than it
+sounds: a finished post filed as a product photo is a picture the system will
+build a new post *on top of*, so the client's first creative would go out with
+two headlines and two logos on it.
+
+The check needs a vision model. Without one the run says `the two folders were
+not checked against each other` and imports everything as it stands — so on a
+machine with no model configured, read the file names in the summary yourself.
+A file the model could not judge is kept, not refused, and named in the summary
+for you to look at.
+
 ---
 
 ## Adding more later

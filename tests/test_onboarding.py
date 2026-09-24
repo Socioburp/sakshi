@@ -15,6 +15,7 @@ model the client gets a creative with two headlines on it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import io
 import json
@@ -171,6 +172,38 @@ async def test_the_style_pass_refuses_rather_than_guesses_with_no_model(monkeypa
     monkeypatch.setattr(refstyle.settings, "anthropic_model", "")
     with pytest.raises(refstyle.ReferenceUnreadable):
         await refstyle.describe(_image())
+
+
+# --------------------------------------------------------------------------- #
+# which folder a file actually belongs in
+# --------------------------------------------------------------------------- #
+def test_the_lettering_check_is_yes_or_no_and_never_a_shrug():
+    """A hedged answer -- probably not a post -- is the one that files our own
+    design team's work as a photograph of a product and composites over it."""
+    assert refstyle.parse_finished('{"finished": true, "why": "headline on a band"}') == (
+        True,
+        "headline on a band",
+    )
+    assert refstyle.parse_finished('{"finished": false}') == (False, "")
+    for bad in ('{"finished": "yes"}', '{"finished": 1}', "{}", "I think so", "{finished:true}"):
+        with pytest.raises(refstyle.ReferenceUnreadable):
+            refstyle.parse_finished(bad)
+
+
+def test_printed_packaging_is_not_design_laid_on_top():
+    """A jar with its own label is the most ordinary product photo there is. A
+    check that refused it would refuse the folder it exists to protect."""
+    assert "DO NOT make it true" in refstyle.FINISHED_PROMPT
+    for phrase in ("label on a jar", "name on a box", "sign above"):
+        assert phrase in refstyle.FINISHED_PROMPT
+
+
+async def test_with_no_model_nothing_is_refused_for_being_in_the_wrong_folder(monkeypatch):
+    """The guarantee is the kind whitelist, which holds either way. This pass is
+    a check on a typo, and one that refused a valid onboarding is the worse bug."""
+    monkeypatch.setattr(refstyle.settings, "anthropic_api_key", "")
+    monkeypatch.setattr(refstyle.settings, "anthropic_model", "")
+    assert await refstyle.looks_finished(_image()) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -477,6 +510,91 @@ async def test_a_reference_the_style_pass_cannot_read_is_refused_and_not_stored(
     assert refused.rejected[0].name == "post1.jpg"
 
 
+def _screened(monkeypatch, *answers: tuple[object, tuple[bool, str] | None]):
+    """Stand in for the vision pass, keyed on each item's own bytes, so what the
+    test asserts cannot depend on the order the folder happened to list files in."""
+    table = {hashlib.sha256(item.data).hexdigest(): answer for item, answer in answers}
+
+    async def _looks(data: bytes):
+        return table[hashlib.sha256(data).hexdigest()]
+
+    monkeypatch.setattr(onboard.refstyle, "available", lambda: True)
+    monkeypatch.setattr(onboard.refstyle, "looks_finished", _looks)
+
+
+async def test_a_finished_creative_passed_as_a_product_photo_is_refused(tmp_path, monkeypatch):
+    """`--refs ./products --products ./references` is two paths on one command
+    line. Nothing downstream catches it: a 1080x1350 post passes the quality bar
+    easily and the photo vision pass has no field for "this already has a
+    headline on it", so it lands as kind 'product' -- which photoref accepts and
+    the compositor builds on. The client's first creative then carries two
+    headlines and two logos."""
+    post, photo = _image(), _image(colour=(90, 130, 150))
+    products = onboard.plan_products(
+        [onboard.SourceFile("anaya_diwali_post.jpg", post), onboard.SourceFile("jar.jpg", photo)],
+        brand_id=BRAND,
+        known_keys=set(),
+    )
+    # It gets that far on its own merits: the quality pass has no objection.
+    assert [i.name for i in products.stored] == ["anaya_diwali_post.jpg", "jar.jpg"]
+
+    _screened(
+        monkeypatch,
+        (products.stored[0], (True, "headline on a white band")),
+        (products.stored[1], (False, "plain photo of a jar")),
+    )
+    assert await onboard.screen_folders(products, onboard.Plan()) == []
+    assert [i.name for i in products.stored] == ["jar.jpg"]
+    refusal = products.rejected[0]
+    assert refusal.name == "anaya_diwali_post.jpg"
+    assert "finished post" in refusal.reason and "--refs" in refusal.reason
+    # And the words a person needs to fix it in one move.
+    assert "wrong way round" in refusal.reason
+
+
+async def test_a_raw_product_photo_passed_as_a_reference_is_refused(tmp_path, monkeypatch):
+    """The other half of the same typo, and the quieter one: the photo is scored
+    into a nonsense brand kit and filed as kind 'reference', which locks it out
+    of the free photo lane for good."""
+    photo = _image()
+    refs = onboard.plan_references(
+        [onboard.SourceFile("jar.jpg", photo)],
+        brand_id=BRAND,
+        known_keys=set(),
+        known_refs=set(),
+    )
+    assert len(refs.stored) == 1
+
+    _screened(monkeypatch, (refs.stored[0], (False, "plain photo of a jar")))
+    assert await onboard.screen_folders(onboard.Plan(), refs) == []
+    assert refs.stored == []
+    assert "--products" in refs.rejected[0].reason
+
+
+async def test_a_file_nobody_could_judge_is_kept_and_named_rather_than_refused(
+    tmp_path, monkeypatch
+):
+    """A vision call that times out must not cost a paying client their first day."""
+    photo = _image()
+    products = onboard.plan_products(
+        [onboard.SourceFile("jar.jpg", photo)], brand_id=BRAND, known_keys=set()
+    )
+    _screened(monkeypatch, (products.stored[0], None))
+    notes = await onboard.screen_folders(products, onboard.Plan())
+    assert [i.name for i in products.stored] == ["jar.jpg"] and products.rejected == []
+    assert notes and "jar.jpg" in notes[0] and "look at them" in notes[0]
+
+
+async def test_with_no_model_the_folders_are_not_checked_and_nothing_is_refused(monkeypatch):
+    monkeypatch.setattr(onboard.refstyle, "available", lambda: False)
+    products = onboard.plan_products(
+        [onboard.SourceFile("jar.jpg", _image())], brand_id=BRAND, known_keys=set()
+    )
+    notes = await onboard.screen_folders(products, onboard.Plan())
+    assert len(products.stored) == 1 and products.rejected == []
+    assert notes and "were not checked" in notes[0]
+
+
 def test_a_reference_already_on_file_is_read_again_until_it_has_a_style_anchor(tmp_path):
     """A first run on a machine with no vision model must not lock the brand kit
     out: the file is on file, the style anchor is not, so the next run reads it."""
@@ -612,6 +730,20 @@ async def _describe_photo(data, mime):
     return {"kind": "product", "label": "cold pressed coconut oil 500ml", "cut_out_ok": True}
 
 
+def _folders_the_right_way_round(monkeypatch, refs_dir):
+    """Answer the folder check truthfully: everything in `refs_dir` is a finished
+    post, everything else is a photograph. These tests are about what happens
+    after that, and the folder check is pinned on its own above."""
+    finished = {hashlib.sha256(p.read_bytes()).hexdigest() for p in Path(refs_dir).iterdir()}
+
+    async def _looks(data: bytes):
+        if hashlib.sha256(data).hexdigest() in finished:
+            return True, "words laid on a band"
+        return False, "a plain photograph"
+
+    monkeypatch.setattr(onboard.refstyle, "looks_finished", _looks)
+
+
 def _run_args(tmp_path, dry_run):
     products = _folder(tmp_path / "p", {"coconut_oil-500ml.jpg": _image()})
     refs = _folder(tmp_path / "r", {"post1.jpg": _image(colour=(90, 120, 100))})
@@ -660,7 +792,9 @@ async def test_a_dry_run_writes_nothing_at_all(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(onboard.logo_analysis, "describe_photo", _describe_photo)
     monkeypatch.setattr(onboard.r2, "put", _no)
 
-    code = await onboard.run(_run_args(tmp_path, dry_run=True))
+    args = _run_args(tmp_path, dry_run=True)
+    _folders_the_right_way_round(monkeypatch, args.refs)
+    code = await onboard.run(args)
     out = capsys.readouterr().out
     assert code == 0 and rows == []
     assert brand.template_prefs == {}
@@ -733,12 +867,14 @@ async def test_a_re_run_decides_the_kit_from_the_whole_set_not_from_the_new_file
     _folder(refs, {f"old{i}.jpg": _image(colour=(200 - i * 10, 180, 160)) for i in range(3)})
     args = argparse.Namespace(brand=BRAND, refs=str(refs), products=None, dry_run=False)
     queued[:] = ["frame_card"] * 3
+    _folders_the_right_way_round(monkeypatch, refs)
     assert await onboard.run(args) == 0
     assert brand.template_prefs["family"][0] == "frame_card"
 
     # The designers add two more posts to the same folder, in another family.
     _folder(refs, {f"new{i}.jpg": _image(colour=(100 + i * 10, 120, 140)) for i in range(2)})
     queued[:] = ["top_band"] * 2
+    _folders_the_right_way_round(monkeypatch, refs)
     assert await onboard.run(args) == 0
     out = capsys.readouterr().out
 

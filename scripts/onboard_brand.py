@@ -36,8 +36,9 @@ files: every file is identified by the hash of its own bytes, so a second run
 stores only what is new and says what it skipped.
 
 Exit codes: 0 everything landed; 1 the run finished but something was refused
-or could not be written (a photo too small or too soft, a reference the style
-pass could not read, memories Voyage would not embed); 2 nothing was imported
+or could not be written (a photo too small or too soft, a file that belongs in
+the other folder, a reference the style pass could not read, memories Voyage
+would not embed); 2 nothing was imported
 (bad folder, missing key, unknown brand) -- so a half-import never passes for
 a success in a shell script or a checklist.
 """
@@ -372,6 +373,85 @@ async def label_photos(items: list[Item]) -> list[str]:
     return notes
 
 
+async def screen_folders(products: Plan, references: Plan) -> list[str]:
+    """Catch the two folder arguments the wrong way round, before anything is stored.
+
+        --refs ./anaya/products --products ./anaya/references
+
+    is two paths on one command line and nothing downstream notices. The
+    quality pass measures size, focus and exposure, all of which a finished
+    1080x1350 post sails through; the photo vision pass has no way to say "this
+    one already has a headline on it" and answers kind=product for a post
+    showing one jar. The row lands as kind 'product', which photoref accepts,
+    and the client's first creative ships with two headlines and two logos --
+    the one failure this whole package exists to prevent. The background gate
+    never sees it, because that only ever inspects pictures the image model
+    made.
+
+    So each file is judged on what it IS, not on the folder a human typed it
+    into: design laid on top belongs in --refs, a plain photograph belongs in
+    --products, and a file in the wrong one is refused by name.
+
+    Only a clear answer moves a file. An image nobody could judge -- no model
+    configured, or a call that would not answer -- is kept and named in the
+    summary. The guarantee that a reference is never composited over is the
+    kind whitelist and holds regardless; this is a check on a typo, and a check
+    on a typo that refused a valid onboarding would be the worse bug.
+    """
+    notes: list[str] = []
+    if not refstyle.available():
+        return ["no vision model configured: the two folders were not checked against each other"]
+    unchecked: list[str] = []
+
+    kept: list[Item] = []
+    for item in products.stored:
+        seen = await refstyle.looks_finished(item.data)
+        if seen is None:
+            unchecked.append(item.name)
+            kept.append(item)
+        elif seen[0]:
+            products.rejected.append(
+                Note(
+                    item.name,
+                    f"this is a finished post, not a photograph ({seen[1] or 'words laid on top'})."
+                    " If our design team made it, it belongs in --refs -- check the two folders "
+                    "are not the wrong way round",
+                )
+            )
+        else:
+            kept.append(item)
+    products.stored = kept
+
+    kept = []
+    for item in references.stored:
+        # One already on file was screened on the run that stored it; it is
+        # here only because its style anchor is still missing.
+        seen = None if item.already_stored else await refstyle.looks_finished(item.data)
+        if seen is None:
+            if not item.already_stored:
+                unchecked.append(item.name)
+            kept.append(item)
+        elif seen[0]:
+            kept.append(item)
+        else:
+            why = seen[1] or "nothing laid on top"
+            references.rejected.append(
+                Note(
+                    item.name,
+                    f"this is a plain photograph, not one of our creatives ({why}). A raw "
+                    "product photo belongs in --products, where the free photo lane can use it",
+                )
+            )
+    references.stored = kept
+
+    if unchecked:
+        notes.append(
+            f"{len(unchecked)} file(s) could not be checked for the folder mix-up "
+            f"({', '.join(unchecked[:4])}{', ...' if len(unchecked) > 4 else ''}): look at them"
+        )
+    return notes
+
+
 async def read_references(items: list[Item]) -> tuple[list[tuple[Item, refstyle.Reference]], Plan]:
     """The style pass over every reference, one at a time, refusing what it cannot read.
 
@@ -514,6 +594,10 @@ async def run(args: argparse.Namespace) -> int:
         known_refs=known_refs,
     )
 
+    # Which folder each file actually belongs in, decided before a byte is
+    # uploaded or a style anchor written: a file in the wrong one is refused,
+    # not filed under a kind that makes it a picture to build on.
+    screen_notes = await screen_folders(products, references)
     notes = await label_photos(products.stored)
     described, refused = await read_references(references.stored)
     references.rejected.extend(refused.rejected)
@@ -539,6 +623,8 @@ async def run(args: argparse.Namespace) -> int:
     _report(references, "Reference creatives")
     if not refstyle.available() and reference_files:
         print("  note     no vision model configured: the style pass was skipped")
+    for note in screen_notes:
+        print(f"\n  note     {note}")
 
     _line("Brand kit")
     for note in unreadable_anchors:
