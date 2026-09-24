@@ -21,7 +21,14 @@ from sqlalchemy import or_, update
 from app.db.models import Job
 from app.db.session import session_scope
 from app.logging import get_logger
-from app.queue.client import MAX_ATTEMPTS, dequeue, promote_due_jobs, reap, retry_later
+from app.queue.client import (
+    DEQUEUE_BLOCK,
+    MAX_ATTEMPTS,
+    dequeue,
+    promote_due_jobs,
+    reap,
+    retry_later,
+)
 from app.queue.handlers import HANDLERS
 
 log = get_logger(__name__)
@@ -36,7 +43,6 @@ _stop = asyncio.Event()
 # instant a job is pushed, so a longer timeout costs a live owner nothing and
 # only makes the idle loop cheaper.
 PROMOTE_EVERY = 20.0  # seconds; a scheduled post is not a stopwatch
-DEQUEUE_BLOCK = 30  # seconds a BRPOP waits; delivery is push-driven, not polled
 REAP_EVERY = 30.0
 SWEEP_EVERY = 3600.0  # Insights: once a day per brand, checked hourly
 

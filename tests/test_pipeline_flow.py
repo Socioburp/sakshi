@@ -224,11 +224,17 @@ def _clean(monkeypatch, *scripted):
 
 async def test_a_carousel_goes_out_whole_at_one_size_as_jpeg(world, monkeypatch):
     _clean(monkeypatch)
+    # The promise waits PROMISE_AFTER_S so a job that fails in seconds never
+    # makes one; a faked carousel finishes well inside that, so bring it
+    # forward here rather than lose what this line is really pinning.
+    monkeypatch.setattr(pipeline, "PROMISE_AFTER_S", 0)
     res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE_CAROUSEL))
 
     assert res["ok"] and res["slides_ok"] == 3 and res["slides_failed"] == 0
     assert res["shown_to_user"] is True and res["credits_charged"] == 3 == world["charged"]
-    assert world["lines"][0].startswith("Making it"), "acknowledged before the work starts"
+    assert any(line.startswith("Making it") for line in world["lines"]), (
+        "a job slow enough to need it is acknowledged"
+    )
     assert sorted(c for _, c in world["images"]) == sorted(
         ["1/3 · 3 ways to use cold-pressed oil", "2/3", "3/3"]
     )
@@ -513,8 +519,59 @@ async def test_a_job_that_fails_says_so_instead_of_leaving_still_working_as_the_
     res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
 
     assert res["ok"] is False and res["reason"] == "generation_failed"
-    assert res["told_owner"] is True and "Do not repeat" in res["note"]
+    assert res["told_owner"] is True
+    assert "ALREADY been told" in res["note"] and "mention credits" in res["note"]
     assert world["refunded"] == 1
     last = world["lines"][-1]
     assert "not sending it" in last and "credit is back" in last
     assert "Still working" not in last and world["images"] == []
+
+
+def test_one_minute_is_not_one_minutes():
+    """The first notice a client ever reads said "1 minutes in". A seam like
+    that makes a careful product look careless, and it is the line they see
+    while they are already waiting."""
+    from app.creative import pipeline
+
+    class _D:
+        lang = "en"
+        total = 1
+        ready: dict = {}
+
+    at_one = pipeline._Delivery.notice_at(_D(), 60)
+    at_three = pipeline._Delivery.notice_at(_D(), 180)
+
+    assert "1 minute in" in at_one, at_one
+    assert "1 minutes" not in at_one
+    assert "3 minutes in" in at_three, at_three
+
+
+async def test_a_job_that_fails_fast_never_promises_minutes(world, monkeypatch):
+    """The owner read "Making it... it takes 2-7 minutes at this quality" and
+    "this did not come out the way it has to" in the same breath, because the
+    promise went out the instant the credit was charged and the job then failed
+    in seconds. A promise the job has already outrun is worse than silence."""
+    _clean(monkeypatch)
+
+    async def never(ctx, provider, brief, slide, *a, **k):
+        raise pipeline.BackgroundRejected("no acceptable picture", cost_micros=576_600)
+
+    monkeypatch.setattr(pipeline, "_generate_checked", never)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is False
+    said = " ".join(world["lines"])
+    assert "at this quality" not in said, f"promised minutes anyway: {said}"
+    assert "not sending it" in said, "but it still says what happened"
+
+
+async def test_a_job_slow_enough_to_need_it_is_still_acknowledged(world, monkeypatch):
+    """The promise exists because silence on WhatsApp reads as broken. Holding
+    it back must not lose it on a job that really does take time."""
+    _clean(monkeypatch)
+    monkeypatch.setattr(pipeline, "PROMISE_AFTER_S", 0)
+
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is True
+    assert any("at this quality" in line for line in world["lines"]), world["lines"]
