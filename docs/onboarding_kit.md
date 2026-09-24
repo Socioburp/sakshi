@@ -196,6 +196,7 @@ The check needs a vision model. Without one the run says `the files were not
 checked for being in the wrong folder` and imports everything as it stands — so
 on a machine with no model configured, read the file names in the summary
 yourself.
+
 A file the model could not judge is kept, not refused, and named in the summary
 for you to look at.
 
