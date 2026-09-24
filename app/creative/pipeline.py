@@ -155,13 +155,26 @@ def working_line(locale: str | None, slides: int) -> str:
 # identical sentence five times across ten minutes; a line that says nothing
 # new is not a progress report, it is noise.
 _STILL_WORKING: dict[str, str] = {
-    "hi": "Abhi ban raha hai… {mins} minute ho gaye, {done}/{total} taiyaar.",
-    "en": "Still working… {mins} minutes in, {done} of {total} ready.",
+    "hi": "Abhi ban raha hai… {mins} {unit} ho gaye, {done}/{total} taiyaar.",
+    "en": "Still working… {mins} {unit} in, {done} of {total} ready.",
 }
 _STILL_WORKING_ONE: dict[str, str] = {
-    "hi": "Abhi ban raha hai… {mins} minute ho gaye. Check paas hote hi bhejta hoon.",
-    "en": "Still working… {mins} minutes in. It goes to you the moment it passes our check.",
+    "hi": "Abhi ban raha hai… {mins} {unit} ho gaye. Check paas hote hi bhejta hoon.",
+    "en": "Still working… {mins} {unit} in. It goes to you the moment it passes our check.",
 }
+# "1 minutes in" is the kind of seam that makes a careful product look careless,
+# and the first notice a client ever reads is exactly where it showed.
+_MINUTE_WORD: dict[str, tuple[str, str]] = {
+    "hi": ("minute", "minute"),
+    "en": ("minute", "minutes"),
+}
+
+
+def minute_word(lang: str, mins: int) -> str:
+    one, many = _MINUTE_WORD.get(lang, _MINUTE_WORD["en"])
+    return one if mins == 1 else many
+
+
 # The last word, sent once the job runs past the window it was quoted. After
 # this the chat is quiet on purpose: the job either delivers or says it could
 # not be made, so the owner hears again either way.
@@ -280,8 +293,12 @@ class _Delivery:
         """What the owner hears `elapsed` seconds in. Never twice the same
         sentence: the minutes move, and on a carousel so does the count."""
         table = _STILL_WORKING_ONE if self.total <= 1 else _STILL_WORKING
+        mins = max(1, round(elapsed / 60))
         return table.get(self.lang, table["en"]).format(
-            mins=max(1, round(elapsed / 60)), done=len(self.ready), total=self.total
+            mins=mins,
+            unit=minute_word(self.lang, mins),
+            done=len(self.ready),
+            total=self.total,
         )
 
     async def _say(self, line: str, elapsed: float) -> None:

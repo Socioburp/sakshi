@@ -518,3 +518,22 @@ async def test_a_job_that_fails_says_so_instead_of_leaving_still_working_as_the_
     last = world["lines"][-1]
     assert "not sending it" in last and "credit is back" in last
     assert "Still working" not in last and world["images"] == []
+
+
+def test_one_minute_is_not_one_minutes():
+    """The first notice a client ever reads said "1 minutes in". A seam like
+    that makes a careful product look careless, and it is the line they see
+    while they are already waiting."""
+    from app.creative import pipeline
+
+    class _D:
+        lang = "en"
+        total = 1
+        ready: dict = {}
+
+    at_one = pipeline._Delivery.notice_at(_D(), 60)
+    at_three = pipeline._Delivery.notice_at(_D(), 180)
+
+    assert "1 minute in" in at_one, at_one
+    assert "1 minutes" not in at_one
+    assert "3 minutes in" in at_three, at_three
