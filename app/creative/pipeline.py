@@ -208,6 +208,28 @@ _FAILED_MONEY: dict[str, dict[str, str]] = {
 }
 
 
+# How long the promise waits before it is made. A fast refusal lands first and
+# the owner never hears a number that was already wrong.
+PROMISE_AFTER_S = 12
+
+
+async def _say_working(ctx: ToolContext, locale: str, slides: int) -> None:
+    await asyncio.sleep(PROMISE_AFTER_S)
+    try:
+        await ctx.say(working_line(locale, slides))
+    except Exception:  # noqa: BLE001 - a missed progress line must not cost the creative
+        log.warning("progress_line_failed", account_id=str(ctx.account_id))
+
+
+async def _drop(task: asyncio.Task) -> None:
+    """Cancel a promise the job has already outrun, and wait for it to go."""
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
 async def tell_them_it_failed(ctx: ToolContext, locale: str, *, refunded: int) -> None:
     """Say that nothing is coming, in the chat, now.
 
@@ -796,15 +818,15 @@ async def generate(
                 }
         locale = (db.get(Account, ctx.account_id).locale or "en") if ctx.account_id else "en"
 
-    # "Making it..." goes out now -- after validation and the charge, before the
-    # 5-40 seconds of work. On WhatsApp that silence reads as "it broke", and
-    # the owner types again, which queues a second charged request. It is sent
-    # here rather than by the model so it is never skipped, and it is allowed
-    # to fail: a missed progress line must never cost the creative.
-    try:
-        await ctx.say(working_line(locale, len(units)))
-    except Exception:  # noqa: BLE001
-        log.warning("progress_line_failed", account_id=str(ctx.account_id))
+    # "Making it..." exists because silence on WhatsApp reads as "it broke" and
+    # the owner types again. But it is a PROMISE of minutes, and a job that
+    # fails in seconds made it anyway: the owner read "it takes 2-7 minutes"
+    # and "this did not come out right" in the same breath. So it waits a
+    # moment first, and a job that is already over cancels it. The delay is
+    # shorter than anyone waits before wondering, and longer than a fast
+    # refusal takes. Sent here rather than by the model so it is never
+    # skipped, and allowed to fail: a missed line must not cost the creative.
+    promise = asyncio.create_task(_say_working(ctx, locale, len(units)))
 
     # Slides run concurrently. gather with return_exceptions so one bad slide
     # does not discard the ones that already succeeded.
@@ -845,6 +867,7 @@ async def generate(
         )
     finally:
         await delivery.stop()
+        await _drop(promise)
     # Ordered carousels go out now, 1..N. Slides that failed are simply absent.
     with ctx.trace.stage("deliver_set"):
         await delivery.flush()
@@ -890,8 +913,11 @@ async def generate(
         # word about a picture that is never coming.
         await tell_them_it_failed(ctx, locale, refunded=billable)
         told = (
-            "The owner has ALREADY been told in the chat that it could not be made and "
-            "that the credit is back. Do not repeat it. Answer only what they say next."
+            "The owner has ALREADY been told in the chat, in our words, that it could "
+            "not be made and that their credit is back. Do NOT say it again and do NOT "
+            "mention credits, refunds or their balance at all unless they ask -- they "
+            "read it once from us and twice more from you, in three different wordings. "
+            "Answer only what they say next."
         )
         if quality_hint and len(refused) == len(failures):
             return {
