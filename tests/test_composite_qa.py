@@ -859,6 +859,18 @@ def test_the_inspectors_reasons_translate_into_the_ladders_vocabulary():
     assert finalgate.picture_faults(["artefacts", "text_cut_off"]) == ["artefacts"]
 
 
+def test_the_reasons_nothing_can_change_are_written_down_not_inferred():
+    """Which verdicts are final decides whether the owner's money is spent, so
+    it is a named set with a reason beside it, like PICTURE_REASONS."""
+    assert finalgate.INVARIANT_REASONS == {"logo_problem"}
+    assert finalgate.INVARIANT_REASONS < set(finalgate.KEYS)
+    # A reason cannot be both: PICTURE_REASONS is the set worth buying a
+    # picture for, INVARIANT_REASONS the set worth buying nothing for.
+    assert not finalgate.INVARIANT_REASONS & finalgate.PICTURE_REASONS
+    assert finalgate.settled(["text_covers_subject", "logo_problem"]) == ["logo_problem"]
+    assert finalgate.settled(["artefacts", "text_cut_off"]) == []
+
+
 # --------------------------------------------------------------------------- #
 # wired into the pipeline: who pays for a repair, and who never does
 # --------------------------------------------------------------------------- #
@@ -1017,6 +1029,54 @@ async def test_the_corrected_prompt_says_what_was_wrong_with_the_last_one(world,
     first, second = world["provider"].requests
     assert finalgate.CORRECTIONS["artefacts"] in second.prompt
     assert finalgate.CORRECTIONS["artefacts"] not in first.prompt
+
+
+def _count_renders(monkeypatch) -> list[int]:
+    rendered: list[int] = []
+    real = compose.compose_with_report
+
+    async def counted(*a, **k):
+        rendered.append(1)
+        return await real(*a, **k)
+
+    monkeypatch.setattr(compose, "compose_with_report", counted)
+    return rendered
+
+
+async def test_a_verdict_about_the_brands_mark_is_paid_for_once_and_never_again(world, monkeypatch):
+    """A real client's card, trace bf6cd37906824f65. The brand has no logo
+    image, so the mark is their name set as type. The inspector called that
+    logo_problem -- on the layout it came in as, on all four the repair ladder
+    then swept, and again on both pictures the pipeline bought to answer it.
+    Six refusals of one unchanging thing: 62 cents, five and a half minutes, a
+    refunded credit and nothing delivered. The card is still refused; it is
+    refused once."""
+    rendered = _count_renders(monkeypatch)
+    world["final_verdicts"].append(["text_covers_subject", "logo_problem"])
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is False and res["reason"] == "composite_quality"
+    assert len(world["provider"].requests) == 1, "no picture bought to argue with the mark"
+    assert len(rendered) == 1, "and no layout re-rendered to argue with it either"
+    assert len(world["inspected"]) == 1, "one look, one refusal"
+    (row,) = world["rows"].values()
+    assert row.status == "failed"
+    assert row.cost_micros == 288_300 + 4_500, "the one picture and the one look"
+
+
+async def test_a_verdict_a_layout_can_still_cure_keeps_its_whole_free_ladder(world, monkeypatch):
+    """The other half, and the one that would be quietly lost by being too
+    clever: a reason that a template change really does cure still gets every
+    free rung it had before."""
+    rendered = _count_renders(monkeypatch)
+    world["final_verdicts"].extend([["text_covers_subject"], []])
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] and res["slides_ok"] == 1
+    assert len(rendered) > 1, "the ladder set the same picture another way"
+    assert len(world["provider"].requests) == 1, "and cured it without buying anything"
+    (row,) = world["rows"].values()
+    assert row.status == "ready" and row.template != "centered_overlay"
 
 
 async def _keep_first(first, render, **kw):

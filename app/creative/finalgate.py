@@ -55,6 +55,29 @@ KEYS: tuple[str, ...] = (
 # inferred at the call site.
 PICTURE_REASONS = frozenset({"stray_text_in_photo", "artefacts"})
 
+# Reasons that NOTHING this gate is allowed to do can change, so re-testing
+# them is buying the same verdict twice.
+#
+# logo_problem is a property of the BRAND'S MARK. The mark is built from the
+# brand kit -- the same image, or the same name set as the same wordmark -- and
+# it is laid on every template in the same place, over whatever picture the
+# frame carries. A brand with no logo image scored logo_problem on all four
+# layouts of one real creative and on every picture bought for it: 62 cents and
+# five and a half minutes, one credit refunded, nothing delivered.
+#
+# Nothing else in the rubric belongs here, and it is worth saying why, because
+# the temptation is to add the ones that FEEL fixed. text_cut_off covers a
+# glyph that did not render, which no layout cures -- but it also covers a
+# letter clipped by a panel, which a layout cures every day, and the inspector
+# gives one boolean for both; a flag that is sometimes curable is treated as
+# curable, because refusing to look is how a deliverable card gets thrown away.
+# text_hard_to_read, text_covers_subject, subject_cut_off and looks_unfinished
+# all describe where the words fell on THIS picture in THIS layout, and both of
+# those move. stray_text_in_photo and artefacts are the picture's own fault:
+# invariant to a layout change, which is why PICTURE_REASONS skips the ladder,
+# but curable by the one thing worth buying another picture for.
+INVARIANT_REASONS = frozenset({"logo_problem"})
+
 # What each reason means to the deterministic checker, so ONE repair ladder can
 # be steered by either of them: the cure for "the words are on the jar" does
 # not depend on who noticed it. The two picture faults map to nothing, because
@@ -76,6 +99,15 @@ def as_codes(reasons: list[str]) -> set[str]:
 def picture_faults(reasons: list[str]) -> list[str]:
     """The reasons only a different PICTURE can cure."""
     return [r for r in reasons if r in PICTURE_REASONS]
+
+
+def settled(reasons: list[str]) -> list[str]:
+    """The reasons that make this verdict final: it cannot be argued out of.
+
+    A frame carrying one of these is refused exactly as before -- it is just
+    refused ONCE, instead of once per layout and once per picture bought.
+    """
+    return [r for r in reasons if r in INVARIANT_REASONS]
 
 
 # reason -> the sentence added to a regeneration prompt, in the same voice as
@@ -226,6 +258,7 @@ async def inspect(
 __all__ = [
     "AS_CODE",
     "CORRECTIONS",
+    "INVARIANT_REASONS",
     "KEYS",
     "PICTURE_REASONS",
     "InspectionUnavailable",
@@ -236,4 +269,5 @@ __all__ = [
     "inspect",
     "picture_faults",
     "prompt_for",
+    "settled",
 ]

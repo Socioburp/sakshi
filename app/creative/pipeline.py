@@ -2416,9 +2416,23 @@ async def _final_check(
         best = await compositeqa.best_free_variant(first, render, limit=free)
         verdict = await inspected(best)
 
+        # A verdict that cannot change must not be retried. The mark on the
+        # card is the same on every layout and over every picture, so an
+        # inspector that objected to it will object again, at 3-5s of
+        # Chromium a rung and the price of a picture a purchase. Refuse now.
+        final_say = finalgate.settled(verdict.reasons) if verdict is not None else []
+        if final_say:
+            log.info(
+                "final_gate_settled",
+                position=slide.position,
+                reasons=final_say,
+                template=best.template,
+            )
+
         curable = (
             verdict is not None
             and not verdict.ok
+            and not final_say
             and (set(verdict.reasons) - finalgate.PICTURE_REASONS)
         )
         if curable:
@@ -2463,7 +2477,9 @@ async def _final_check(
 
         faults = list(best.assessment.faults)
         reasons = list(verdict.reasons) if verdict is not None else []
-        if purchase == paid:
+        if purchase == paid or final_say:
+            # A settled verdict stops here too. A new picture cannot change
+            # the brand's mark, so the money would buy the same refusal.
             break
         # Nothing free was good enough. The generated lane may buy ONE more
         # picture, corrected by what was wrong with this one.
