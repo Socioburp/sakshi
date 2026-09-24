@@ -1376,11 +1376,37 @@ def test_the_mark_is_sized_by_area_inside_the_caps_and_a_wide_mark_is_a_wordmark
     assert compose.logo_box(1.0, 1080, False) == (119, 119), "an emblem keeps its cap"
     assert compose.logo_box(3.0, 1080, True) == (265, 88)
     assert compose.logo_box(8.0, 1080, True) == (324, 40), "the width cap wins"
-    w, h = compose.logo_box(1 / 3, 1080, False)
-    assert h == round(compose.LOGO_MAX_HEIGHT * 1080) and abs(w - h / 3) <= 1
-    for aspect in (0.5, 1.0, 2.0, 4.0):
+    for aspect in (1 / 3, 0.5, 1.0, 2.0, 4.0):
         bw, bh = compose.logo_box(aspect, 1080, aspect >= 2.2)
         assert min(bw, bh) >= compose.LOGO_MIN_SHORT * 1080 - 1, aspect
+
+
+def test_the_floor_on_the_marks_short_side_is_applied_after_the_caps():
+    """LOGO_MIN_SHORT was applied BEFORE the width/height caps, where it can
+    never bind -- a mark's area-sized short side is already above it for every
+    ordinary shape, and the caps then pushed it back under. The guarantee was
+    dead code, and a tall vertical lockup was sized 35x140 by the height cap
+    alone: 3% of the canvas width and 17% of the area a square mark of the
+    same brand gets.
+
+    It cannot simply overrule the caps either. LOGO_CLEAR keeps a quarter of
+    the mark's height clear on every side, and a 56x229 mark raises
+    logo_clearspace:subhead on split_card and frame_card -- refusing an
+    ordinary job to make the logo bigger is not a cure."""
+    floor = compose.LOGO_MIN_SHORT * 1080
+    ceiling = round(compose.LOGO_FLOOR_LONG_MAX * 1080)
+    for aspect in (1 / 3, 0.36, 0.5, 1.0, 2.0):
+        bw, bh = compose.logo_box(aspect, 1080, aspect >= 2.2)
+        assert min(bw, bh) >= floor - 1, (aspect, bw, bh)
+    for aspect in (0.2, 0.25):
+        bw, bh = compose.logo_box(aspect, 1080, False)
+        # Not at the floor -- the shape will not allow it -- but at the
+        # ceiling, so it is as large as the layouts can carry. It used to stop
+        # at LOGO_MAX_HEIGHT, a third smaller in every dimension.
+        assert bh == ceiling and bh > round(compose.LOGO_MAX_HEIGHT * 1080)
+        assert abs(bw / bh - aspect) < 0.02, "and it keeps the mark's shape"
+    # A wordmark is already longer than the ceiling: the floor never shrinks it.
+    assert compose.logo_box(8.0, 1080, True) == (324, 40)
     ctx = compose._brand_context(_brand(logo_analysis={"aspect": 6.43}))
     assert ctx["logo_wordmark"] is True, "derived from the shape when vision gave none"
     ctx = compose._brand_context(_brand(logo_analysis={"aspect": 0.26, "has_wordmark": None}))

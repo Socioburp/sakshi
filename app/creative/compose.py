@@ -154,24 +154,58 @@ LOGO_MAX_HEIGHT = 0.13
 # may be, as a share of the canvas width (56px on 1080).
 LOGO_AREA = 0.016
 LOGO_MIN_SHORT = 0.052
+# How far the floor may stretch a mark's LONGER side past LOGO_MAX_HEIGHT, as
+# a share of the canvas width. LOGO_CLEAR keeps a quarter of the mark's height
+# clear on every side, so a taller mark asks the panel layouts for room they
+# do not have: measured with the longest copy the schema allows, a mark 188px
+# tall passes all six layouts post and story, and one 229px tall raises
+# logo_clearspace:subhead on split_card and frame_card -- refusing a perfectly
+# ordinary job. 189px is the measured edge of what the layouts carry.
+LOGO_FLOOR_LONG_MAX = 0.175
 
 
 def logo_box(aspect: float, width: int, wordmark: bool) -> tuple[int, int]:
-    """The mark's rendered (width, height) for a canvas `width` wide: sized
-    by area, the short side raised to LOGO_MIN_SHORT where the caps allow,
-    never past the caps for its kind."""
+    """The mark's rendered (width, height) for a canvas `width` wide: sized by
+    area, held inside the caps for its kind, then raised until its short side
+    reaches LOGO_MIN_SHORT.
+
+    The floor used to be applied BEFORE the caps, where it could never bind:
+    a mark's area-sized short side is already above it for every shape between
+    about 1:7.4 and 7.4:1, and the caps then pushed it back under. So the
+    guarantee was dead code, and a 1:4 vertical lockup -- a temple lamp, a
+    bottle silhouette -- was sized 35x140 by the height cap alone: 3% of the
+    canvas width and 17% of the area a square mark of the same brand gets.
+
+    Applied after the caps it does bind, but it cannot simply overrule them.
+    LOGO_CLEAR keeps a quarter of the mark's height clear on every side, so a
+    taller mark asks the panel layouts for room they do not have: measured,
+    56x229 raises logo_clearspace:subhead on split_card and frame_card and
+    refuses an ordinary job. The floor therefore stretches the longer side as
+    far as LOGO_FLOOR_LONG_MAX and no further, which carries a 1:3.4 mark to
+    the floor and takes a 1:4 from 35x140 to 47x189. Past that the shape
+    itself is what makes the mark thin, and nothing here can cure it without
+    distorting the mark or refusing the layout.
+    """
     aspect = max(0.05, float(aspect))
     area = LOGO_AREA * width * width * 1.25  # a post's area, so stories match
     lw = (area * aspect) ** 0.5
     lh = lw / aspect
-    short = min(lw, lh)
-    floor = LOGO_MIN_SHORT * width
-    if short < floor:
-        lw, lh = lw * floor / short, lh * floor / short
     cap_w = LOGO_WIDTH["wordmark" if wordmark else "emblem"] * width
     cap_h = LOGO_MAX_HEIGHT * width
     s = min(1.0, cap_w / lw, cap_h / lh)
-    return max(1, round(lw * s)), max(1, round(lh * s))
+    lw, lh = lw * s, lh * s
+    if min(lw, lh) < LOGO_MIN_SHORT * width:
+        # max(1.0, ...): the ceiling only ever raises a mark the caps left
+        # thin. A wordmark is already longer than it and must not be shrunk.
+        grow = max(
+            1.0,
+            min(
+                LOGO_MIN_SHORT * width / min(lw, lh),
+                LOGO_FLOOR_LONG_MAX * width / max(lw, lh),
+            ),
+        )
+        lw, lh = lw * grow, lh * grow
+    return max(1, round(lw)), max(1, round(lh))
 
 
 # Clear space kept free around the mark, as a fraction of its rendered height.
