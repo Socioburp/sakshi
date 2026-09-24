@@ -1297,11 +1297,18 @@ async def _plan_photos(
 
 
 def _set_template(brief: CreativeBrief, slide: Slide, template: str) -> None:
-    """Change one slide's layout in the brief itself -- units() rebuilds a
-    single post's slide from the brief, so the slide object alone is not it."""
-    if brief.is_carousel():
-        slide.template_id = template
-    else:
+    """Change one slide's layout, in the brief AND in the slide object in hand.
+
+    units() builds a single post's Slide detached from the brief and stamps the
+    brief's template_id onto it, and template_for() reads the slide's first --
+    so setting the brief's alone changed nothing the compositor would see. The
+    repair ladder re-rendered the very layout it was trying to leave, scored
+    that frame, returned it under the new name, and the creative row recorded a
+    template the picture had never been set in. A free repair that repaired
+    nothing and said it had is worse than one that refuses.
+    """
+    slide.template_id = template
+    if not brief.is_carousel():
         brief.template_id = template
         for sl in brief.slides:
             sl.template_id = None

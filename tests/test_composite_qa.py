@@ -849,6 +849,41 @@ def _fault_once(monkeypatch, *, faults, on=1):
     return seen
 
 
+def test_moving_a_single_post_to_another_layout_moves_the_slide_too():
+    """units() builds a single post's slide detached from the brief and stamps
+    the brief's template onto it, and template_for() reads the slide's first.
+    Setting only the brief's left the compositor seeing the OLD layout: every
+    rung of the repair ladder re-rendered the layout it was trying to leave,
+    scored that frame and returned it under the new name."""
+    brief = CreativeBrief.model_validate(EXAMPLE)
+    slide = brief.units()[0]
+    assert brief.template_for(slide) == "centered_overlay"
+    pipeline._set_template(brief, slide, "split_card")
+    assert brief.template_for(slide) == "split_card"
+
+
+async def test_the_frame_that_ships_is_composed_in_the_layout_the_row_records(world, monkeypatch):
+    """The row's template is what the owner is told the card is, and what a
+    revision re-composes from. It used to be able to name a layout the picture
+    was never set in, because the repair only relabelled the frame."""
+    composed: list[str] = []
+    real = compose.compose_with_report
+
+    async def counted(brief, slide, *a, **k):
+        composed.append(brief.template_for(slide))
+        return await real(brief, slide, *a, **k)
+
+    monkeypatch.setattr(compose, "compose_with_report", counted)
+    _fault_once(monkeypatch, faults=["text_over_subject"], on=99)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"]
+    (row,) = world["rows"].values()
+    assert row.status == "ready" and row.template != "centered_overlay"
+    assert row.template in composed, "the delivered frame was set in the layout recorded"
+    assert composed[0] == "centered_overlay", "...and it started somewhere else"
+
+
 async def test_a_fault_a_template_change_fixes_costs_no_vendor_call(world, monkeypatch):
     """The whole point of repairing before retrying. The layout is free to
     change and the picture is not, so the picture is the last thing touched."""
