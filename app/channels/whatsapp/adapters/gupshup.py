@@ -98,6 +98,8 @@ class GupshupAdapter:
                 "previewUrl": msg.image_url,
                 "caption": msg.caption or "",
             }
+        elif msg.kind == "video":
+            message = {"type": "video", "url": msg.video_url, "caption": msg.caption or ""}
         else:
             message = {
                 "type": "quick_reply",

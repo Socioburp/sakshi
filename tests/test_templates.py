@@ -29,11 +29,14 @@ def test_copy_is_dom_text_not_baked_into_background():
     assert brief.headline not in brief.visual_direction.prompt
 
 
-def test_carousel_shows_pips_and_holds_cta_to_last_slide():
+def test_carousel_draws_no_pagination_dots_and_holds_cta_to_last_slide():
+    """Instagram draws its own dots under a carousel. A row baked into the
+    image is what made every slide look like a screenshot of the app."""
     brief = CreativeBrief.model_validate(EXAMPLE_CAROUSEL)
     first, last = brief.units()[0], brief.units()[-1]
     html_first = render_html(brief, first, Brand(), BG)
     html_last = render_html(brief, last, Brand(), BG)
-    assert html_first.count('<span class="pip') == 3
+    for html in (html_first, html_last):
+        assert "pip" not in html and "border-radius: 50%" not in html
     assert brief.cta not in html_first
     assert brief.cta in html_last

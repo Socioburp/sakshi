@@ -24,6 +24,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
+# fmt: off
 Script = Literal["latin", "devanagari", "kannada", "tamil", "telugu", "malayalam",
                  "bengali", "gujarati", "gurmukhi", "unknown"]
 
@@ -39,6 +40,8 @@ SCRIPT_RANGES: list[tuple[Script, int, int]] = [
     ("malayalam",  0x0D00, 0x0D7F),
 ]
 
+# fmt: on
+
 SCRIPT_DEFAULT_LANG: dict[Script, str] = {
     "devanagari": "hi",
     "bengali": "bn",
@@ -53,17 +56,18 @@ SCRIPT_DEFAULT_LANG: dict[Script, str] = {
 # Romanised markers. Chosen to be distinctive: short words that collide with
 # English ("hi", "me", "ka", "to") are deliberately excluded, because one false
 # positive means answering a London client in Hinglish.
+# fmt: off
 ROMAN_MARKERS: dict[str, set[str]] = {
     "hi": {
         "kya", "hai", "hain", "nahi", "nahin", "karo", "karna", "kijiye", "chahiye",
-        "banao", "banana", "banade", "bana", "aur", "mera", "meri", "mujhe", "hamara",
+        "banao", "banade", "bana", "aur", "mera", "meri", "mujhe", "hamara",
         "aapka", "apna", "tumhara", "kal", "aaj", "abhi", "thoda", "bahut", "accha",
         "achha", "theek", "thik", "matlab", "wala", "wali", "jaldi", "dijiye", "bhej",
         "bhejo", "dekho", "chalega", "hoga", "kaise", "kaisa", "kitna", "sirf", "ekdum",
     },
     "kn": {
         "madi", "maadi", "beku", "bekku", "illa", "ide", "hege", "enu", "yenu",
-        "swalpa", "olle", "chennagi", "nanna", "nimma", "matte", "sari", "agatte",
+        "swalpa", "olle", "chennagi", "nanna", "nimma", "agatte",
         "banni", "kodi", "thumba", "tumba", "yaake", "aytu", "bittu",
     },
     "ta": {
@@ -75,19 +79,21 @@ ROMAN_MARKERS: dict[str, set[str]] = {
         "meeru", "nenu", "ela", "koncham",
     },
     "mr": {
-        "kara", "karaycha", "pahije", "kasa", "changla", "tumhala", "mala", "ahe",
+        "kara", "karaycha", "pahije", "kasa", "changla", "tumhala", "mala", "ahe", "aahe",
         "nahiye", "kiti", "thoda",
     },
     "ml": {
-        "cheyyu", "venam", "enthu", "kollam", "undo", "njan", "ningal", "ethra",
+        "cheyyu", "venam", "enthu", "kollam", "njan", "ningal", "ethra",
         "sheri", "ittiri",
     },
 }
 
+# fmt: on
+
 # Words that mean the message is plain English even if a marker slipped through.
 _WORD = re.compile(r"[a-z]+")
 
-MIN_MARKERS = 2          # one match is a coincidence
+MIN_MARKERS = 2  # one match is a coincidence
 MIN_MARKER_RATIO = 0.12  # ...and it has to be a real share of a short message
 
 
@@ -106,9 +112,16 @@ class LanguageProfile:
 
     def label(self) -> str:
         names = {
-            "en": "English", "hi": "Hindi", "kn": "Kannada", "ta": "Tamil",
-            "te": "Telugu", "ml": "Malayalam", "mr": "Marathi", "bn": "Bengali",
-            "pa": "Punjabi", "gu": "Gujarati",
+            "en": "English",
+            "hi": "Hindi",
+            "kn": "Kannada",
+            "ta": "Tamil",
+            "te": "Telugu",
+            "ml": "Malayalam",
+            "mr": "Marathi",
+            "bn": "Bengali",
+            "pa": "Punjabi",
+            "gu": "Gujarati",
         }
         name = names.get(self.language, self.language)
         if self.is_romanised_indic:
@@ -158,8 +171,7 @@ def detect(text: str | None) -> LanguageProfile:
         return LanguageProfile()
 
     scores = {
-        lang: len([w for w in words if w in markers])
-        for lang, markers in ROMAN_MARKERS.items()
+        lang: len({w for w in words if w in markers}) for lang, markers in ROMAN_MARKERS.items()
     }
     lang = max(scores, key=lambda k: scores[k])
     hits = scores[lang]
@@ -174,6 +186,66 @@ def detect(text: str | None) -> LanguageProfile:
         )
 
     return LanguageProfile(language="en", script="latin", confidence=0.5 if words else 0.0)
+
+
+# --------------------------------------------------------------------------- #
+# the locale column, in one shape
+# --------------------------------------------------------------------------- #
+# accounts.locale is BCP-47 with a region ("hi-IN"), because that is what the
+# speech-to-text providers take as a hint. The detector works in bare ISO
+# codes. These two functions are the only place the conversion happens.
+
+_REGION = "IN"
+
+
+def to_locale(language: str | None) -> str:
+    lang = (language or "en").split("-")[0].lower()
+    return f"{lang}-{_REGION}"
+
+
+def from_locale(
+    locale: str | None,
+    script: str | None = None,
+    fallback: LanguageProfile | None = None,
+) -> LanguageProfile:
+    """A profile for a locked locale -- used when this message carries no signal.
+
+    `script` is what the owner has TYPED in (accounts.script). With none on
+    record -- an owner who has only ever sent voice notes -- the reply goes in
+    Latin letters, which is what an Indian phone keyboard produces and what a
+    transcript's Devanagari must not override.
+    """
+    if not locale:
+        return fallback or LanguageProfile()
+    lang = locale.split("-")[0].lower()
+    if lang == "en":
+        return LanguageProfile(language="en", script="latin", confidence=0.6)
+    if lang in ROMAN_MARKERS or lang in SCRIPT_DEFAULT_LANG.values():
+        chosen = script if script and script != "unknown" else "latin"
+        return LanguageProfile(
+            language=lang,
+            script=chosen,  # type: ignore[arg-type]
+            code_mixed=(chosen == "latin"),
+            confidence=0.6,
+        )
+    return fallback or LanguageProfile()
+
+
+_SORRY: dict[str, str] = {
+    "hi": "Ek second — kuch gadbad ho gayi. Dobara bhejein?",
+    "kn": "Ondu nimisha — swalpa problem aaytu. Matte kalisi?",
+    "ta": "Oru nimisham — konjam problem aachu. Thirumba anuppunga?",
+    "te": "Oka nimisham — chinna problem vachindi. Malli pampandi?",
+    "mr": "Ek minute — kahitari chukla. Parat pathva?",
+    "ml": "Oru nimisham — cheriya problem undayi. Onnude ayakkamo?",
+    "en": "One second — something went wrong on my side. Please send that again?",
+}
+
+
+def sorry_line(profile: LanguageProfile | None) -> str:
+    """The one message an owner gets when a turn fails. Never silence."""
+    lang = (profile.language if profile else "en") or "en"
+    return _SORRY.get(lang, _SORRY["en"])
 
 
 # --------------------------------------------------------------------------- #
@@ -229,9 +301,7 @@ def instruction(profile: LanguageProfile) -> str:
             "works, and a reply in another script is unreadable to them."
         )
     else:
-        lines.append(
-            f"Write in {profile.script.title()} script, as they did. Do not romanise it."
-        )
+        lines.append(f"Write in {profile.script.title()} script, as they did. Do not romanise it.")
 
     if profile.code_mixed:
         lines.append(

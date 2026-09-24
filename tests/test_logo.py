@@ -42,9 +42,7 @@ def test_accent_is_a_different_hue_not_a_shade():
 
 def test_ink_is_chosen_for_contrast():
     dark = extract_palette(_png(lambda d: d.rectangle([0, 0, 400, 400], fill=(16, 24, 40, 255))))
-    light = extract_palette(
-        _png(lambda d: d.rectangle([0, 0, 400, 400], fill=(250, 214, 80, 255)))
-    )
+    light = extract_palette(_png(lambda d: d.rectangle([0, 0, 400, 400], fill=(250, 214, 80, 255))))
     assert dark.palette["ink"] == "#FFFFFF"
     assert light.palette["ink"] == "#111111"
 

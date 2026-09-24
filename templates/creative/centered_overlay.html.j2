@@ -1,24 +1,38 @@
 {% extends "_base.html.j2" %}
+{# Headline size steps with copy length instead of flipping between two sizes.
+   The compositor still measures and shrinks afterwards; this just means it
+   rarely has to, and a headline that was never shrunk keeps its optical weight. #}
+{% set hl = slide.headline|length %}
+{% set hf = 0.125 if hl < 14 else (0.108 if hl < 20 else (0.094 if hl < 28 else (0.082 if hl < 38 else 0.070))) %}
 {% block styles %}
-  .scrim { background: linear-gradient(180deg, rgba(0,0,0,.55) 0%, rgba(0,0,0,.15) 45%,
-           rgba(0,0,0,.70) 100%); }
-  .content { justify-content: center; text-align: center; align-items: center; }
-  .headline { font-size: {{ (width * (0.115 if slide.headline|length < 18 else 0.082))|round|int }}px;
-              max-width: 88%; }
-  .subhead { font-size: {{ (width*0.040)|round|int }}px; max-width: 78%; }
-  .cta { align-self: center; margin-top: {{ (width*0.055)|round|int }}px; }
-  .foot { position: absolute; left: 0; right: 0; bottom: {{ (width*0.055)|round|int }}px;
-          display: flex; justify-content: center; align-items: center; }
+  .scrim { background:
+      linear-gradient(180deg,
+        rgba(0,0,0,calc(.46*var(--k))) 0%, rgba(0,0,0,calc(.34*var(--k))) 12%, rgba(0,0,0,calc(.16*var(--k))) 30%,
+        rgba(0,0,0,calc(.10*var(--k))) 46%, rgba(0,0,0,calc(.26*var(--k))) 68%, rgba(0,0,0,calc(.52*var(--k))) 86%,
+        rgba(0,0,0,calc(.62*var(--k))) 100%),
+      radial-gradient(120% 78% at 50% 46%, rgba(0,0,0,calc(0*var(--k))) 42%, rgba(0,0,0,calc(.30*var(--k))) 100%); }
+  {# Optical centre, not geometric: a centred stack with a mark beneath it reads
+     as sitting low unless the block is nudged up. #}
+  .content { justify-content: center; text-align: center; align-items: center;
+             padding-bottom: {{ (width*0.20)|round|int }}px; }
+  .headline { font-size: {{ (width * hf)|round|int }}px; max-width: 86%; }
+  .subhead { font-size: {{ (width*0.038)|round|int }}px; max-width: 72%; }
+  .cta { align-self: center; margin-top: {{ (width*0.052)|round|int }}px; }
+  {# Bounded by the safe zone, not the canvas: a long brand name wraps inside
+     it. Spanning 0..width is how "Sri Venkateshwara Traders and General
+     Stores" ran into the strip the grid trims and refused every render. #}
+  .foot { position: absolute; left: {{ pad_x }}px; right: {{ pad_x }}px;
+          bottom: {{ pad_bottom }}px;
+          display: flex; justify-content: center; align-items: center; text-align: center; }
 {% endblock %}
 {% block body %}
-  <div class="scrim"></div>
   <div class="content">
-    <h1 class="headline">{{ slide.headline }}</h1>
-    {% if slide.subhead %}<p class="subhead">{{ slide.subhead }}</p>{% endif %}
-    {% if show_cta %}<div class="cta">{{ brief.cta }}</div>{% endif %}
+    <h1 class="headline" dir="auto">{{ slide.headline }}</h1>
+    {% if slide.subhead %}<p class="subhead" dir="auto">{{ slide.subhead }}</p>{% endif %}
+    {% if show_cta %}<div class="cta" dir="auto">{{ brief.cta }}</div>{% endif %}
   </div>
   <div class="foot">
     {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
-    {% else %}<span class="brandline">{{ brand.name }}</span>{% endif %}
+    {% else %}<span class="brandline" dir="auto">{{ brand.name }}</span>{% endif %}
   </div>
 {% endblock %}

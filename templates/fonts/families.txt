@@ -1,0 +1,17 @@
+Fraunces
+Inter
+Manrope
+Noto Sans
+Noto Sans Arabic
+Noto Sans Bengali
+Noto Sans Devanagari
+Noto Sans Gujarati
+Noto Sans Gurmukhi
+Noto Sans Kannada
+Noto Sans Malayalam
+Noto Sans Oriya
+Noto Sans Sinhala
+Noto Sans Tamil
+Noto Sans Telugu
+Playfair Display
+Poppins

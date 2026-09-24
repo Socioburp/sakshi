@@ -16,9 +16,12 @@ prompt to hold.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.creative import fonts
 
 AspectRatio = Literal["1:1", "4:5", "9:16"]
 Intent = Literal[
@@ -31,10 +34,28 @@ Intent = Literal[
     "behind_the_scenes",
 ]
 
+# THE Instagram post size. Every still this product ships -- a single post and
+# every slide of a carousel -- is exactly this, nothing else. 4:5 is the tallest
+# ratio Instagram's publishing API accepts (it takes 4:5 to 1.91:1; 3:4 posts by
+# hand but is rejected through the API), and Instagram downsizes anything wider
+# than 1080, so exporting larger only hands the final resample to them.
+POST_SIZE: tuple[int, int] = (1080, 1350)
+POST_ASPECT = "4:5"
+# A reel is video, published through a different container with its own rules.
+REEL_SIZE: tuple[int, int] = (1080, 1920)
+# A STORY is the other still the owner can ask for: full-screen 9:16, for an
+# Instagram Story or a WhatsApp Status. It is a CHOICE, never a default and
+# never a conversion -- a post stays 4:5. Same pixels as a reel's frame.
+STORY_SIZE: tuple[int, int] = REEL_SIZE
+
+# The ratios the publishing API takes for an image, as width / height.
+IG_MIN_RATIO = 4 / 5
+IG_MAX_RATIO = 1.91
+
 PIXELS: dict[str, tuple[int, int]] = {
-    "1:1": (1080, 1080),
-    "4:5": (1080, 1350),
-    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),  # legacy briefs only; nothing new is made square
+    "4:5": POST_SIZE,
+    "9:16": REEL_SIZE,
 }
 
 # Phrases that mean "render letterforms", which the image model must not do.
@@ -45,7 +66,86 @@ _TEXT_REQUEST = re.compile(
     r"label(l|)ed|subtitle|price tag|number overlay)\b",
     re.IGNORECASE,
 )
-_QUOTED = re.compile(r"[\"“”']{1}[^\"“”']{2,}[\"“”']{1}")
+# Double and curly quotes always count. A straight single quote counts only
+# when it opens a word ("'sale'"), never when it sits inside one (potter's).
+_QUOTED = re.compile(
+    r"[\"“”][^\"“”]{2,}[\"“”]"
+    r"|(?<![A-Za-z0-9])'[^']{2,}'(?![A-Za-z0-9])"
+)
+
+# COPY THE FACES CANNOT SET. The headline, subhead and CTA are composited in
+# the brand's faces plus a Noto face per script -- none of which carries emoji,
+# pictographs or dingbats. A headline ending in two emoji used to be accepted: the emoji were set
+# in whatever emoji font the render host happened to have (a different one on
+# every machine, none of them the brand's), wrapped onto a 135px line of their
+# own, and nothing measured them. So they are stopped HERE, before any layout
+# or charge, with a message the agent can act on. Emoji are welcome in
+# caption.body, which Instagram sets, not us.
+#
+# These blocks are named so the refusal can be, and because a few of their
+# code points ARE declared by an Indic face's symbols subset (a flag, a
+# control character) and would otherwise slip through the coverage check
+# below. Everything else -- an arrow, a maths sign, a geometric shape -- is
+# refused by `fonts.unsettable`, straight from what the vendored faces declare.
+_PICTOGRAPHS = (
+    (0x2300, 0x23FF),  # technical pictographs: watch, hourglass, alarm clock
+    (0x2600, 0x27BF),  # miscellaneous symbols and dingbats: stars, hearts, ticks
+    (0x2B00, 0x2BFF),  # star, large squares and circles
+    (0x1F000, 0x1FAFF),  # every emoji plane, flags and skin tones included
+    (0xFE00, 0xFE0F),  # variation selectors (the "make it an emoji" switch)
+    (0xE0000, 0xE01EF),  # tag characters and the variation selector supplement
+    (0x20E3, 0x20E3),  # the keycap
+)
+# Zero-width joiner and non-joiner are part of ordinary Hindi, Malayalam, Sinhala
+# and Urdu spelling. They only ever built an emoji sequence between pictographs,
+# and those are already refused.
+_JOINERS = frozenset("\u200c\u200d")
+
+
+def _unsettable(text: str) -> list[str]:
+    """The characters in `text` the compositor's faces cannot set, in order."""
+    found: list[str] = []
+    for ch in text:
+        cp = ord(ch)
+        pictograph = any(lo <= cp <= hi for lo, hi in _PICTOGRAPHS)
+        control = unicodedata.category(ch) in ("Cc", "Cf", "Co", "Cs") and ch not in _JOINERS
+        if (pictograph or control) and ch not in found:
+            found.append(ch)
+    for ch in fonts.unsettable(text):
+        if ch not in found:
+            found.append(ch)
+    return found
+
+
+def settable_copy(field: str, value: str | None) -> str | None:
+    """Copy as the compositor will set it: whitespace collapsed (a newline in a
+    headline is a space to the browser anyway), refused when it carries a
+    character no face of ours has, and refused when a headline has nothing
+    left -- a slide whose headline was three spaces used to be composed and
+    charged with no headline at all."""
+    if value is None:
+        return None
+    text = " ".join(value.split())
+    if field == "headline" and not text:
+        raise ValueError("headline is empty once whitespace is removed.")
+    bad = _unsettable(text)
+    if bad:
+        shown = ", ".join(
+            f"{ch!r} (U+{ord(ch):04X})" if ch.isprintable() else f"U+{ord(ch):04X}"
+            for ch in bad[:6]
+        )
+        raise ValueError(
+            f"{field} contains characters the brand's typefaces cannot set: {shown}. "
+            f"Rewrite the {field} in plain words and punctuation -- no emoji, pictographs, "
+            f"arrows, dingbat symbols or invisible control characters. "
+            f"Emoji are fine in caption.body."
+        )
+    return text
+
+
+# `mood` is appended to the image prompt by the photoreal enrichment, so its
+# length is part of the enrichment budget.
+MOOD_MAX = 80
 
 NEGATIVE_PROMPT_DEFAULT = (
     "text, letters, words, watermark, logo, signature, caption, typography, "
@@ -62,13 +162,27 @@ CAROUSEL_MAX = 6
 
 
 class Format(BaseModel):
-    type: Literal["single", "carousel"] = "single"
-    aspect_ratio: AspectRatio = "1:1"
+    # single: one image. carousel: 2-6 images. reel: one image set in motion,
+    # always 9:16 -- a seven-second push-in over the photo with the card
+    # fading in, published as a Reel (or forwarded to WhatsApp Status).
+    # story: one full-screen 9:16 still, for an Instagram Story or a WhatsApp
+    # Status. The owner picks post or story; see prompts.py, "Post or Story".
+    type: Literal["single", "carousel", "reel", "story"] = "single"
+    # Still accepted as input so stored and model-authored briefs validate, but
+    # it is not a choice: a still is 4:5 and a reel is 9:16 (see the validator).
+    aspect_ratio: AspectRatio = "4:5"
     slide_count: int | None = Field(default=None, ge=1, le=CAROUSEL_MAX)
 
     @model_validator(mode="after")
     def slide_count_matches_type(self) -> Format:
-        if self.type == "single":
+        # One ratio per kind of output, decided here and nowhere else. Instagram
+        # locks a carousel to its first slide's ratio and crops or letterboxes
+        # the rest, so the ratio lives on the brief -- never on a slide -- and
+        # every slide inherits it by construction.
+        self.aspect_ratio = "9:16" if self.type in ("reel", "story") else POST_ASPECT
+        if self.type in ("reel", "story"):
+            self.slide_count = 1
+        elif self.type == "single":
             self.slide_count = 1
         elif not self.slide_count:
             self.slide_count = 3
@@ -84,11 +198,24 @@ class VisualDirection(BaseModel):
 
     prompt: str = Field(min_length=10, max_length=900)
     negative_prompt: str = NEGATIVE_PROMPT_DEFAULT
-    mood: str | None = None
+    mood: str | None = Field(default=None, max_length=MOOD_MAX)
     reference_asset_id: str | None = Field(
         default=None, description="brand_assets.id when the post features a real product photo"
     )
     seed: int | None = None
+
+    @field_validator("mood")
+    @classmethod
+    def no_text_in_mood(cls, v: str | None) -> str | None:
+        # `mood` is appended to the positive prompt by the photoreal enrichment,
+        # so "bold typography with the slogan" here would reach the image model
+        # having skipped the check below.
+        if v and _TEXT_REQUEST.search(v):
+            raise ValueError(
+                "visual_direction.mood describes atmosphere only (e.g. 'warm, homely'); "
+                "it must not ask for text, logos or lettering."
+            )
+        return v.strip() if v else v
 
     @field_validator("prompt")
     @classmethod
@@ -144,6 +271,11 @@ class Slide(BaseModel):
     visual_direction: VisualDirection
     template_id: str | None = None
 
+    @field_validator("headline", "subhead")
+    @classmethod
+    def copy_can_be_set(cls, v: str | None, info) -> str | None:
+        return settable_copy(info.field_name, v)
+
 
 class CreativeBrief(BaseModel):
     intent: Intent
@@ -165,6 +297,11 @@ class CreativeBrief(BaseModel):
     )
     grounding: Grounding = Field(default_factory=Grounding)
     slides: list[Slide] = Field(default_factory=list)
+
+    @field_validator("headline", "subhead", "cta")
+    @classmethod
+    def copy_can_be_set(cls, v: str | None, info) -> str | None:
+        return settable_copy(info.field_name, v)
 
     @model_validator(mode="after")
     def carousel_consistency(self) -> CreativeBrief:
@@ -190,10 +327,18 @@ class CreativeBrief(BaseModel):
 
     # -- helpers used downstream -------------------------------------------- #
     def pixel_size(self) -> tuple[int, int]:
-        return PIXELS[self.format.aspect_ratio]
+        if self.is_reel():
+            return REEL_SIZE
+        return STORY_SIZE if self.is_story() else POST_SIZE
 
     def is_carousel(self) -> bool:
         return self.format.type == "carousel"
+
+    def is_reel(self) -> bool:
+        return self.format.type == "reel"
+
+    def is_story(self) -> bool:
+        return self.format.type == "story"
 
     def units(self) -> list[Slide]:
         """Normalise single and carousel into one list the pipeline can loop over."""
@@ -221,11 +366,31 @@ def check_brand_rules(brief: CreativeBrief, brand: Any) -> list[str]:
     model can set to true itself.
     """
     parts = [brief.headline, brief.subhead, brief.cta, brief.caption.body, brief.alt_text]
+    parts += list(brief.caption.hashtags or [])
     for s in brief.slides:
         parts += [s.headline, s.subhead]
-    haystack = " ".join(p for p in parts if p).lower()
+    haystack = _fold(" ".join(p for p in parts if p))
     rules = getattr(brand, "never_say", None) or []
-    return [phrase for phrase in rules if phrase.lower() in haystack]
+    hits = []
+    for phrase in rules:
+        needle = _fold(phrase)
+        if needle and re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack):
+            hits.append(phrase)
+    return hits
+
+
+_FOLD = re.compile(r"[\W_]+")  # \W is Unicode-aware: Devanagari, Kannada, Tamil survive
+
+
+def _fold(text: str) -> str:
+    """Lower-case, punctuation and spacing collapsed: "100 % Pure!" == "100% pure".
+
+    Whole-phrase matching on the folded text means "Free" no longer blocks
+    "Freedom Sale", and "#cheap" in the hashtags no longer slips past "cheap".
+    Letters in any script are kept, so a never_say written in Devanagari still
+    matches copy written in Devanagari.
+    """
+    return _FOLD.sub(" ", text.lower()).strip()
 
 
 EXAMPLE = {
@@ -255,7 +420,7 @@ EXAMPLE = {
 
 EXAMPLE_CAROUSEL = {
     "intent": "educational",
-    "format": {"type": "carousel", "aspect_ratio": "1:1", "slide_count": 3},
+    "format": {"type": "carousel", "aspect_ratio": "4:5", "slide_count": 3},
     "headline": "3 ways to use cold-pressed oil",
     "cta": "Save this post",
     "visual_direction": {

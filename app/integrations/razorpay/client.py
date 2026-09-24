@@ -61,10 +61,9 @@ def apply_payment(event: dict) -> bool:
     """Idempotent on the Razorpay payment id."""
     if event.get("event") not in ("payment_link.paid", "payment.captured"):
         return False
-    entity = (
-        event.get("payload", {}).get("payment", {}).get("entity", {})
-        or event.get("payload", {}).get("payment_link", {}).get("entity", {})
-    )
+    entity = event.get("payload", {}).get("payment", {}).get("entity", {}) or event.get(
+        "payload", {}
+    ).get("payment_link", {}).get("entity", {})
     notes = entity.get("notes", {}) or {}
     account_id, pack = notes.get("account_id"), notes.get("pack")
     if not account_id or pack not in PACKS:

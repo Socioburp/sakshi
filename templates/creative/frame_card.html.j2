@@ -1,0 +1,55 @@
+{% extends "_base.html.j2" %}
+{# A catalogue card: the photograph inset in a frame on a brand-colour ground,
+   the words set beneath it on the card, never over the picture. Premium and
+   quiet -- jewellery, skincare, boutiques. Nothing is ever composited over
+   the product. #}
+{% set hl = slide.headline|length %}
+{% set hf = 0.078 if hl < 20 else (0.068 if hl < 32 else 0.058) %}
+{% set inset_x = pad_x %}
+{% set inset_top = [pad_top, (width*0.075)|round|int]|max %}
+{# The card beneath the photo needs ~0.42w for two lines of headline, a
+   subhead and the footer row; the photo takes what is left, within bounds,
+   so a square post does not squeeze the words into a strip. #}
+{% set gap = (width*0.05)|round|int %}
+{% set card_need = (width*0.42)|round|int %}
+{% set photo_h = [[height - inset_top - pad_bottom - gap - card_need, (height*0.38)|round|int]|max, (height*0.60)|round|int]|min %}
+{% block styles %}
+  html, body { background: {{ brand.primary }}; }
+  .bg { top: {{ inset_top }}px; left: {{ inset_x }}px; width: {{ width - 2*inset_x }}px;
+        height: {{ photo_h }}px; border-radius: {{ (width*0.02)|round|int }}px;
+        border: {{ (width*0.004)|round|int }}px solid {{ brand.frame }}; box-sizing: border-box; }
+  .scrim { display: none; }
+  .grain { top: {{ inset_top }}px; left: {{ inset_x }}px; width: {{ width - 2*inset_x }}px;
+           height: {{ photo_h }}px; border-radius: {{ (width*0.02)|round|int }}px; }
+  {# Anchored to the floor and auto height: the card grows upward with the
+     words and the framed photograph gives way (reflow() in FIT_JS), down to
+     38% of the frame. Pinning top AND bottom made it a fixed box. #}
+  {# The card carries the ground's own colour: it changes nothing a reader
+     sees, and it tells FIT_JS the words sit on a designed ground (`solid`),
+     not on the photograph. #}
+  .card { position: absolute; left: {{ inset_x }}px; right: {{ inset_x }}px;
+          bottom: {{ pad_bottom }}px;
+          min-height: {{ height - pad_bottom - inset_top - photo_h - gap }}px;
+          max-height: {{ height - pad_bottom - inset_top - gap - (height*0.38)|round|int }}px;
+          background: {{ brand.primary }};
+          display: flex; flex-direction: column; }
+  .headline { font-size: {{ (width * hf)|round|int }}px; text-shadow: none; max-width: 96%;
+              letter-spacing: 0; }
+  .subhead { font-size: {{ (width*0.032)|round|int }}px; text-shadow: none; max-width: 90%; }
+  .footrow { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; row-gap: {{ (width*0.03)|round|int }}px;
+             gap: {{ (width*0.04)|round|int }}px; margin-top: auto;
+             padding-top: {{ (width*0.045)|round|int }}px; }
+  .footrow .logo { filter: none; }
+  .sig-corner { display: none; }
+{% endblock %}
+{% block body %}
+  <div class="card" data-photo-above data-photo-top="{{ inset_top }}" data-gap="{{ gap }}">
+    <h1 class="headline" dir="auto">{{ slide.headline }}</h1>
+    {% if slide.subhead %}<p class="subhead" dir="auto">{{ slide.subhead }}</p>{% endif %}
+    <div class="footrow">
+      {% if brand.logo_url %}<img class="logo" src="{{ brand.logo_url }}" alt="">
+      {% else %}<span class="brandline" dir="auto">{{ brand.name }}</span>{% endif %}
+      {% if show_cta %}<span class="cta" dir="auto">{{ brief.cta }}</span>{% endif %}
+    </div>
+  </div>
+{% endblock %}

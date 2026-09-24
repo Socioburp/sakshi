@@ -2,6 +2,7 @@
 
 install:
 	pip install -e ".[dev]" && playwright install chromium
+	python -c "from app.creative.product import warm_up; warm_up()"
 
 dev:
 	uvicorn app.main:app --reload --port 8000

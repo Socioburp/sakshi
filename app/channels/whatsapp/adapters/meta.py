@@ -68,9 +68,7 @@ class MetaAdapter:
         sent = headers.get("x-hub-signature-256", "")
         if not sent.startswith("sha256="):
             return False
-        digest = hmac.new(
-            settings.wa_app_secret.encode(), raw_body, hashlib.sha256
-        ).hexdigest()
+        digest = hmac.new(settings.wa_app_secret.encode(), raw_body, hashlib.sha256).hexdigest()
         return hmac.compare_digest(digest, sent.removeprefix("sha256="))
 
     def parse(self, body: dict[str, Any], headers: dict[str, str]) -> list[InboundMessage]:
@@ -165,6 +163,11 @@ class MetaAdapter:
                 "type": "image",
                 "image": {"link": msg.image_url, "caption": msg.caption or ""},
             }
+        if msg.kind == "video":
+            return base | {
+                "type": "video",
+                "video": {"link": msg.video_url, "caption": msg.caption or ""},
+            }
         if msg.kind == "buttons":
             return base | {
                 "type": "interactive",
@@ -177,6 +180,32 @@ class MetaAdapter:
                             for b in msg.buttons[:3]
                         ]
                     },
+                },
+            }
+        if msg.kind == "template":
+            components: list[dict[str, Any]] = []
+            if msg.template_params:
+                components.append(
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": p} for p in msg.template_params],
+                    }
+                )
+            for i, b in enumerate(msg.buttons[:3]):
+                components.append(
+                    {
+                        "type": "button",
+                        "sub_type": "quick_reply",
+                        "index": str(i),
+                        "parameters": [{"type": "payload", "payload": b.id}],
+                    }
+                )
+            return base | {
+                "type": "template",
+                "template": {
+                    "name": msg.template_name,
+                    "language": {"code": msg.template_lang},
+                    "components": components,
                 },
             }
         raise ValueError(f"unsupported outbound kind {msg.kind}")

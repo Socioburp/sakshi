@@ -1,8 +1,9 @@
 name: CI
 
+# Every branch, not only main: a feature branch was pushed and deployed from
+# without this ever running.
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -12,9 +13,27 @@ concurrency:
 
 jobs:
   test:
-    name: lint + tests
+    name: lint + tests (with Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+
+    # The *_db suites -- 48 tests covering generate, recompose, billing, refunds
+    # and publishing end to end -- skip when no database answers. Without this
+    # service they skipped HERE too, which means they ran nowhere.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sakshi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
 
     # No secrets. Every Settings field has a default and the mock providers
     # are the defaults, so the suite runs with no vendor accounts.
@@ -24,21 +43,25 @@ jobs:
       STT_PROVIDER: mock
       IMAGEGEN_PROVIDER: mock
       INSTAGRAM_MOCK: "true"
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/sakshi
+      # A closed port on Windows hangs psycopg forever; harmless here, and it
+      # keeps a broken service from eating the whole job timeout.
+      PGCONNECT_TIMEOUT: "5"
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.11" # the Dockerfile's python:3.11-slim -- test what ships
           cache: pip
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      # tests/test_templates.py renders through app/creative/compose.py,
-      # which drives a headless Chromium.
+      # tests/test_layouts.py and the pipeline suites render through
+      # app/creative/compose.py, which drives a headless Chromium.
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -52,8 +75,18 @@ jobs:
         run: ruff check app scripts tests
 
       - name: Format check
-        run: ruff format --check app scripts tests
-        continue-on-error: true   # drop this line once the tree is ruff-format clean
+        run: ruff format --check
 
+      - name: Migrate
+        run: alembic upgrade head
+
+      # -rs prints every skip and why. The guard after it fails the job if the
+      # database suites skipped anyway: a green run must mean they RAN.
       - name: Tests
-        run: pytest -q
+        shell: bash # -eo pipefail: tee must not swallow pytest's exit code
+        run: |
+          pytest -q -rs | tee pytest.out
+          if grep -q "no database with the schema available" pytest.out; then
+            echo "::error::database suites skipped -- Postgres or the migration is broken"
+            exit 1
+          fi

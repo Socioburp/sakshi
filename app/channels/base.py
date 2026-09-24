@@ -12,8 +12,16 @@ from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 MessageKind = Literal[
-    "text", "audio", "image", "video", "document", "interactive",
-    "location", "sticker", "system", "unsupported",
+    "text",
+    "audio",
+    "image",
+    "video",
+    "document",
+    "interactive",
+    "location",
+    "sticker",
+    "system",
+    "unsupported",
 ]
 
 
@@ -54,11 +62,18 @@ class Button:
 @dataclass(slots=True)
 class OutboundMessage:
     to: str
-    kind: Literal["text", "image", "buttons"] = "text"
+    kind: Literal["text", "image", "video", "buttons", "template"] = "text"
     text: str | None = None
     image_url: str | None = None
+    video_url: str | None = None  # MP4 on a public URL (a reel)
     caption: str | None = None
     buttons: list[Button] = field(default_factory=list)
+    # kind == "template": a pre-approved template, the only message Meta
+    # delivers outside the 24h window. `text` holds the rendered body for our
+    # own records; `buttons` carry the quick-reply PAYLOADS (ids), in order.
+    template_name: str | None = None
+    template_lang: str = "en"
+    template_params: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

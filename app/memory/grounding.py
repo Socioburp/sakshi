@@ -110,8 +110,7 @@ class Grounded:
         return (
             "## What we know about this brand\n"
             "Retrieved for this message. It may be stale or wrong -- if it "
-            "contradicts what the owner just said, they are right.\n\n"
-            + "\n\n".join(sections)
+            "contradicts what the owner just said, they are right.\n\n" + "\n\n".join(sections)
         )
 
 

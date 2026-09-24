@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     voyage_model: str = "voyage-3"
     embed_dim: int = 1024
 
+    # google drive -- read-only, and only for the staff onboarding command.
+    # Our team hands over a brand's reference creatives and raw product photos
+    # as a Drive folder shared "anyone with the link", which a plain API key can
+    # list and download. No service account and no OAuth: the command is run by
+    # a person on their own machine, never by the app, and it must not be able
+    # to reach a folder nobody deliberately shared.
+    google_api_key: str = ""
+
     # r2
     r2_account_id: str = ""
     r2_access_key_id: str = ""
@@ -56,12 +64,30 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_from: str = ""
+    # Festival offers to owners OUTSIDE the 24h window can only travel as an
+    # approved template message, which Meta bills as a marketing conversation
+    # (about Rs 1 in India). Empty = those pushes are off; in-window ones still
+    # go, free. The template is created once in WhatsApp Manager -- see
+    # docs/whatsapp_templates.md for the exact body and button.
+    wa_template_festival: str = ""
+    # At most this many PAID pushes per brand per calendar month.
+    festival_push_monthly_cap: int = 4
 
     # instagram (Track A)
     instagram_mock: bool = True
     ig_app_id: str = ""
     ig_app_secret: str = ""
     ig_redirect_uri: str = ""
+    # Insights (reach, saves, shares per post) need instagram_business_manage_insights,
+    # which App Review grants. Flip this once it is approved; the connect link
+    # then asks for it and the sync starts reading numbers.
+    ig_insights_enabled: bool = False
+    # Webhook verification (comments and DMs). Falls back to WA_VERIFY_TOKEN.
+    ig_verify_token: str = ""
+    # Replying to comments and DMs needs the manage_comments / manage_messages
+    # permissions from App Review. Flip on once granted; the connect link then
+    # asks for them and the reply loop goes live.
+    ig_engagement_enabled: bool = False
 
     # stt
     stt_provider: Literal["mock", "elevenlabs", "deepgram", "sarvam"] = "mock"
@@ -69,16 +95,145 @@ class Settings(BaseSettings):
     deepgram_api_key: str = ""
     sarvam_api_key: str = ""
 
-    # imagegen
-    imagegen_provider: Literal["mock", "provider_a", "provider_b"] = "mock"
-    imagegen_a_api_key: str = ""
-    imagegen_b_api_key: str = ""
+    # imagegen -- the FLUX family (fal/replicate/bfl) plus OpenAI's gpt-image-1,
+    # one interface. Model ids are per vendor; the price is what the ledger records.
+    #
+    # DEFAULTS ARE THE QUALITY TIER, NOT THE CHEAP TIER.
+    # Every default here used to be the fast/distilled variant -- schnell at 4
+    # steps, klein 4B, gpt-image-1 at "medium" -- which is why creatives came
+    # back soft, plasticky and obviously generated. Those models are built to
+    # win on latency, not on whether an owner would put the picture on their
+    # grid. The product promise is "a 25-year marketing creator made this", so
+    # the default is `dev` at full steps and the cheap tier is opt-in.
+    imagegen_provider: Literal["mock", "fal", "replicate", "bfl", "openai"] = "mock"
+    fal_key: str = ""
+    imagegen_fal_model: str = "fal-ai/flux/dev"  # schnell is the cheap tier
+    replicate_api_token: str = ""
+    imagegen_replicate_model: str = "black-forest-labs/flux-dev"
+    bfl_api_key: str = ""
+    imagegen_bfl_model: str = "flux-2-pro"  # klein-4b is the cheap tier
+    openai_api_key: str = ""
+    # The dated snapshot, not the floating alias: the alias moves under you and
+    # the look of every brand's grid moves with it. Change it here or with
+    # IMAGEGEN_OPENAI_MODEL, deliberately, never by surprise.
+    imagegen_openai_model: str = "gpt-image-2-2026-04-21"
+    # There is no quality setting. It is "high", always, for a single post and
+    # for every slide of a carousel (providers.OPENAI_QUALITY). Quality is never
+    # traded for speed or cost; a slow job says so in the chat instead.
+    #
+    # The size the picture is GENERATED at: native 4:5, both edges multiples of
+    # 16, above the 1080x1350 it is delivered at and below the pixel count
+    # (2560x1440) past which OpenAI marks resolutions experimental. 1728x2160 is
+    # the next step up and sits just past that line -- verify before using it.
+    # 1080x1350 is not a legal generation size: 1080 is not a multiple of 16.
+    imagegen_size: str = "1600x2000"
+    # Slides of a carousel are generated in parallel, this many at a time.
+    # OpenAI tier 1 is 5 images/minute for gpt-image-2; a 429 is retried with
+    # the vendor's retry-after, never answered with a cheaper call.
+    imagegen_concurrency: int = 4
+    # The background gate: every generated picture is inspected and a rejected
+    # one is regenerated with a corrected prompt, up to this many attempts per
+    # slide. On exhaustion the slide FAILS and is refunded; a rejected picture
+    # is never delivered. Each attempt is a paid vendor call.
+    imagegen_gate_attempts: int = 6
+    # ...and never more than this much vendor spend on one slide, in micro-dollars.
+    # The owner pays one credit however many attempts it takes, so an unbounded
+    # gate is an unbounded loss. At ~$0.29 a call this allows three honest tries;
+    # a prompt that fails three times is a prompt problem, not bad luck. The cap
+    # stops the RETRYING -- it never lowers the settings of a call. 0 = no cap.
+    imagegen_gate_budget_micros: int = 900_000
+    # The final check: the deterministic composite QA and the vision gate that
+    # follows it both run on the EXPORTED JPEG of every delivered slide, on
+    # every lane -- generated, owner photo, product studio, reused and
+    # recomposed. Nothing is stored 'ready' or sent until both have passed.
+    # Off only where there is no inspector to call (the test suite fakes it
+    # the way it fakes the background gate); a creative made with it off is a
+    # creative nobody looked at, which is the hole this closes.
+    composite_gate_enabled: bool = True
+    # How many times one slide may be re-composed into another layout to fix
+    # what the final check found. Each is a layout measurement and a full
+    # render -- 3.2-5.6s with a warm browser, measured, not the ~1s this
+    # comment used to claim -- and NO vendor call, which is the point: the
+    # owner buys a second picture only when no arrangement of the one they have
+    # is good enough. Two is enough to reach a layout of the other kind from
+    # any starting layout, and only a fault or type driven to its floor opens
+    # the ladder at all (compositeqa.SWEEP_REPAIRS), so a clean card pays none
+    # of this.
+    composite_free_variants: int = 2
+    # ...and how many corrected regenerations the picture may be worth after
+    # that. Only the GENERATED lane ever spends this: an owner's photograph, a
+    # product studio built from one and a reused background are never
+    # re-bought, because the owner did not ask us to replace their picture.
+    # Held inside imagegen_gate_budget_micros like every other vendor call.
+    composite_paid_retries: int = 1
+    # What the inspector costs, in micro-dollars per thousand tokens, for the
+    # ledger only. The model is a setting (ANTHROPIC_MODEL), so its price has
+    # to be one too. The defaults are Sonnet-class list prices: $3/Mtok in,
+    # $15/Mtok out.
+    #
+    # One delivered slide is one vision call on the exported JPEG scaled to a
+    # 819x1024 long edge. At the documented ~(w*h)/750 that image is ~1,120
+    # tokens and the rubric another ~530, and the answer is JSON plus a short
+    # note -- ~60 output tokens, capped at 300 by INSPECT_MAX_TOKENS. So
+    # $0.0058 a slide, $0.0094 if the inspector uses its whole allowance:
+    # 2.0% of the $0.2883 the picture costs. A single post adds one call; a
+    # six-slide carousel adds six, $0.035 ($0.057 worst case). Latency is
+    # ~2-5s per call, and slides are already built concurrently, so a carousel
+    # pays that once rather than six times.
+    #
+    # The repair ladder costs time rather than money, and only on a slide the
+    # final check objected to: up to composite_free_variants renders that
+    # composed at 3.2-5.6s each, and up to five layouts may be attempted before
+    # two of them compose (a picture generated for one window does not fill
+    # another's), so a repaired slide adds ~10s and at worst ~20s. A slide
+    # whose only blemish is a saturated scrim is NOT repaired, which is what
+    # keeps this off the ordinary path. A carousel pays it concurrently too.
+    inspector_input_micros_per_ktok: int = 3000
+    inspector_output_micros_per_ktok: int = 15000
+    # Seconds of silence after which the owner is told the job is still going.
+    # A metric to watch and a message to send -- never a limit on the output.
+    slow_notice_s: int = 60
+    # How a carousel reaches the owner. "ordered": slides are held until the set
+    # is done and sent 1..N, so the chat reads in order and the set can be
+    # forwarded as it stands; progress is reported in words meanwhile.
+    # "as_ready": each slide is sent the moment it finishes, captioned with its
+    # place, and may arrive out of order. A single post is always sent at once.
+    carousel_delivery: Literal["ordered", "as_ready"] = "ordered"
+    # Denoising steps for the step-taking FLUX models. schnell is distilled to
+    # 4 and ignores more; dev is trained for ~28 and visibly improves up to it.
+    # 0 means "the right number for the model", resolved in providers.py.
+    imagegen_steps: int = 0
+    # PNG out of the vendor, JPEG once at the end. Asking a vendor for JPEG
+    # meant the background was lossily encoded, composited over, screenshotted
+    # and encoded again -- two generation losses before the owner saw it.
+    imagegen_lossless_source: bool = True
+    # Vendor price per image in micro-dollars, for the ledger only. Unset (0)
+    # means the per-vendor list price in providers.DEFAULT_COST_MICROS.
+    imagegen_cost_micros: int = 0
+
+    # compositor. Empty = the Chromium `playwright install` fetched; set it to
+    # use a Chromium the host already ships (a path to the `chrome` binary).
+    chromium_executable: str = ""
+    # Refuse to render when a face the creative is set in did not load, rather
+    # than ship the brand in a fallback face. Off only where there is no
+    # network to fetch fonts from (the test suite).
+    compose_require_fonts: bool = True
+
+    # product lane: the owner's photo, product kept, background replaced
+    cutout_enabled: bool = True
+    # rembg model. isnet-general-use is MIT-licensed, ~1.2GB RSS at 1024px and
+    # ~2s on a small CPU. birefnet-general-lite is sharper but needs >4GB.
+    # bria-rmbg (rembg's default) is NOT licensed for commercial use.
+    cutout_model: str = "isnet-general-use"
 
     # billing
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
-    free_trial_credits: int = 10
+    # A credit is now ~$0.29-0.90 of vendor spend (gpt-image-2 high, plus gate
+    # retries), not the ~$0.03 it was when this was 10. Ten free credits was up
+    # to ~$9 handed to every signup; three is a fair look at the product.
+    free_trial_credits: int = 3
 
     @property
     def is_prod(self) -> bool:
