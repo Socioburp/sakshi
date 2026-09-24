@@ -63,6 +63,17 @@ def _configured() -> tuple[int, int]:
     return gw, gh
 
 
+class WindowTooShort(ValueError):
+    """No generation frame covers this window within the trim the compositor
+    allows, so nothing is generated for it.
+
+    A frame picked anyway would be paid for and then refused by
+    fit_background. No template reports a window this short today -- the
+    shortest measurable at the schema's copy limits is 892x513 -- but the
+    promise is kept by refusing, not by luck.
+    """
+
+
 def generation_size_for_box(window: tuple[int, int]) -> tuple[int, int]:
     """The frame a picture is GENERATED at to fill `window` (pixels) uncropped.
 
@@ -71,7 +82,19 @@ def generation_size_for_box(window: tuple[int, int]) -> tuple[int, int]:
     ratio exactly (1440x2560 for a 1080x1920 story) is preferred over one
     that is nearer the oversampling target but needs a trim; where no exact
     frame exists (a 892x652 card window) the trim is under CROP_TOLERANCE.
+
+    CROP_TOLERANCE is the PREFERENCE -- an exact frame beats a nearer-target
+    one that needs a trim. What the answer must actually hold to is the
+    compositor's own tolerance, because that is who receives it. The search
+    used to take the best frame whatever its trim, so a short window (1080
+    wide by 343 to 358 tall) got one that trims 4 to 17px: generated, charged
+    for, and then refused by fit_background. A window shorter still raised a
+    bare ValueError out of the slide. Now a window no legal frame covers
+    within compose.GENERATED_CROP_TOLERANCE raises WindowTooShort instead, so
+    nothing is ever generated that the compositor will throw away.
     """
+    from app.creative.compose import GENERATED_CROP_TOLERANCE
+
     bw, bh = int(window[0]), int(window[1])
     if bw <= 0 or bh <= 0:
         raise ValueError(f"window must be positive, got {bw}x{bh}")
@@ -89,8 +112,11 @@ def generation_size_for_box(window: tuple[int, int]) -> tuple[int, int]:
             cost = (crop > CROP_TOLERANCE, round(crop, 2), abs(w - bw * target))
             if best is None or cost < best[0]:
                 best = (cost, (w, h))
-    if best is None:
-        raise ValueError(f"no legal generation frame covers a {bw}x{bh} window")
+    if best is None or best[0][1] > GENERATED_CROP_TOLERANCE:
+        raise WindowTooShort(
+            f"no generation frame covers a {bw}x{bh} window within "
+            f"{GENERATED_CROP_TOLERANCE}px of it"
+        )
     return best[1]
 
 

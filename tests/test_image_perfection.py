@@ -96,6 +96,33 @@ def _pixels(im: Image.Image) -> list[tuple[int, int, int]]:
 # --------------------------------------------------------------------------- #
 # 1. the picture is generated for the window the layout shows
 # --------------------------------------------------------------------------- #
+def test_no_frame_is_generated_that_the_compositor_would_then_refuse():
+    """The search took the BEST frame available rather than one guaranteed
+    under the trim fit_background allows, so a short window (1080 wide by 343
+    to 358 tall) got a frame that trims 4 to 17px: generated, charged for at
+    the vendor, and then refused by PictureMismatch -- which is deliberately
+    never retried. Shorter still it raised a bare ValueError out of the slide
+    with no name on it. Neither height is reachable from the six templates
+    today, so this pins the rule rather than a cure for a live bug."""
+    for width in (892, 1080):
+        for height in range(340, 1400):
+            try:
+                frame = gen.generation_size_for_box((width, height))
+            except gen.WindowTooShort:
+                continue
+            crop = gen.crop_for(frame, (width, height))
+            assert crop <= compose.GENERATED_CROP_TOLERANCE, (width, height, frame, crop)
+            compose.fit_background(_photo(*frame, (10, 10, 60, 60)), width, height, generated=True)
+    # A window no legal frame covers is refused by name, not by ValueError
+    # escaping from inside the slide.
+    for window in ((1080, 300), (892, 280)):
+        with pytest.raises(gen.WindowTooShort):
+            gen.generation_size_for_box(window)
+    # And every window the six templates actually report is served.
+    for window in [(892, 652), (892, 554), (892, 513), (1080, 842), (1080, 577), (1080, 1184)]:
+        assert gen.generation_size_for_box(window)
+
+
 @pytest.mark.parametrize("kind", ["single", "story"])
 @pytest.mark.parametrize("template", sorted(compose.TEMPLATES))
 async def test_the_layout_reports_the_window_it_shows_the_picture_through(chromium, template, kind):
