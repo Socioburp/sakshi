@@ -896,6 +896,41 @@ async def test_a_fault_a_template_change_fixes_costs_no_vendor_call(world, monke
     assert row.cost_micros == 288_300 + 4_500, "the picture and the look, nothing more"
 
 
+async def test_the_look_at_the_picture_is_on_the_ledger_like_the_look_at_the_card(
+    world, monkeypatch
+):
+    """bggate priced its inspections and _generate_checked dropped the number
+    on the floor. The final check's looks were on the row and the background
+    gate's were not, so the ledger disagreed with itself about which
+    inspections the owner had paid for."""
+
+    async def priced(image, **kw):
+        return bggate.Verdict([], "", cost_micros=7_000)
+
+    monkeypatch.setattr(bggate, "inspect", priced)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"]
+    (row,) = world["rows"].values()
+    assert row.cost_micros == 288_300 + 7_000 + 4_500, "the picture, the look at it, the look after"
+
+
+async def test_a_picture_the_background_gate_threw_away_still_paid_for_its_look(world, monkeypatch):
+    """The worst case for the old arithmetic: the rejected attempts are exactly
+    the ones whose inspections were invisible, so a slide that cost the owner
+    two pictures and two looks reported one look's worth less than it was."""
+    looks = {"n": 0}
+
+    async def picky(image, **kw):
+        looks["n"] += 1
+        return bggate.Verdict(["watermark"] if looks["n"] == 1 else [], "", cost_micros=7_000)
+
+    monkeypatch.setattr(bggate, "inspect", picky)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"] and len(world["provider"].requests) == 2
+    (row,) = world["rows"].values()
+    assert row.cost_micros == 2 * 288_300 + 2 * 7_000 + 4_500
+
+
 async def test_a_picture_fault_on_the_generated_lane_costs_exactly_one_more(world, monkeypatch):
     """No layout can cure a word baked into the tablecloth. That -- and only
     that -- is worth buying a second picture for, and only ever one."""

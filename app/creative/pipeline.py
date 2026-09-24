@@ -1667,6 +1667,13 @@ async def _generate_checked(
         if not reasons and inspected:
             with ctx.trace.stage(f"{stage}:inspect{attempt}"):
                 verdict = await bggate.inspect(res.data)
+            # The look is paid for whatever it decides, and a slide rejected
+            # twice pays for three of them. This used to be read and dropped,
+            # so the row told the owner the slide cost what the pictures cost
+            # while the gate around them had spent more on top -- and once the
+            # final check started pricing ITS looks, the ledger disagreed with
+            # itself about which inspections count.
+            cost += int(verdict.cost_micros or 0)
             reasons, notes = list(verdict.reasons), verdict.notes
         if not reasons:
             if rejections:
