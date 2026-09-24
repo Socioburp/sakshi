@@ -1038,8 +1038,22 @@ async def regenerate_image(
         parent_payload = copy.deepcopy(parent.payload)
         parent_version = parent.version
         payload = copy.deepcopy(parent.payload)
-        own = _owner_photo_slides(repo.creatives_for_brief(db, brief_id), slide_position)
-    if own:
+        rows = repo.creatives_for_brief(db, brief_id)
+        own = _owner_photo_slides(rows, slide_position)
+        photo_slides = {r["slide"] for r in _owner_photo_slides(rows, None)}
+        every_slide_is_a_photo = bool(rows) and photo_slides >= {c.slide_position for c in rows}
+    # The refusal is the whole truth only when there is nothing else to redo.
+    # Asked to redo a six-slide carousel whose slide 1 is the owner's
+    # shopfront, it used to refuse all six -- so "the pictures all look the
+    # same, make them different" regenerated nothing, and the hint sent the
+    # agent to create_creative, which charges for six and throws away the five
+    # the owner was happy with. A mixed carousel now redoes the generated
+    # slides and keeps the photographs, which is what was asked for.
+    # Only when no slide was named: asked to redo THIS slide and this slide is
+    # a photograph, the refusal is exactly right and nothing else is implied.
+    mixed = own and slide_position is None and not every_slide_is_a_photo
+    keep_photos = sorted(photo_slides) if mixed else []
+    if own and not keep_photos:
         # "Change the picture" on a slide that shows the owner's own photograph
         # would run the same free lane and hand back the same photo, and
         # spend a revision doing it. Said plainly instead.
@@ -1112,12 +1126,18 @@ async def regenerate_image(
                 "reason": "unknown_slide",
                 "hint": f"This carousel has slides {sorted(positions)}.",
             }
-        if slide_position is not None:
-            # Keep every other slide's picture. Without this, redoing slide 3 of
-            # six re-bought all six -- and replaced five the owner already liked.
+        # Keep every other slide's picture. Without this, redoing slide 3 of
+        # six re-bought all six -- and replaced five the owner already liked.
+        # With no slide named it is the owner's own photographs that are kept:
+        # regenerating one returns the same photo, so only the generated
+        # slides are redone and only they are charged.
+        kept = positions - {slide_position} if slide_position is not None else set(keep_photos)
+        if kept:
             now = datetime.now(UTC)
             with session_scope() as db:
-                prev = repo.creatives_for_brief(db, brief_id)
+                prev = [
+                    c for c in repo.creatives_for_brief(db, brief_id) if c.slide_position in kept
+                ]
                 if any(c.expires_at and c.expires_at <= now for c in prev):
                     return {
                         "ok": False,
@@ -1130,7 +1150,7 @@ async def regenerate_image(
                         ),
                     }
                 for c in prev:
-                    if c.slide_position != slide_position and c.background_key:
+                    if c.background_key:
                         reuse[c.slide_position] = (
                             c.background_key,
                             c.background_url or "",
@@ -1171,6 +1191,17 @@ async def regenerate_image(
                 fields=[f"slide {slide_position} picture" if slide_position else "picture"],
                 brief_id=new_brief_id,
             )
+    if keep_photos and result.get("ok"):
+        # Said out loud rather than passed over: the owner asked for every
+        # picture and some of them are their own, which no amount of
+        # regenerating changes.
+        result["kept_owner_photos"] = keep_photos
+        result["kept_owner_photos_hint"] = (
+            f"Slide(s) {keep_photos} show the owner's OWN photograph, so they were kept as "
+            "they were and not charged -- regenerating one returns the same photo. Tell them "
+            "in one line which slides are new. If they want those slides different too, they "
+            "need to send another photo (create_creative with that reference_asset_id)."
+        )
     return result
 
 

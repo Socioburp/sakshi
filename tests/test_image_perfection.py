@@ -1117,6 +1117,59 @@ async def test_regenerating_a_slide_that_shows_the_owners_photo_says_so(monkeypa
         await compose.shutdown()
 
 
+async def test_redoing_every_picture_keeps_the_owners_photo_and_redoes_the_rest(monkeypatch):
+    """A carousel whose slide 2 is the owner's shopfront and whose other two
+    are generated. "The pictures all look the same, make them different" is
+    regenerate_image with no slide named -- and it refused all three, because
+    ONE of them is a photograph. Nothing was regenerated, and the hint sent
+    the agent to create_creative, which charges for three and throws away the
+    ones the owner was happy with. The refusal is the whole truth only when
+    there is nothing else to redo."""
+    from app.creative import pipeline
+    from tests.test_product_lane import _box_mask, _fake_remove
+
+    _fake_remove(monkeypatch, _box_mask(0.3, 0.5))
+    from tests import test_pipeline_flow as flow
+
+    world = await flow.build_world(monkeypatch)
+    try:
+        flow._clean(monkeypatch)
+        asset_id = "66666666-6666-6666-6666-666666666666"
+        snap = pipeline.BrandAssetSnapshot(asset_id, "assets/shop.jpg", "image/jpeg", "shop", "s")
+        photo = _photo(2400, 1800, [840, 450, 1560, 1350])
+        blobs = world["blobs"]
+        monkeypatch.setattr(pipeline, "_resolve_photos", lambda *a, **k: {2: asset_id})
+        monkeypatch.setattr(pipeline, "_load_assets", lambda *a, **k: {asset_id: snap})
+        monkeypatch.setattr(pipeline.r2, "get", lambda k: blobs[k][0] if k in blobs else photo)
+
+        brief = _carousel("lower_third")
+        res = await pipeline.generate(world["ctx"], brief)
+        assert res["ok"] and res["credits_charged"] == 2, res
+        brief_id = _revisable(world, monkeypatch, res, brief)
+        before = len(world["provider"].requests)
+        out = await pipeline.regenerate_image(
+            world["ctx"], brief_id=brief_id, new_prompt="a different scene"
+        )
+        assert out["ok"] is True, out
+        assert out["kept_owner_photos"] == [2] and "same photo" in out["kept_owner_photos_hint"]
+        # Two generated slides redone and charged; the photograph kept, free.
+        assert out["credits_charged"] == 2, out
+        assert len(world["provider"].requests) - before == 2
+        rows = {
+            r.slide_position: r.imagegen_provider
+            for r in world["rows"].values()
+            if getattr(r, "brief_id", None) == uuid_of(out["brief_id"])
+        }
+        assert rows == {1: "fake", 2: "brand_asset", 3: "fake"}, rows
+        # But asked for THAT slide, the refusal is still exactly right.
+        named = await pipeline.regenerate_image(
+            world["ctx"], brief_id=brief_id, new_prompt=None, slide_position=2
+        )
+        assert named["ok"] is False and named["reason"] == "picture_is_the_owners_photo", named
+    finally:
+        await compose.shutdown()
+
+
 # --------------------------------------------------------------------------- #
 # 6. non-exact providers never crop or upscale silently
 # --------------------------------------------------------------------------- #
