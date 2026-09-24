@@ -728,6 +728,9 @@ async def generate(
             if pos in shipped and ref in assets
         },
         usual_template=usual_template,
+        seeded_family=next(
+            iter((getattr(brand_snapshot, "template_prefs", None) or {}).get("family") or []), None
+        ),
         palette=dict(getattr(brand_snapshot, "palette", {}) or {}),
         generated=bool(shipped & billable_positions),
     )
@@ -2596,7 +2599,10 @@ def _resolve_photos(
     candidates = list(
         db.scalars(
             select(BrandAsset)
-            .where(BrandAsset.brand_id == brand_id, BrandAsset.kind != "logo")
+            .where(
+                BrandAsset.brand_id == brand_id,
+                BrandAsset.kind.notin_(("logo", "reference")),
+            )
             .order_by(BrandAsset.created_at.desc())
             .limit(60)
         )

@@ -358,6 +358,11 @@ def _no_logo_line(brand: Any) -> str:
     return ""
 
 
+# Six is what a person can hold. A longer list reads as a wall the model skims,
+# and the rules that matter (layout, light) are the first ones written.
+MAX_SEEDED_RULES = 6
+
+
 def _brand_block(brand: Any) -> str:
     def val(attr, default=""):
         v = getattr(brand, attr, None)
@@ -397,9 +402,13 @@ def _brand_block(brand: Any) -> str:
 
         look = brandkit.LOOKS.get(prefs["look"])
         if look:
+            # A family seeded from the brand's own reference set outranks the
+            # one the look ships with: it is what our designers actually did
+            # for this brand, not what the category suggested.
+            family = prefs.get("family") or look.family
             lines.append(
                 f"Look: {look.key} ({look.heading}/{look.body}, {look.signature} mark). "
-                f"Preferred layouts: {', '.join(look.family)}."
+                f"Preferred layouts: {', '.join(family)}."
             )
 
     always = val("always_say", [])
@@ -412,6 +421,22 @@ def _brand_block(brand: Any) -> str:
             "NEVER use these words or claims, in any language, in any field of the brief: "
             + "; ".join(never)
             + ". This is a hard rule; a creative that breaks it is rejected before it is shown."
+        )
+
+    # The visual twin of never_say, and here for the same reason. When a brand
+    # is onboarded our design team hands over a set of finished creatives and
+    # scripts/onboard_brand.py reads the house style off it. Those rules belong
+    # in every prompt, whole -- not in the retrieved memory block, which is
+    # ranked by similarity to what the owner just typed. "Their posts set the
+    # words on a solid panel" resembles nothing an owner ever says, so it would
+    # rank last and never be seen, on exactly the creatives that have no other
+    # guidance: the first ones.
+    lessons = [str(rule) for rule in (prefs.get("lessons") or []) if str(rule).strip()]
+    if lessons:
+        lines.append(
+            "How this brand's own set looks -- our design team made their first creatives and "
+            "this is the style read off them. Treat it as standing instruction, not history:\n"
+            + "\n".join(f"- {rule}" for rule in lessons[:MAX_SEEDED_RULES])
         )
 
     if not val("category") and not val("tone"):

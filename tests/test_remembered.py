@@ -94,6 +94,26 @@ def test_the_usual_layout_is_claimed_only_when_it_really_is_their_usual():
     assert remembered.build(brief=brief, usual_template=None) == [], "no signature yet"
 
 
+def test_the_reference_set_is_claimed_only_when_this_creative_used_its_layout():
+    """A brand onboarded with a set our designers made has something true to say
+    from its very first creative -- and saying it about a creative that did not
+    use that layout is exactly the hollow claim this module exists to prevent."""
+    brief = CreativeBrief.model_validate({**EXAMPLE, "template_id": "frame_card"})
+    facts = remembered.build(brief=brief, seeded_family="frame_card")
+    assert _kinds(facts) == ["reference_style"]
+    assert facts[0]["fact"] == "built in the style of the first set our team made for them"
+    assert remembered.build(brief=brief, seeded_family="split_card") == []
+    assert remembered.build(brief=brief, seeded_family=None) == [], "never onboarded with a set"
+
+
+def test_their_own_approved_layout_outranks_the_set_we_seeded_them_with():
+    """Once their own posts have a signature, that is the better thing to say --
+    and both at once is one fact said twice."""
+    brief = CreativeBrief.model_validate({**EXAMPLE, "template_id": "frame_card"})
+    facts = remembered.build(brief=brief, usual_template="frame_card", seeded_family="frame_card")
+    assert _kinds(facts) == ["usual_layout"]
+
+
 def test_colours_are_claimed_only_for_a_generated_picture_and_only_real_hex():
     brief = CreativeBrief.model_validate(EXAMPLE)
     palette = {"primary": "#123b2e", "accent": "orange"}

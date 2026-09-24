@@ -14,7 +14,7 @@ from app.channels.base import MediaRef
 from app.channels.whatsapp.adapters import get_adapter
 from app.config import settings
 from app.creative import logo as logo_analysis
-from app.creative import photo_quality
+from app.creative import photo_quality, photoref
 from app.db import repo
 from app.db.models import Account, Brand, BrandAsset, Message, WaSession
 from app.db.session import session_scope
@@ -480,6 +480,29 @@ async def sync_insights(payload: dict) -> None:
         raise RuntimeError(result.get("error") or "insights sync failed")
 
 
+def usable_photo_count(db, brand_id: uuid.UUID) -> int:
+    """How many photographs this brand has that could actually become a picture.
+
+    Counted from the same whitelist the picture path works from, not as
+    "everything that is not the logo". The founder's plan is that our team
+    uploads the reference set first and the client's raw photos follow, so a
+    brand can easily hold eight 'reference' rows and not one photograph. Those
+    are our own finished creatives -- nothing can composite over them -- and
+    counting them as photos switched off the one mechanism that would have
+    asked the owner for real ones: the photo-day checklist never went out, the
+    free lane could never fire, and every creative was billed.
+    """
+    return (
+        db.scalar(
+            select(func.count(BrandAsset.id)).where(
+                BrandAsset.brand_id == brand_id,
+                BrandAsset.kind.in_(tuple(photoref.USABLE_KINDS)),
+            )
+        )
+        or 0
+    )
+
+
 async def daily_suggestion(payload: dict) -> None:
     """Tomorrow's post, offered before they ask. One line, three buttons.
 
@@ -517,13 +540,9 @@ async def daily_suggestion(payload: dict) -> None:
         # Photos are the ceiling on every post. Before the first idea, a brand
         # with fewer than three photos on file gets the photo-day checklist
         # once, instead of an idea it cannot yet build well.
-        photo_count = db.scalar(
-            select(func.count(BrandAsset.id)).where(
-                BrandAsset.brand_id == brand_id, BrandAsset.kind != "logo"
-            )
-        )
+        photo_count = usable_photo_count(db, brand_id)
         checklist_text = None
-        if (photo_count or 0) < 3 and not (brand.template_prefs or {}).get("shotlist_sent"):
+        if photo_count < 3 and not (brand.template_prefs or {}).get("shotlist_sent"):
             from app.creative import shotlist
 
             acct = db.get(Account, account_id)

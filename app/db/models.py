@@ -392,6 +392,11 @@ class BrandAsset(Base):
 
     A brief references one by id in `visual_direction.reference_asset_id` when the
     post should feature the actual product rather than a generated stand-in.
+
+    Kind 'reference' is the exception: those are finished creatives our own
+    designers made for the brand at onboarding, kept so a human can see what
+    seeded it. They already carry a headline and a logo, so nothing in the
+    creative path may ever pick one as a picture to build on.
     """
 
     __tablename__ = "brand_assets"
@@ -412,7 +417,8 @@ class BrandAsset(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('product','logo','shop','team','other')", name="ck_brand_assets_kind"
+            "kind in ('product','logo','shop','team','other','reference')",
+            name="ck_brand_assets_kind",
         ),
     )
 
