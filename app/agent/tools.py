@@ -264,6 +264,16 @@ TOOLS: list[dict[str, Any]] = [
                         "Carousel only: which slide's picture to redo. Omit for a single post."
                     ),
                 },
+                "template_id": {
+                    "type": "string",
+                    "description": (
+                        "Move to another layout at the same time. This is the ONLY way a "
+                        "GENERATED picture follows the owner into a new layout: a free "
+                        "revision that changes the layout is refused, because the stored "
+                        "picture was made for the window the old layout showed. Use it when "
+                        "revise_creative comes back 'picture_made_for_other_layout'."
+                    ),
+                },
             },
             "required": ["brief_id", "owner_request"],
         },
@@ -752,6 +762,7 @@ async def _regenerate_image(ctx: ToolContext, args: dict) -> dict:
         new_prompt=args.get("new_prompt"),
         slide_position=args.get("slide_position"),
         owner_request=_owner_request(args),
+        template_id=args.get("template_id"),
     )
 
 

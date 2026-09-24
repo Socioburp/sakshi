@@ -1011,7 +1011,18 @@ async def regenerate_image(
     new_prompt: str | None,
     slide_position: int | None = None,
     owner_request: str | None = None,
+    template_id: str | None = None,
 ) -> dict:
+    """A new picture for an existing creative, 1 credit.
+
+    `template_id` moves the slide to another layout at the same time, which is
+    the ONLY way a generated picture can follow the owner into a new layout: a
+    free revision that changes the layout is refused by _revision_guard,
+    because the stored picture was made for the window the old layout showed.
+    _LAYOUT_PICTURE_HINT sent the agent here for exactly that and the
+    parameter did not exist, so the agent either looped or regenerated for the
+    old layout again and the owner ended up where they started.
+    """
     with session_scope() as db:
         parent = db.get(Brief, brief_id)
         if parent is None:
@@ -1052,6 +1063,28 @@ async def regenerate_image(
         if not payload.get("slides"):
             payload["visual_direction"] = {**payload["visual_direction"], "prompt": new_prompt}
             payload["visual_direction"].pop("seed", None)
+
+    if template_id:
+        if template_id not in compose.TEMPLATES:
+            # compose falls back to the default for a name it does not know,
+            # so an unknown one would silently charge for the layout the owner
+            # already had.
+            return {
+                "ok": False,
+                "reason": "unknown_template",
+                "charged": 0,
+                "hint": f"The layouts are {', '.join(sorted(compose.TEMPLATES))}.",
+            }
+        if payload.get("slides") and slide_position:
+            for s in payload["slides"]:
+                if s["position"] == slide_position:
+                    s["template_id"] = template_id
+        else:
+            # The whole creative moves: the brief's layout is the new one and
+            # no slide keeps an override of the old one.
+            payload["template_id"] = template_id
+            for s in payload.get("slides") or []:
+                s["template_id"] = None
 
     try:
         brief = CreativeBrief.model_validate(payload)
@@ -2124,8 +2157,7 @@ _LAYOUT_PICTURE_HINT = (
     "Nothing was made and nothing was charged. The picture on the slide(s) named was made "
     "for the layout it had: in the new layout it would be cut by the window or covered by "
     "the words. Keep the layout and revise the copy, or call regenerate_image with "
-    "template_id set in the revision first (1 credit) so a picture is made for the new "
-    "layout."
+    "template_id set to the new layout (1 credit) so a picture is made for its window."
 )
 
 

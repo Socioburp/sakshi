@@ -814,6 +814,54 @@ async def test_a_generated_picture_is_not_reused_under_a_layout_that_cuts_or_cov
         await compose.shutdown()
 
 
+async def test_the_paid_path_the_refusal_names_exists_and_makes_the_new_layouts_picture(
+    monkeypatch,
+):
+    """_LAYOUT_PICTURE_HINT sends the agent to regenerate_image "with
+    template_id", and regenerate_image had no such parameter: its schema
+    accepted brief_id, owner_request, new_prompt and slide_position, and the
+    payload was copied unchanged. So a layout change on a generated-picture
+    creative had no working path at all -- the free revision is refused by
+    name, and the paid call the refusal names either loops or buys a second
+    picture for the layout the owner is trying to leave."""
+    from app.agent import tools
+    from app.creative import pipeline
+    from tests import test_pipeline_flow as flow
+
+    schema = next(t for t in tools.TOOLS if t["name"] == "regenerate_image")
+    assert "template_id" in schema["input_schema"]["properties"], "the hint names a real parameter"
+
+    world = await flow.build_world(monkeypatch)
+    try:
+        flow._clean(monkeypatch)
+        brief = _brief("lower_third")
+        res = await pipeline.generate(world["ctx"], brief)
+        assert res["ok"], res
+        brief_id = _revisable(world, monkeypatch, res, brief)
+        out = await pipeline.regenerate_image(
+            world["ctx"], brief_id=brief_id, new_prompt=None, template_id="split_card"
+        )
+        assert out["ok"] is True and out["credits_charged"] == 1, out
+        row = next(
+            r for r in world["rows"].values() if getattr(r, "template", None) == "split_card"
+        )
+        assert row.status == "ready"
+        # The picture was made for split_card's window, not for the canvas it
+        # would have been cut out of.
+        bg = next(v for k, v in world["blobs"].items() if f"{row.id}" in k and "-bg." in k)[0]
+        gen = compose.image_size(bg)
+        assert gen[0] / gen[1] > 1.0, f"a landscape frame for the panel's window, got {gen}"
+
+        # A layout nobody has: refused by name rather than charged for the
+        # layout they already had (compose falls back to the default).
+        bad = await pipeline.regenerate_image(
+            world["ctx"], brief_id=brief_id, new_prompt=None, template_id="no_such_layout"
+        )
+        assert bad["ok"] is False and bad["reason"] == "unknown_template", bad
+    finally:
+        await compose.shutdown()
+
+
 @pytest.mark.parametrize("kind", ["single", "story"])
 @pytest.mark.parametrize("template", WINDOWED)
 async def test_a_copy_only_revision_keeps_the_picture(monkeypatch, template, kind):
