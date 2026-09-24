@@ -495,6 +495,19 @@ async def _create_creative(ctx: ToolContext, args: dict) -> dict:
     # given -- which is exactly backwards when a creative comes out wrong.
     brief.grounding = Grounding.model_validate(ctx.grounding.as_brief_grounding())
 
+    # A brief that names no layout gets centered_overlay, which for a seeded
+    # brand is a layout their own reference set may never use. The set is what
+    # our designers actually made for this client, so it wins the model's
+    # silence -- but only the silence: a template the model chose is a decision
+    # and is left alone. Applied before the grid guard, so what is checked is
+    # what will be built. A slide with no template of its own falls back to
+    # this one, so the whole carousel follows.
+    if isinstance(raw, dict) and not raw.get("template_id"):
+        with session_scope() as db:
+            seeded = brandkit.seeded_template(db.get(Brand, ctx.brand_id))
+        if seeded:
+            brief.template_id = seeded
+
     # The grid guard. A ratio or layout that breaks the look of every post they
     # have approved is offered back as a choice BEFORE a credit is spent. Mood
     # or headline drift is advice on the finished creative, not a stop.

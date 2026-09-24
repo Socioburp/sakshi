@@ -191,6 +191,32 @@ def look_for_template(template: str) -> Look:
     return LOOKS[min(ranked)[1]]
 
 
+def seeded_template(brand) -> str | None:
+    """The layout a seeded brand's own reference set is built in, or None.
+
+    The dominant family is written into template_prefs and rendered into the
+    agent's prompt, and that was the only way it reached a creative: advice.
+    template_id is optional on a brief and defaults to centered_overlay, a
+    layout a seeded brand's set may never use, so an agent that simply left it
+    out built the client's very first creative in a layout their own reference
+    set does not have -- and remembered.build then correctly declined to say
+    "made it in the style your first set uses", so nothing surfaced the miss
+    either. The shoot style has been enforced in code all along (shotplan
+    reads template_prefs["shoot"]); this is the layout's half of the same
+    promise.
+
+    Only what our own designers actually made for this brand counts. A family
+    that came with a look the category guessed is a guess, and a guess must not
+    overrule the model's silence.
+    """
+    prefs = getattr(brand, "template_prefs", None) or {}
+    if prefs.get("seeded_from") != "reference_set":
+        return None
+    family = prefs.get("family") or []
+    first = family[0] if family else None
+    return first if isinstance(first, str) and first else None
+
+
 def seed_from_references(brand, kit) -> dict:
     """Set this brand's kit from the reference creatives our designers made.
 

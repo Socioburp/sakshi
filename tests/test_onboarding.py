@@ -709,6 +709,100 @@ def test_the_seeded_rules_are_in_the_prompt_and_are_not_similarity_gated():
     assert "Preferred layouts: frame_card" in system
 
 
+class _FarEnough(BaseException):
+    """Deliberately not an Exception: _create_creative catches those around the
+    grid guard, and this has to escape rather than let the handler go on and
+    spend a credit."""
+
+
+async def _layout_the_creative_will_use(brand, raw, monkeypatch) -> str:
+    """Drive create_creative as far as the grid guard, which is the first thing
+    to see the finished brief, and report the layout it was handed."""
+    import uuid
+
+    from app.agent import tools
+    from app.creative import grid
+
+    class _Db:
+        def get(self, model, key):
+            return brand
+
+    @contextmanager
+    def _scope():
+        yield _Db()
+
+    seen: dict[str, str] = {}
+
+    def _check(fingerprint, brief):
+        seen["template"] = brief.template_id
+        raise _FarEnough
+
+    monkeypatch.setattr(tools, "session_scope", _scope)
+    monkeypatch.setattr(grid, "fingerprint", lambda db, brand_id: None)
+    monkeypatch.setattr(grid, "check", _check)
+    ctx = types.SimpleNamespace(
+        brand_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        grounding=types.SimpleNamespace(as_brief_grounding=dict),
+    )
+    with pytest.raises(_FarEnough):
+        await tools._create_creative(ctx, {"brief": raw})
+    return seen["template"]
+
+
+async def test_a_brief_that_names_no_layout_is_built_in_the_one_the_set_uses(monkeypatch):
+    """The seeded family reached the creative only through the prompt, as advice.
+    template_id is optional and defaults to centered_overlay, so an agent that
+    simply left it out built the client's very first creative in a layout their
+    own reference set does not have -- and remembered.build then correctly
+    declined to claim "made it in the style your first set uses", so nothing
+    surfaced the miss either."""
+    from app.creative import remembered
+    from app.creative.brief import EXAMPLE, CreativeBrief
+
+    brand = _seeded_brand()
+    assert brand.template_prefs["family"][0] == "frame_card"
+
+    raw = {k: v for k, v in EXAMPLE.items() if k != "template_id"}
+    # Left to itself the brief lands on a layout the set never uses.
+    assert CreativeBrief.model_validate(raw).template_id == "centered_overlay"
+    assert await _layout_the_creative_will_use(brand, raw, monkeypatch) == "frame_card"
+
+    # And because it is built that way, the bot may say so in its own words --
+    # the fact that was unclaimable while the layout was a coin toss.
+    built = CreativeBrief.model_validate({**raw, "template_id": "frame_card"})
+    assert any(
+        f["kind"] == "reference_style"
+        for f in remembered.build(brief=built, seeded_family="frame_card")
+    )
+
+
+async def test_a_layout_the_model_chose_itself_is_never_overruled(monkeypatch):
+    """The set wins the model's silence, not its decisions. An owner who asked
+    for the words on a panel gets the panel."""
+    from app.creative.brief import EXAMPLE
+
+    brand = _seeded_brand()
+    raw = {**EXAMPLE, "template_id": "split_card"}
+    assert await _layout_the_creative_will_use(brand, raw, monkeypatch) == "split_card"
+
+
+async def test_a_family_the_category_merely_guessed_does_not_overrule_the_model(monkeypatch):
+    """apply() sets a look from the category. That is a guess, and a guess must
+    not quietly decide a layout the model left open -- only what our own
+    designers actually made for this brand may."""
+    from app.creative.brief import EXAMPLE
+
+    brand = _Brand(category="sweets", palette={"primary": "#123B2E"})
+    brandkit.apply(brand)
+    brand.never_say = []
+    brand.languages = []
+    assert brandkit.seeded_template(brand) is None
+
+    raw = {k: v for k, v in EXAMPLE.items() if k != "template_id"}
+    assert await _layout_the_creative_will_use(brand, raw, monkeypatch) == "centered_overlay"
+
+
 def test_the_prompt_says_nothing_of_the_kind_for_a_brand_with_no_reference_set():
     from app.agent import prompts
 
