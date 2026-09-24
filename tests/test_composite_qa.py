@@ -673,6 +673,25 @@ async def test_the_spend_of_every_attempt_rides_home_on_the_verdict(monkeypatch)
     assert verdict.cost_micros == 5_500, "both calls are on the ledger"
 
 
+async def test_an_inspector_that_never_answers_still_charged_for_trying(monkeypatch):
+    """The same money, on the path where there is no verdict to carry it home.
+    An outage used to throw the spend away with the answer, so a slide whose
+    inspector fell over reported a cost of zero for three real calls."""
+    monkeypatch.setattr(bggate.settings, "anthropic_api_key", "k")
+    monkeypatch.setattr(bggate.settings, "anthropic_model", "m")
+    monkeypatch.setattr(bggate.asyncio, "sleep", _noop)
+
+    async def ask(image, prompt=""):
+        return "not json at all", 1_000
+
+    monkeypatch.setattr(bggate, "_ask", ask)
+    buf = io.BytesIO()
+    Image.new("RGB", (1080, 1350), (20, 20, 20)).save(buf, "JPEG")
+    with pytest.raises(bggate.InspectionUnavailable) as err:
+        await finalgate.inspect(buf.getvalue(), headline="Weekend Sale")
+    assert err.value.cost_micros == 3 * 1_000, "every attempt the model answered"
+
+
 # --------------------------------------------------------------------------- #
 # the free repair ladder: another layout costs a second of Chromium, not a rupee
 # --------------------------------------------------------------------------- #
@@ -1092,6 +1111,26 @@ async def test_a_retry_that_was_paid_for_and_then_refused_is_still_on_the_ledger
     (row,) = world["rows"].values()
     assert row.status == "failed"
     assert row.cost_micros == 2 * 288_300 + 2 * 4_500, "both pictures and both looks"
+
+
+async def test_an_inspector_outage_does_not_lose_the_picture_it_had_already_bought(
+    world, monkeypatch
+):
+    """The slide buys its picture, then the inspector cannot be reached. Nothing
+    ships and the credit comes back, but the vendor was still paid -- and this
+    was the one refusal path that recorded nothing: _build_one caught only
+    CompositeRejected, and InspectionUnavailable carried no figure to catch."""
+    world["final_verdicts"].append(
+        finalgate.InspectionUnavailable("inspector down", cost_micros=1_500)
+    )
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is False
+    assert world["refunded"] == 1
+    assert not [k for k in world["blobs"] if k.endswith("composed.jpg")]
+    (row,) = world["rows"].values()
+    assert row.status == "failed"
+    assert row.cost_micros == 288_300 + 1_500, "the picture, and the looks that never answered"
 
 
 async def test_a_revision_is_looked_at_as_hard_as_a_first_version(world, monkeypatch):

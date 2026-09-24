@@ -40,7 +40,18 @@ log = get_logger(__name__)
 
 
 class InspectionUnavailable(RuntimeError):
-    """The inspector gave no usable verdict. Treated as a failure, never a pass."""
+    """The inspector gave no usable verdict. Treated as a failure, never a pass.
+
+    Carries `cost_micros` like BackgroundRejected and CompositeRejected do: an
+    attempt the model ANSWERED was paid for even when the answer was unusable,
+    and an outage after the picture was bought does not un-buy the picture. The
+    slide's row is the only place that loss is ever recorded, and it used to
+    record nothing at all for this path.
+    """
+
+    def __init__(self, message: str, *, cost_micros: int = 0):
+        super().__init__(message)
+        self.cost_micros = int(cost_micros or 0)
 
 
 # reason -> the sentence added to the NEXT attempt's prompt. Written as what the
@@ -268,4 +279,6 @@ async def inspect(
             last = exc
             log.warning("inspection_retry", attempt=attempt, error=repr(exc)[:200])
             await asyncio.sleep(min(2.0 * attempt, 6.0))
-    raise InspectionUnavailable(f"inspector failed {INSPECT_ATTEMPTS} times: {last!r}"[:300])
+    raise InspectionUnavailable(
+        f"inspector failed {INSPECT_ATTEMPTS} times: {last!r}"[:300], cost_micros=spent
+    )

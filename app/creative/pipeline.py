@@ -1690,7 +1690,13 @@ async def _generate_checked(
                 reasons.append("duplicate_of_earlier_slide")
         if not reasons and inspected:
             with ctx.trace.stage(f"{stage}:inspect{attempt}"):
-                verdict = await bggate.inspect(res.data)
+                try:
+                    verdict = await bggate.inspect(res.data)
+                except bggate.InspectionUnavailable as exc:
+                    # The pictures this slide has already bought were bought
+                    # whether or not the inspector ever answered about them.
+                    exc.cost_micros += cost
+                    raise
             # The look is paid for whatever it decides, and a slide rejected
             # twice pays for three of them. This used to be read and dropped,
             # so the row told the owner the slide cost what the pictures cost
@@ -1929,7 +1935,15 @@ async def _final_check(
         if not looked_at:
             return None
         with ctx.trace.stage(f"{stage}:final_gate"):
-            verdict = await finalgate.inspect(variant.jpeg, **copy)
+            try:
+                verdict = await finalgate.inspect(variant.jpeg, **copy)
+            except finalgate.InspectionUnavailable as exc:
+                # An outage is a refusal, and a refusal still shows what it
+                # cost: the attempts the model answered before it gave up, plus
+                # every look this slide had already paid for. _build_one adds
+                # the picture on top.
+                exc.cost_micros += spent
+                raise
         spent += int(verdict.cost_micros or 0)
         return verdict
 
@@ -2276,10 +2290,11 @@ async def _build_one(
                     else None
                 ),
             )
-        except CompositeRejected as exc:
+        except (CompositeRejected, bggate.InspectionUnavailable) as exc:
             # The picture this slide had already bought was bought whatever the
-            # check then decided. The refusal only knows what IT spent, so the
-            # rest is added here or the failed row understates the loss.
+            # check then decided -- and an inspector that could not be reached
+            # decides nothing at all. Both refusals only know what THEY spent,
+            # so the rest is added here or the failed row understates the loss.
             exc.cost_micros += int(cost_micros or 0)
             raise
         png, final, report = checked["png"], checked["final"], checked["report"]
