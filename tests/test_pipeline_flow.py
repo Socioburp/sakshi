@@ -13,6 +13,7 @@ import io
 import types
 import uuid
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from PIL import Image
@@ -142,8 +143,22 @@ async def build_world(monkeypatch) -> dict:
         rows = [r for r in w["rows"].values() if getattr(r, "brief_id", None) == brief_id]
         return sorted(rows, key=lambda r: r.slide_position)
 
+    def in_flight_creative(db, brand_id, since):
+        """The one-creative-at-a-time guard, over the faked rows. A row with no
+        created_at was made by this very run, so it counts as new."""
+        return next(
+            (
+                r
+                for r in w["rows"].values()
+                if getattr(r, "status", None) in ("pending", "generating", "composing")
+                and (getattr(r, "created_at", None) or datetime.now(UTC)) >= since
+            ),
+            None,
+        )
+
     monkeypatch.setattr(pipeline.repo, "save_brief", save_brief)
     monkeypatch.setattr(pipeline.repo, "creatives_for_brief", creatives_for_brief)
+    monkeypatch.setattr(pipeline.repo, "in_flight_creative", in_flight_creative)
     monkeypatch.setattr(pipeline.events, "record", lambda *a, **k: None)
     monkeypatch.setattr(pipeline.credits, "charge", charge)
     monkeypatch.setattr(pipeline.credits, "refund", refund)
@@ -413,3 +428,93 @@ async def test_a_revision_the_provider_refused_to_send_is_not_reported_as_shown(
         if getattr(r, "brief_id", None) == uuid.UUID(res["brief_id"])
     ]  # fmt: skip
     assert [r.status for r in revised] == ["ready"], "made and kept; only the send was refused"
+
+
+# --------------------------------------------------------------------------- #
+# one creative at a time, per brand
+# --------------------------------------------------------------------------- #
+def _in_flight(world, *, age=timedelta(0)):
+    """A row of theirs that a worker is holding right now."""
+    cid = uuid.uuid4()
+    world["rows"][cid] = types.SimpleNamespace(
+        id=cid,
+        brief_id=uuid.uuid4(),
+        brand_id=world["brand"].id,
+        slide_position=1,
+        status="generating",
+        created_at=datetime.now(UTC) - age,
+    )
+    return cid
+
+
+async def test_a_nudge_while_one_is_being_made_charges_nothing_and_starts_no_second_job(
+    world, monkeypatch
+):
+    """The owner wrote "it's taking too much time" and the agent called
+    create_creative again: a second credit, a second paid picture nobody asked
+    for, and a second stream of "still working" on top of the first."""
+    _clean(monkeypatch)
+    _in_flight(world)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is False and res["reason"] == "already_making_one"
+    assert res["charged"] == 0 and world["charged"] == 0
+    assert res["eta_minutes"] == list(pipeline.working_minutes(1))
+    assert world["provider"].requests == [], "no second picture was bought"
+    assert world["images"] == [] and world["lines"] == [], "and no second notice loop"
+    assert len(world["rows"]) == 1, "no second job was started"
+
+
+async def test_once_the_first_creative_is_finished_the_next_one_starts_normally(world, monkeypatch):
+    _clean(monkeypatch)
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert first["ok"] and world["charged"] == 1
+    second = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert second["ok"] and second["credits_charged"] == 1 and world["charged"] == 2
+
+
+async def test_a_job_the_reaper_already_owns_does_not_wedge_the_brand(world, monkeypatch):
+    """A creative whose worker died sits in 'generating' until the reaper
+    refunds it. If the guard counted it, one crash would stop the brand from
+    ever making another picture."""
+    _clean(monkeypatch)
+    _in_flight(world, age=pipeline.STUCK_AFTER + timedelta(minutes=1))
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert res["ok"] and res["credits_charged"] == 1
+
+
+async def test_a_revision_on_top_of_a_running_job_is_guarded_too(world, monkeypatch):
+    """regenerate_image charges, generates and starts its own notice loop, so
+    a "make it again" while the first one is still running is the same double
+    spend by another name."""
+    _clean(monkeypatch)
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert first["ok"] and world["charged"] == 1
+    _in_flight(world)
+    res = await pipeline.regenerate_image(
+        world["ctx"], brief_id=uuid.UUID(first["brief_id"]), new_prompt="a brass thali"
+    )
+    assert res["reason"] == "already_making_one" and world["charged"] == 1
+
+
+async def test_a_job_that_fails_says_so_instead_of_leaving_still_working_as_the_last_word(
+    world, monkeypatch
+):
+    """The owner heard "still working" five times and then nothing for ten
+    minutes. When nothing can be delivered the pipeline says so itself, the
+    same way it sends "Making it..." itself -- the model may be out of turns,
+    and the reaper's 45 minutes is far too long to learn it from."""
+    _clean(monkeypatch)
+
+    async def never(ctx, provider, brief, slide, *a, **k):
+        raise pipeline.BackgroundRejected("no acceptable picture", cost_micros=576_600)
+
+    monkeypatch.setattr(pipeline, "_generate_checked", never)
+    res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+
+    assert res["ok"] is False and res["reason"] == "generation_failed"
+    assert res["told_owner"] is True and "Do not repeat" in res["note"]
+    assert world["refunded"] == 1
+    last = world["lines"][-1]
+    assert "not sending it" in last and "credit is back" in last
+    assert "Still working" not in last and world["images"] == []

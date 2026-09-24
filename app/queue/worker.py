@@ -27,7 +27,16 @@ from app.queue.handlers import HANDLERS
 log = get_logger(__name__)
 
 _stop = asyncio.Event()
-PROMOTE_EVERY = 1.0  # seconds; scheduled posts must not wait for an idle queue
+# Both of these are Redis REQUESTS on an idle queue, and a managed Redis bills
+# by the request: promoting once a second is 86,400 calls a day and a five-second
+# BRPOP is another 17,280, so an empty queue spent the whole 500,000-request
+# allowance in five days and every client's messages stopped being answered.
+# Neither number was buying anything. A delayed job is a scheduled post, which
+# nobody times to the second, and BRPOP is a BLOCK, not a poll -- it returns the
+# instant a job is pushed, so a longer timeout costs a live owner nothing and
+# only makes the idle loop cheaper.
+PROMOTE_EVERY = 20.0  # seconds; a scheduled post is not a stopwatch
+DEQUEUE_BLOCK = 30  # seconds a BRPOP waits; delivery is push-driven, not polled
 REAP_EVERY = 30.0
 SWEEP_EVERY = 3600.0  # Insights: once a day per brand, checked hourly
 
@@ -77,13 +86,27 @@ def _finish(
             job.last_error = error[:4000]
 
 
+# A Redis that is refusing every call does not recover because we ask faster.
+# When the request allowance ran out, this loop retried every two seconds --
+# tens of thousands of failing calls a day, holding the account at its limit and
+# filling the log so the real cause was hard to see. Back off instead, and give
+# up the whole worker once it is clearly not a blip, so the platform restarts it
+# rather than leaving it spinning.
+RETRY_BASE_S = 2
+RETRY_MAX_S = 60
+_dequeue_failures = 0
+
+
 async def run_once() -> bool:
+    global _dequeue_failures
     try:
-        envelope = dequeue(timeout=5)
+        envelope = dequeue(timeout=DEQUEUE_BLOCK)
     except Exception:  # noqa: BLE001 - a Redis blip must not kill the worker
-        log.exception("dequeue_failed")
-        await asyncio.sleep(2)
+        _dequeue_failures += 1
+        log.exception("dequeue_failed", consecutive=_dequeue_failures)
+        await asyncio.sleep(min(RETRY_BASE_S * 2 ** (_dequeue_failures - 1), RETRY_MAX_S))
         return False
+    _dequeue_failures = 0
     if envelope is None:
         return False
 

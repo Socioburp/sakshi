@@ -61,7 +61,7 @@ from app.creative import (
     shotplan,
 )
 from app.creative.brief import CreativeBrief, Slide, check_brand_rules
-from app.creative.imagegen import ImageRequest, get_provider
+from app.creative.imagegen import ImageRequest, get_provider, providers
 from app.creative.imagegen.base import crop_for, generation_size_for_window
 from app.db import repo
 from app.db.models import Account, Brand, BrandAsset, Brief, Creative
@@ -80,35 +80,136 @@ class CreativeFailed(Exception):
 
 
 # --------------------------------------------------------------------------- #
+# What ONE vendor call may take. OpenAI documents "up to 2 minutes" for a
+# gpt-image-2 render at the size and setting this pipeline asks for, and
+# nothing here is allowed to buy a cheaper call to beat it.
+VENDOR_CEILING_S = 120
+# ...and what happens after the last picture lands: the composite render
+# (3.2-5.6s measured), the export, the vision look at the finished card (2-5s)
+# and the repair ladder when it objects (~10s, ~20s at worst), rounded up.
+COMPOSITING_S = 40
+
+
+def paid_attempts() -> int:
+    """How many vendor calls one slide may really make.
+
+    IMAGEGEN_GATE_ATTEMPTS is the ceiling, but IMAGEGEN_GATE_BUDGET_MICROS
+    stops the retrying well before it: at the list price of one picture the
+    budget pays for three. Derived rather than typed, because the time the
+    chat promises the owner is built on it -- move either setting and the
+    promise moves with it instead of quietly becoming a lie.
+    """
+    attempts = max(1, int(settings.imagegen_gate_attempts))
+    budget = int(settings.imagegen_gate_budget_micros or 0)
+    per_call = providers.price_micros(settings.imagegen_provider)
+    if budget and per_call:
+        attempts = min(attempts, max(1, budget // per_call))
+    return attempts
+
+
+def working_window(slides: int) -> tuple[int, int]:
+    """Seconds this job may honestly take: (a clean first picture, the last
+    attempt the budget allows). Slides run IMAGEGEN_CONCURRENCY at a time, so
+    a carousel wider than that waits more than once.
+
+    This is the number the chat quotes. It used to be a flat "about 90
+    seconds" under a comment admitting it had never been measured, while the
+    gate above it allowed three paid calls of up to two minutes each. Ten
+    minutes of "still working" later the owner wrote "it's taking too much
+    time" -- and they were right, because we had told them ninety seconds.
+    """
+    lanes = max(1, int(settings.imagegen_concurrency))
+    waves = -(-max(1, slides) // lanes)
+    return (
+        VENDOR_CEILING_S * waves + COMPOSITING_S,
+        VENDOR_CEILING_S * paid_attempts() * waves + COMPOSITING_S,
+    )
+
+
+def working_minutes(slides: int) -> tuple[int, int]:
+    """The same window in whole minutes: the low end rounded down and the high
+    end rounded up, so the range brackets the truth instead of flattering it."""
+    low, high = working_window(slides)
+    return max(1, low // 60), max(2, -(-high // 60))
+
+
 _WORKING: dict[str, str] = {
-    "hi": "Bana raha hoon… {secs} second.",
-    "kn": "Maadta iddini… {secs} second.",
-    "ta": "Panren… {secs} second.",
-    "te": "Chestunna… {secs} second.",
-    "mr": "Banavtoy… {secs} second.",
-    "ml": "Cheyyunnu… {secs} second.",
-    "en": "Making it… about {secs} seconds.",
+    "hi": "Bana raha hoon… achhi quality mein {low}-{high} minute lagte hain.",
+    "kn": "Maadta iddini… {low}-{high} nimisha.",
+    "ta": "Panren… {low}-{high} nimidam.",
+    "te": "Chestunna… {low}-{high} nimishalu.",
+    "mr": "Banavtoy… {low}-{high} minute lagtat.",
+    "ml": "Cheyyunnu… {low}-{high} minute.",
+    "en": "Making it… it takes {low}-{high} minutes at this quality.",
 }
 
 
 def working_line(locale: str | None, slides: int) -> str:
     lang = ((locale or "en").split("-")[0]).lower()
-    # NOT MEASURED YET at gpt-image-2 / high / 1600x2000 -- OpenAI documents "up
-    # to 2 minutes" per image. Set from the recorded p50 once there is one.
-    return _WORKING.get(lang, _WORKING["en"]).format(secs=90 if slides <= 1 else 120)
+    low, high = working_minutes(slides)
+    return _WORKING.get(lang, _WORKING["en"]).format(low=low, high=high)
 
 
+# Every notice carries a number that has moved since the last one -- how long
+# it has been, and on a carousel how much is done. The owner read the
+# identical sentence five times across ten minutes; a line that says nothing
+# new is not a progress report, it is noise.
 _STILL_WORKING: dict[str, str] = {
-    "hi": "Abhi ban raha hai… {done}/{total} taiyaar. Achhi quality mein thoda time lagta hai.",
-    "en": "Still working… {done} of {total} ready. The high-quality pictures take a little longer.",
+    "hi": "Abhi ban raha hai… {mins} minute ho gaye, {done}/{total} taiyaar.",
+    "en": "Still working… {mins} minutes in, {done} of {total} ready.",
 }
 _STILL_WORKING_ONE: dict[str, str] = {
-    "hi": "Abhi ban raha hai… achhi quality mein thoda time lagta hai.",
-    "en": "Still working on it… the high-quality picture takes a little longer.",
+    "hi": "Abhi ban raha hai… {mins} minute ho gaye. Check paas hote hi bhejta hoon.",
+    "en": "Still working… {mins} minutes in. It goes to you the moment it passes our check.",
 }
-# Notices go out this many seconds-multiples after the start: 1x, 3x, 7x of
-# SLOW_NOTICE_S. Three at most -- WhatsApp is not a log.
-_NOTICE_AT = (1, 3, 7)
+# The last word, sent once the job runs past the window it was quoted. After
+# this the chat is quiet on purpose: the job either delivers or says it could
+# not be made, so the owner hears again either way.
+_OVER_TIME: dict[str, str] = {
+    "hi": (
+        "{high} minute se zyada lag raha hai. Quality kam karke jaldi nahi bhejunga — "
+        "nahi bana to credit wapas, aur main bataunga."
+    ),
+    "en": (
+        "This is past the {high} minutes I said. I will not send a worse picture to be "
+        "quick — if it cannot be made, the credit comes back and I will tell you."
+    ),
+}
+# Notices go out at 1x and 3x SLOW_NOTICE_S, then one closing line when the
+# quoted window runs out. Three at most -- WhatsApp is not a log.
+_NOTICE_AT = (1, 3)
+
+# Nothing was made and nothing is coming. Sent by the pipeline itself, exactly
+# as "Making it..." is, so it cannot be lost to a model that has run out of
+# turns or to a turn that died.
+_FAILED_LINE: dict[str, str] = {
+    "hi": "Yeh theek nahi bana, isliye bhej nahi raha. {money} Dobara banaoon?",
+    "en": (
+        "This did not come out the way it has to, so I am not sending it. {money} "
+        "Want me to try again?"
+    ),
+}
+_FAILED_MONEY: dict[str, dict[str, str]] = {
+    "hi": {"refunded": "Credit wapas aa gaya hai.", "free": "Kuch charge nahi hua."},
+    "en": {"refunded": "Your credit is back.", "free": "Nothing was charged."},
+}
+
+
+async def tell_them_it_failed(ctx: ToolContext, locale: str, *, refunded: int) -> None:
+    """Say that nothing is coming, in the chat, now.
+
+    Forty-five minutes is how long the reaper takes to notice a dead worker; a
+    job that fails in front of us must not borrow any of that silence. The
+    last thing the owner read was "still working", and leaving that as the
+    final word is the whole of "it's roaming in circles".
+    """
+    lang = ((locale or "en").split("-")[0]).lower()
+    money = _FAILED_MONEY.get(lang, _FAILED_MONEY["en"])["refunded" if refunded else "free"]
+    line = _FAILED_LINE.get(lang, _FAILED_LINE["en"]).format(money=money)
+    try:
+        await ctx.progress(line)
+    except Exception:  # noqa: BLE001 - the refund is done; a missed line must not undo it
+        log.warning("failure_line_failed", account_id=str(getattr(ctx, "account_id", "")))
 
 
 class _Delivery:
@@ -129,6 +230,10 @@ class _Delivery:
         self.hold = total > 1 and settings.carousel_delivery == "ordered"
         self._lock = asyncio.Lock()
         self._watch: asyncio.Task | None = None
+        # The window the owner was quoted, so the closing notice names the
+        # same number the opening line did.
+        self.over_s = working_window(total)[1]
+        self.over_min = working_minutes(total)[1]
 
     def caption(self, position: int) -> str:
         if self.total <= 1:
@@ -171,20 +276,33 @@ class _Delivery:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
 
+    def notice_at(self, elapsed: float) -> str:
+        """What the owner hears `elapsed` seconds in. Never twice the same
+        sentence: the minutes move, and on a carousel so does the count."""
+        table = _STILL_WORKING_ONE if self.total <= 1 else _STILL_WORKING
+        return table.get(self.lang, table["en"]).format(
+            mins=max(1, round(elapsed / 60)), done=len(self.ready), total=self.total
+        )
+
+    async def _say(self, line: str, elapsed: float) -> None:
+        log.info("slow_notice", elapsed_s=elapsed, done=len(self.ready), total=self.total)
+        try:
+            await self.ctx.progress(line)
+        except Exception:  # noqa: BLE001 - a missed notice must never cost the creative
+            log.warning("slow_notice_failed")
+
     async def _notices(self) -> None:
-        elapsed = 0
+        elapsed = 0.0
         for mult in _NOTICE_AT:
-            wait = settings.slow_notice_s * mult - elapsed
-            await asyncio.sleep(wait)
-            elapsed += wait
-            table = _STILL_WORKING_ONE if self.total <= 1 else _STILL_WORKING
-            done = len(self.ready)
-            line = table.get(self.lang, table["en"]).format(done=done, total=self.total)
-            log.info("slow_notice", elapsed_s=elapsed, done=done, total=self.total)
-            try:
-                await self.ctx.progress(line)
-            except Exception:  # noqa: BLE001 - a missed notice must never cost the creative
-                log.warning("slow_notice_failed")
+            await asyncio.sleep(settings.slow_notice_s * mult - elapsed)
+            elapsed = settings.slow_notice_s * mult
+            await self._say(self.notice_at(elapsed), elapsed)
+        # Past the window the owner was quoted. One honest line, and then the
+        # chat stays quiet: the job either delivers or says it could not be
+        # made, so nobody is left listening to the same sentence for ever.
+        await asyncio.sleep(max(0.0, self.over_s - elapsed))
+        closing = _OVER_TIME.get(self.lang, _OVER_TIME["en"]).format(high=self.over_min)
+        await self._say(closing, self.over_s)
 
 
 # Credits at or below this get a one-line nudge from the agent. Finding out at
@@ -211,6 +329,43 @@ def claim_gate(brief: CreativeBrief, brand: Any) -> dict[str, Any] | None:
             "wording (or something the owner can prove) and call the tool again. If the "
             "owner has a certificate for a phrase, record it with "
             "update_brand(substantiated=[...]) first."
+        ),
+    }
+
+
+def in_flight_gate(db: Any, brand_id: uuid.UUID, slides: int) -> dict | None:
+    """One creative at a time, per brand. Returns the tool result to hand
+    back, or None when nothing of theirs is being made.
+
+    Checked here, beside claim_gate, rather than in the tool: when the owner
+    nudges -- "it's taking too much time" -- the model's instinct is to call
+    create_creative again, and nothing stopped it. That charged a second
+    credit, bought a second set of pictures nobody asked for, and started a
+    second stream of "still working" notices on top of the first, which is why
+    one slow job read as a bot roaming in circles. The queue's dedupe_key only
+    ever covered webhook retries of the same inbound message.
+
+    Rows older than STUCK_AFTER belong to the reaper, not to this guard: a job
+    whose worker died must never wedge the brand out of making another.
+    """
+    row = repo.in_flight_creative(db, brand_id, datetime.now(UTC) - STUCK_AFTER)
+    if row is None:
+        return None
+    low, high = working_minutes(slides)
+    return {
+        "ok": False,
+        "reason": "already_making_one",
+        "charged": 0,
+        "brief_id": str(row.brief_id),
+        "creative_id": str(row.id),
+        "eta_minutes": [low, high],
+        "hint": (
+            "Their picture is ALREADY being made -- nothing was charged and nothing new "
+            f"was started. It takes {low}-{high} minutes and it will be sent the moment it "
+            "passes our check. Tell them that in ONE short line. Do not offer to try "
+            "again and do not call this tool again for this brand until it has arrived; "
+            "if they want the words or the picture changed, that is revise_creative or "
+            "regenerate_image once it is here."
         ),
     }
 
@@ -458,6 +613,15 @@ async def generate(
         if brand is None:
             return {"ok": False, "reason": "unknown_brand"}
 
+        # Before anything else, including the browser work below: this brand
+        # is allowed one creative in flight. A revision comes through here
+        # too, and is guarded the same -- it charges, generates and starts its
+        # own notice loop exactly as a fresh creative does, so a "make it
+        # again" on top of a running job is the same double spend.
+        busy = in_flight_gate(db, ctx.brand_id, len(units))
+        if busy:
+            return busy
+
         violations = check_brand_rules(brief, brand)
         if violations:
             return {
@@ -524,6 +688,14 @@ async def generate(
     units = brief.units()
 
     with session_scope() as db:
+        # Asked again in the transaction that charges. The gate above runs
+        # before several seconds of layout and photo work, so two requests
+        # that arrived together could both have passed it; here the loser
+        # still walks away before a credit moves.
+        busy = in_flight_gate(db, ctx.brand_id, len(units))
+        if busy:
+            return busy
+
         billable_positions = {
             u.position for u in units if not resolved.get(u.position) and u.position not in reuse
         }
@@ -695,14 +867,31 @@ async def generate(
 
     if failures and not ok_urls:
         _refund(ctx, group_id, billable, "creative_failed")
+        # The owner is mid-conversation with a chat whose last line was "still
+        # working". Said here, not left to the model: the model may be out of
+        # turns or the turn may die, and then "still working" is the final
+        # word about a picture that is never coming.
+        await tell_them_it_failed(ctx, locale, refunded=billable)
+        told = (
+            "The owner has ALREADY been told in the chat that it could not be made and "
+            "that the credit is back. Do not repeat it. Answer only what they say next."
+        )
         if quality_hint and len(refused) == len(failures):
             return {
                 "ok": False,
                 "reason": "composite_quality",
                 "errors": failures[:3],
+                "told_owner": True,
+                "note": told,
                 "hint": quality_hint,
             }
-        return {"ok": False, "reason": "generation_failed", "errors": failures[:3]}
+        return {
+            "ok": False,
+            "reason": "generation_failed",
+            "errors": failures[:3],
+            "told_owner": True,
+            "note": told,
+        }
     if failed_billable:
         # Partial carousel: refund only the paid slides that did not ship.
         _refund(ctx, group_id, failed_billable, "partial_carousel")

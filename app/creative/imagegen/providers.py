@@ -217,7 +217,9 @@ DEFAULT_COST_MICROS = {
 }
 
 
-def _cost_for(name: str) -> int:
+def price_micros(name: str) -> int:
+    """What one call to `name` costs, in micro-dollars. Public because the chat
+    quotes a time built on how many calls the gate budget pays for."""
     override = settings.imagegen_cost_micros
     return int(override) if override else DEFAULT_COST_MICROS.get(name, 0)
 
@@ -466,7 +468,7 @@ class FalProvider(HttpImageProvider):
 
     def __init__(self) -> None:
         self.model = settings.imagegen_fal_model or "fal-ai/flux/schnell"
-        self.cost_micros_per_image = _cost_for(self.name)
+        self.cost_micros_per_image = price_micros(self.name)
 
     def _check_key(self) -> None:
         if not settings.fal_key:
@@ -573,7 +575,7 @@ class ReplicateProvider(HttpImageProvider):
 
     def __init__(self) -> None:
         self.model = settings.imagegen_replicate_model or "black-forest-labs/flux-schnell"
-        self.cost_micros_per_image = _cost_for(self.name)
+        self.cost_micros_per_image = price_micros(self.name)
 
     def _check_key(self) -> None:
         if not settings.replicate_api_token:
@@ -667,7 +669,7 @@ class BflProvider(HttpImageProvider):
 
     def __init__(self) -> None:
         self.model = settings.imagegen_bfl_model or "flux-2-klein-4b"
-        self.cost_micros_per_image = _cost_for(self.name)
+        self.cost_micros_per_image = price_micros(self.name)
 
     def _check_key(self) -> None:
         if not settings.bfl_api_key:
@@ -850,7 +852,7 @@ class OpenAIProvider(HttpImageProvider):
 
     def __init__(self) -> None:
         self.model = settings.imagegen_openai_model or "gpt-image-2-2026-04-21"
-        self.cost_micros_per_image = _cost_for(self.name)
+        self.cost_micros_per_image = price_micros(self.name)
 
     def _check_key(self) -> None:
         if not settings.openai_api_key:
