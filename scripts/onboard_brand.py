@@ -400,8 +400,13 @@ async def screen_folders(products: Plan, references: Plan) -> list[str]:
     on a typo that refused a valid onboarding would be the worse bug.
     """
     notes: list[str] = []
+    if not (products.stored or references.stored):
+        return []
     if not refstyle.available():
-        return ["no vision model configured: the two folders were not checked against each other"]
+        return [
+            "no vision model configured: the files were not checked for being in the wrong "
+            "folder, so read the names above yourself"
+        ]
     unchecked: list[str] = []
 
     kept: list[Item] = []
