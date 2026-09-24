@@ -64,6 +64,10 @@ _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 MAX_PALETTE = 4
 MAX_MOOD = 4
 
+# Stamped on every style anchor's meta, so a later run can tell the references
+# our own team's set seeded from any other style_anchor a brand collects.
+ANCHOR_SOURCE = "onboarding_reference"
+
 PROMPT = (
     "This is a finished social media post a professional design team made for one brand. "
     "Describe its STYLE so another designer could make a new post that belongs beside it. "
@@ -107,7 +111,7 @@ class Reference:
 
     def as_meta(self) -> dict[str, Any]:
         return {
-            "source": "onboarding_reference",
+            "source": ANCHOR_SOURCE,
             "layout": self.layout,
             "type_place": self.type_place,
             "palette": list(self.palette),
@@ -166,6 +170,31 @@ def parse(text: str) -> Reference:
     except json.JSONDecodeError as exc:
         raise ReferenceUnreadable(f"unparseable style description: {text[:120]!r}") from exc
 
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ReferenceUnreadable("summary is missing")
+    return _checked(data, summary)
+
+
+def from_meta(meta: dict[str, Any], summary: str = "") -> Reference:
+    """A reference we already read, rebuilt from the memory row we wrote it to.
+
+    Every style anchor keeps its facts in `meta` (see as_meta), which is what
+    lets a re-run decide the house style over a brand's WHOLE reference set
+    rather than over the files that run happened to open. Held to exactly the
+    same bar as a fresh answer: a row written by an older version of this
+    module, or edited by hand, is refused rather than allowed to tilt a kit.
+    """
+    if meta.get("source") != ANCHOR_SOURCE:
+        raise ReferenceUnreadable(
+            f"meta is not an onboarding reference: source={meta.get('source')!r}"
+        )
+    return _checked(meta, summary or "a reference creative")
+
+
+def _checked(data: dict[str, Any], summary: str) -> Reference:
+    """Every field held to the values the rest of the code can act on."""
+
     def one_of(key: str, allowed: tuple[str, ...]) -> str:
         value = data.get(key)
         if not isinstance(value, str) or value.strip().lower() not in allowed:
@@ -184,10 +213,6 @@ def parse(text: str) -> Reference:
     mood = data.get("mood")
     if not isinstance(mood, list) or not mood or not all(isinstance(w, str) and w for w in mood):
         raise ReferenceUnreadable(f"mood must be a list of words, got {mood!r}")
-
-    summary = data.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        raise ReferenceUnreadable("summary is missing")
 
     return Reference(
         layout=one_of("layout", LAYOUTS),

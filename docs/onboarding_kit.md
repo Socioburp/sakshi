@@ -193,10 +193,12 @@ photos to the Drive folder, run it again, read the summary.
 
 Two things to know:
 
-- **The brand kit is recomputed from every reference read in that run**, so if
-  you re-run with only the two new references in the folder, the kit is
-  decided by those two. Keep the whole reference set in one folder and pass
-  that folder every time.
+- **The brand kit is recomputed from the brand's whole reference set**, not
+  from the files in the folder you passed this time. Everything already read
+  for that brand is counted again alongside the new files, so a folder with
+  two new posts in it cannot overrule the ten that seeded the brand. The
+  summary says so in as many words: `decided from 12 reference(s): 2 read now,
+  10 already on file`.
 - **Style anchors need `VOYAGE_API_KEY`.** Without it the photos and files
   still import and the kit is still set, and the run tells you the anchors
   were not written. Set the key and run it again; nothing is duplicated.

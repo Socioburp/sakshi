@@ -566,15 +566,32 @@ def test_an_owner_who_asks_for_another_look_is_not_left_with_the_seeded_family()
 # the whole run, with only the database and R2 faked
 # --------------------------------------------------------------------------- #
 class _FakeDb:
-    def __init__(self, brand, rows):
+    """The two tables the command reads, answered from lists.
+
+    The queries are told apart by the SQL the script actually builds, so a
+    query that stops selecting what it needs shows up here as a test failure
+    rather than as an empty list nobody notices.
+    """
+
+    def __init__(self, brand, rows, memories):
         self.brand = brand
         self.rows = rows
+        self.memories = memories
 
     def get(self, model, key):
         return self.brand
 
     def scalars(self, stmt):
-        return types.SimpleNamespace(all=lambda: [])
+        sql = str(stmt)
+        if "brand_assets.storage_key" in sql:
+            out = [r.storage_key for r in self.rows]
+        elif sql.startswith("SELECT brand_memory.source_ref"):
+            out = [m.source_ref for m in self.memories]
+        elif "brand_memory" in sql:
+            out = list(self.memories)
+        else:
+            out = []
+        return types.SimpleNamespace(all=lambda: out)
 
     def add(self, row):
         self.rows.append(row)
@@ -583,10 +600,10 @@ class _FakeDb:
         pass
 
 
-def _fake_session(brand, rows):
+def _fake_session(brand, rows, memories=None):
     @contextmanager
     def scope():
-        yield _FakeDb(brand, rows)
+        yield _FakeDb(brand, rows, memories if memories is not None else [])
 
     return scope
 
@@ -649,6 +666,86 @@ async def test_a_dry_run_writes_nothing_at_all(tmp_path, monkeypatch, capsys):
     assert brand.template_prefs == {}
     # ...but it still shows the kit it would set, which is what a dry run is for.
     assert "frame_card" in out and "DRY RUN" in out
+
+
+def test_a_style_anchor_carries_everything_the_next_run_needs_to_count_it():
+    """A re-run counts the references already on file, and it does that from the
+    anchor's meta -- so what as_meta writes has to be enough to rebuild."""
+    ref = _ref(layout="frame_card", light="bright_airy", place="top_band", product="detail")
+    again = refstyle.from_meta(ref.as_meta(), "a post")
+    assert (again.layout, again.light, again.type_place, again.product) == (
+        "frame_card",
+        "bright_airy",
+        "top_band",
+        "detail",
+    )
+    assert again.palette == ref.palette and again.mood == ref.mood
+
+
+def test_an_anchor_we_cannot_read_back_is_refused_rather_than_counted_wrong():
+    meta = _ref().as_meta()
+    with pytest.raises(refstyle.ReferenceUnreadable):
+        refstyle.from_meta({**meta, "layout": "magazine_spread"})
+    with pytest.raises(refstyle.ReferenceUnreadable):
+        refstyle.from_meta({k: v for k, v in meta.items() if k != "light"})
+    # A style anchor the owner's own approvals wrote is not ours to count.
+    with pytest.raises(refstyle.ReferenceUnreadable):
+        refstyle.from_meta({**meta, "source": "approval"})
+
+
+async def test_a_re_run_decides_the_kit_from_the_whole_set_not_from_the_new_files(
+    tmp_path, monkeypatch, capsys
+):
+    """The documented way of working is: put the new posts in the folder, run it
+    again. Everything already read is skipped, so a kit decided from what this
+    run opened would be decided by the newest two files -- a ten-post house
+    style replaced by a two-post minority, silently, by the normal workflow."""
+    brand = _Brand(category="sweets", palette={"primary": "#123B2E"})
+    brand.template_prefs = {}
+    rows: list = []
+    memories: list = [
+        # A style anchor from the owner tapping Approve. Not ours; not counted.
+        types.SimpleNamespace(
+            kind="style_anchor", content="they approved a poster", meta={}, source_ref="brief:1"
+        )
+    ]
+    monkeypatch.setattr(onboard, "session_scope", _fake_session(brand, rows, memories))
+    monkeypatch.setattr(onboard.r2, "put", lambda key, data, mime=None: f"https://cdn.test/{key}")
+    monkeypatch.setattr(onboard.settings, "anthropic_api_key", "k")
+    monkeypatch.setattr(onboard.settings, "anthropic_model", "m")
+    monkeypatch.setattr(onboard.settings, "voyage_api_key", "v")
+
+    def _remember(db, *, brand_id, kind, content, meta=None, source_ref=None):
+        memories.append(
+            types.SimpleNamespace(kind=kind, content=content, meta=meta, source_ref=source_ref)
+        )
+
+    monkeypatch.setattr(onboard.embed, "remember", _remember)
+
+    queued: list[str] = []
+
+    async def _describe(data):
+        return _ref(layout=queued.pop(0))
+
+    monkeypatch.setattr(onboard.refstyle, "describe", _describe)
+
+    refs = tmp_path / "r"
+    _folder(refs, {f"old{i}.jpg": _image(colour=(200 - i * 10, 180, 160)) for i in range(3)})
+    args = argparse.Namespace(brand=BRAND, refs=str(refs), products=None, dry_run=False)
+    queued[:] = ["frame_card"] * 3
+    assert await onboard.run(args) == 0
+    assert brand.template_prefs["family"][0] == "frame_card"
+
+    # The designers add two more posts to the same folder, in another family.
+    _folder(refs, {f"new{i}.jpg": _image(colour=(100 + i * 10, 120, 140)) for i in range(2)})
+    queued[:] = ["top_band"] * 2
+    assert await onboard.run(args) == 0
+    out = capsys.readouterr().out
+
+    assert brand.template_prefs["family"][0] == "frame_card"
+    assert brand.template_prefs["look"] == "editorial"
+    assert any("built as frame_card" in rule for rule in brand.template_prefs["lessons"])
+    assert "decided from 5 reference(s): 2 read now, 3 already on file" in out
 
 
 def test_a_file_too_big_to_be_a_photograph_is_skipped_not_loaded(tmp_path, monkeypatch):

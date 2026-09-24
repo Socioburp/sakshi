@@ -412,6 +412,40 @@ def remembered_refs(db, brand_id: uuid.UUID) -> set[str]:
     )
 
 
+def earlier_references(db, brand_id: uuid.UUID) -> tuple[list[refstyle.Reference], list[Note]]:
+    """Every reference of this brand's that has already been read, in words again.
+
+    The house style is the style of the WHOLE set. Without this, the documented
+    way of working -- add the two posts the designers just made to the folder,
+    re-run -- would decide the kit from those two alone, because everything
+    else is skipped as already read. A ten-post house style would be replaced
+    by a two-post minority, silently, and the brand would get dumber the more
+    work we gave it.
+
+    Nothing has to be re-read for this: each anchor already carries its facts
+    in meta. One that cannot be read back is named in the summary rather than
+    dropped quietly -- it is a reference whose vote is missing from the count.
+    """
+    rows = db.scalars(
+        select(BrandMemory).where(
+            BrandMemory.brand_id == brand_id, BrandMemory.kind == "style_anchor"
+        )
+    ).all()
+    refs: list[refstyle.Reference] = []
+    unreadable: list[Note] = []
+    for row in rows:
+        meta = dict(row.meta or {})
+        if meta.get("source") != refstyle.ANCHOR_SOURCE:
+            continue  # a style anchor from the owner's own approvals, not from us
+        try:
+            refs.append(refstyle.from_meta(meta, row.content))
+        except refstyle.ReferenceUnreadable as exc:
+            unreadable.append(
+                Note(str(meta.get("file") or row.source_ref or row.id), str(exc)[:120])
+            )
+    return refs, unreadable
+
+
 def memory_ref(item: Item) -> str:
     return f"onboarding:{item.digest[:16]}"
 
@@ -463,6 +497,7 @@ async def run(args: argparse.Namespace) -> int:
         brand_name = brand.name
         known_keys = stored_keys(db, brand_id)
         known_refs = remembered_refs(db, brand_id)
+        earlier, unreadable_anchors = earlier_references(db, brand_id)
 
     try:
         product_files = read_source(args.products) if args.products else []
@@ -489,7 +524,11 @@ async def run(args: argparse.Namespace) -> int:
     references.stored = [item for item in references.stored if item.name not in unread]
     fresh_references = [item for item in references.stored if not item.already_stored]
 
-    kit = refstyle.aggregate([ref for _, ref in described]) if described else None
+    # The kit is re-decided only when this run actually read something new, but
+    # it is decided over the whole set: the references read now plus the ones
+    # already on file. A run that read nothing leaves the kit exactly as it is.
+    whole_set = earlier + [ref for _, ref in described]
+    kit = refstyle.aggregate(whole_set) if described else None
 
     print(f"Brand: {brand_name} ({brand_id})")
     if args.dry_run:
@@ -502,9 +541,17 @@ async def run(args: argparse.Namespace) -> int:
         print("  note     no vision model configured: the style pass was skipped")
 
     _line("Brand kit")
+    for note in unreadable_anchors:
+        print(
+            f"  note     a style anchor on file could not be counted: {note.name} ({note.reason})"
+        )
     if kit is None:
         print("  unchanged (no reference creative was read)")
     else:
+        print(
+            f"  decided from {len(whole_set)} reference(s): {len(described)} read now, "
+            f"{len(earlier)} already on file"
+        )
         print(f"  layout family  {kit.layout}  {kit.counts['layout']}")
         print(f"  light          {kit.light}  {kit.counts['light']}")
         print(f"  colours        {', '.join(kit.palette)}")
