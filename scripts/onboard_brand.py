@@ -27,8 +27,13 @@ prevent. It is read once, for style, by app/creative/refstyle.py.
 
 Usage
 -----
-    python scripts/onboard_brand.py --brand <uuid> --refs <folder|drive-url> \\
-        --products <folder|drive-url> [--dry-run]
+    python scripts/onboard_brand.py --phone <the client's number> \\
+        --kit <brand folder|drive-url> [--dry-run]
+
+The brand folder holds 'references' and 'products'. Name the brand by the
+number the client messages us from; --brand <uuid> is there for the rare
+account with several brands, and --refs/--products still take the two
+sides separately when a kit is laid out some other way.
 
 Either side takes a local folder or a Google Drive folder shared with "anyone
 with the link" (needs GOOGLE_API_KEY). Re-run it whenever the team adds more
@@ -56,13 +61,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.creative import brandkit, photo_quality, refstyle
 from app.creative import logo as logo_analysis
-from app.db.models import Brand, BrandAsset, BrandMemory
+from app.db.models import Account, Brand, BrandAsset, BrandMemory
 from app.db.session import session_scope
 from app.integrations.storage import r2
 from app.memory import embed
@@ -73,6 +78,12 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 PHOTO_KINDS = ("product", "shop", "team", "other")
 
 DRIVE_API = "https://www.googleapis.com/drive/v3/files"
+DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+# One brand, one folder, two folders inside it. The team keeps Drive this way
+# already, so --kit takes the brand folder and finds the sides itself: a
+# designer pastes one link instead of two and cannot swap them over.
+KIT_REFS = ("references", "reference", "refs")
+KIT_PRODUCTS = ("products", "product", "raw", "raw photos")
 DRIVE_FOLDER_IN_URL = re.compile(r"/folders/([A-Za-z0-9_-]{8,})")
 DRIVE_ID_PARAM = re.compile(r"[?&]id=([A-Za-z0-9_-]{8,})")
 DRIVE_PAGE = 200
@@ -220,6 +231,56 @@ def read_folder(spec: str) -> list[SourceFile]:
             continue
         out.append(SourceFile(name=p.name, data=p.read_bytes()))
     return out
+
+
+def _kit_children(spec: str) -> tuple[dict[str, str], bool]:
+    """The folders inside one brand folder, by lower-cased name."""
+    if is_url(spec):
+        if not settings.google_api_key:
+            raise SourceError(
+                "GOOGLE_API_KEY is unset, so a Drive link cannot be read. Set it in .env "
+                "(a plain API key with the Drive API enabled), or download the folder and "
+                "pass the local path instead."
+            )
+        listing = drive_list(drive_folder_id(spec), settings.google_api_key)
+        return {
+            (f.get("name") or "").strip().lower(): f["id"]
+            for f in listing
+            if f.get("mimeType") == DRIVE_FOLDER_MIME
+        }, True
+    root = Path(spec).expanduser()
+    if not root.is_dir():
+        raise SourceError(f"{root} is not a folder on this machine.")
+    return {p.name.strip().lower(): str(p) for p in root.iterdir() if p.is_dir()}, False
+
+
+def split_kit(spec: str) -> tuple[str, str, str]:
+    """One brand folder -> the two sides of its kit, and what was chosen.
+
+    The team's Drive is one folder per brand with 'references' and 'products'
+    inside it, so asking for the brand folder is asking for what they have.
+    Two links typed on one line are two chances to pass the client's raw
+    photographs as our own finished creatives, and that mistake is expensive:
+    a finished post filed as a product photo is a picture the system builds a
+    new post ON TOP of, so the client's first creative goes out carrying two
+    headlines and two logos.
+    """
+    children, is_drive = _kit_children(spec)
+    picked, chosen = {}, []
+    for side, names in (("refs", KIT_REFS), ("products", KIT_PRODUCTS)):
+        hit = next((n for n in names if n in children), None)
+        if hit is None:
+            inside = ", ".join(sorted(children)) or "nothing"
+            raise SourceError(
+                f"{spec} has no '{names[0]}' folder inside it (it holds: {inside}). "
+                f"--kit wants one folder per brand with '{KIT_REFS[0]}' and "
+                f"'{KIT_PRODUCTS[0]}' in it; pass --refs and --products yourself if "
+                "the kit is laid out some other way."
+            )
+        target = children[hit]
+        picked[side] = f"https://drive.google.com/drive/folders/{target}" if is_drive else target
+        chosen.append(f"{side} <- {hit}")
+    return picked["refs"], picked["products"], ", ".join(chosen)
 
 
 def read_source(spec: str) -> list[SourceFile]:
@@ -593,9 +654,65 @@ def _report(plan: Plan, what: str) -> None:
         print("  nothing")
 
 
+def brand_for_phone(db, phone: str) -> tuple[uuid.UUID | None, str]:
+    """The brand behind a WhatsApp number, or why there isn't one.
+
+    Nobody on the team knows a brand by its uuid. They know the client by the
+    number the client messages us from, which IS the account: the webhook
+    creates one keyed by that number on first contact, and the brand hangs off
+    it. So the command should take what they have and look the rest up.
+
+    Compared on digits alone, because a number is written +91 98765 43210 by a
+    person and 919876543210 by Meta, and a kit refused over a space is a kit
+    loaded late.
+    """
+    digits = re.sub(r"\D", "", phone)
+    if not digits:
+        return None, f"--phone {phone!r} holds no digits."
+    acct = db.scalar(
+        select(Account).where(func.regexp_replace(Account.wa_phone, r"\D", "", "g") == digits)
+    )
+    if acct is None:
+        return None, (
+            f"no account for {digits}. A client's number becomes an account the first "
+            "time they message the bot, so their kit can only be loaded after they have "
+            "said hello -- check the number, or wait for their first message."
+        )
+    brands = db.scalars(
+        select(Brand).where(Brand.account_id == acct.id).order_by(Brand.created_at)
+    ).all()
+    if not brands:
+        return None, f"account {digits} exists but has no brand yet."
+    if len(brands) == 1:
+        return brands[0].id, ""
+    default = [b for b in brands if b.is_default]
+    if len(default) == 1:
+        return default[0].id, ""
+    listing = "\n".join(f"    {b.id}  {b.name}" for b in brands)
+    return None, (
+        f"{digits} has {len(brands)} brands and no single default one. Pass --brand "
+        f"with the one you mean:\n{listing}"
+    )
+
+
 async def run(args: argparse.Namespace) -> int:
-    brand_id = uuid.UUID(args.brand)
+    refs, products = args.refs, args.products
+    if args.kit:
+        try:
+            refs, products, chosen = split_kit(args.kit)
+        except SourceError as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 2
+        print(f"Kit: {chosen}")
+
     with session_scope() as db:
+        if args.brand:
+            brand_id = uuid.UUID(args.brand)
+        else:
+            brand_id, why = brand_for_phone(db, args.phone)
+            if brand_id is None:
+                print(why, file=sys.stderr)
+                return 2
         brand = db.get(Brand, brand_id)
         if brand is None:
             print(f"no brand {brand_id}", file=sys.stderr)
@@ -606,8 +723,8 @@ async def run(args: argparse.Namespace) -> int:
         earlier, unreadable_anchors = earlier_references(db, brand_id)
 
     try:
-        product_files = read_source(args.products) if args.products else []
-        reference_files = read_source(args.refs) if args.refs else []
+        product_files = read_source(products) if products else []
+        reference_files = read_source(refs) if refs else []
     except SourceError as exc:
         print(f"{exc}", file=sys.stderr)
         return 2
@@ -745,22 +862,31 @@ def main() -> int:
         description="Seed a brand from our team's reference creatives and the client's "
         "raw product photos. Staff only.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Both --refs and --products take a local folder or a Google Drive folder "
-        "shared 'anyone with the link'. Safe to re-run: files already stored are skipped.",
+        epilog="Name the brand by --phone (the number the client messages us from) or "
+        "--brand (its uuid). Give the kit as one --kit brand folder holding 'references' "
+        "and 'products', or as --refs and --products separately. Either takes a local "
+        "folder or a Google Drive folder shared 'anyone with the link'. Safe to re-run: "
+        "files already stored are skipped.",
     )
-    ap.add_argument("--brand", required=True, help="brands.id (uuid)")
+    who = ap.add_mutually_exclusive_group(required=True)
+    who.add_argument("--phone", help="the client's WhatsApp number, however it is written")
+    who.add_argument("--brand", help="brands.id (uuid), when a number has several brands")
+    ap.add_argument("--kit", help="ONE brand folder holding 'references' and 'products'")
     ap.add_argument("--refs", help="folder or Drive link: finished creatives OUR team made")
     ap.add_argument("--products", help="folder or Drive link: raw photos of the real products")
     ap.add_argument(
         "--dry-run", action="store_true", help="report what would happen, write nothing"
     )
     args = ap.parse_args()
-    if not args.refs and not args.products:
-        ap.error("give at least one of --refs and --products")
-    try:
-        uuid.UUID(args.brand)
-    except ValueError:
-        ap.error(f"--brand {args.brand} is not a uuid")
+    if args.kit and (args.refs or args.products):
+        ap.error("--kit already names both sides; drop --refs and --products")
+    if not args.kit and not args.refs and not args.products:
+        ap.error("give --kit, or at least one of --refs and --products")
+    if args.brand:
+        try:
+            uuid.UUID(args.brand)
+        except ValueError:
+            ap.error(f"--brand {args.brand} is not a uuid")
     return asyncio.run(run(args))
 
 

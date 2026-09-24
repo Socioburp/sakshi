@@ -439,6 +439,105 @@ class _Drive:
         return _Resp(payload={"files": listing})
 
 
+class _DriveTree:
+    """Several public Drive folders at once, faked at the HTTP layer: a brand
+    folder that lists sub-folders, and each side that lists its own files."""
+
+    def __init__(self, folders: dict[str, list[dict]]):
+        self.folders = folders
+
+    def __call__(self, timeout=None):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, params=None):
+        q = (params or {}).get("q", "")
+        folder = q.split("'")[1] if "'" in q else ""
+        return _Resp(payload={"files": self.folders.get(folder, [])})
+
+
+def _sub(name, fid):
+    return {"id": fid, "name": name, "mimeType": onboard.DRIVE_FOLDER_MIME}
+
+
+def test_one_brand_folder_gives_both_sides(tmp_path):
+    """The team keeps Drive as one folder per brand. Asking a designer to
+    paste two links is asking them to swap them, and a finished creative filed
+    as a product photo is a picture the system builds a new post ON TOP of."""
+    (tmp_path / "Anaya Foods" / "references").mkdir(parents=True)
+    (tmp_path / "Anaya Foods" / "products").mkdir(parents=True)
+
+    refs, products, chosen = onboard.split_kit(str(tmp_path / "Anaya Foods"))
+
+    assert refs.endswith("references") and products.endswith("products")
+    assert "refs <- references" in chosen and "products <- products" in chosen
+
+
+def test_a_brand_folder_takes_the_names_the_team_actually_types(tmp_path):
+    """'Reference' and 'Product', singular and capitalised, are the same two
+    folders to a person, so they are the same two folders here."""
+    (tmp_path / "kit" / "Reference").mkdir(parents=True)
+    (tmp_path / "kit" / "Product").mkdir(parents=True)
+
+    refs, products, _ = onboard.split_kit(str(tmp_path / "kit"))
+
+    assert refs.endswith("Reference") and products.endswith("Product")
+
+
+def test_a_brand_folder_missing_a_side_names_what_is_there(tmp_path):
+    """Refusing is right -- importing half a kit silently leaves the brand
+    without its photo lane -- but the refusal has to say what to fix."""
+    (tmp_path / "kit" / "references").mkdir(parents=True)
+    (tmp_path / "kit" / "raw photos are here").mkdir(parents=True)
+
+    with pytest.raises(onboard.SourceError) as exc:
+        onboard.split_kit(str(tmp_path / "kit"))
+
+    assert "products" in str(exc.value)
+    assert "raw photos are here" in str(exc.value), "say what the folder does hold"
+
+
+def test_a_brand_folder_of_loose_files_is_not_a_kit(tmp_path):
+    """Someone who put the images straight in the brand folder gets told so,
+    not an empty import that looks like it worked."""
+    (tmp_path / "kit").mkdir()
+    (tmp_path / "kit" / "post1.jpg").write_bytes(b"x")
+
+    with pytest.raises(onboard.SourceError) as exc:
+        onboard.split_kit(str(tmp_path / "kit"))
+
+    assert "references" in str(exc.value)
+
+
+def test_a_drive_brand_folder_gives_both_sides(monkeypatch):
+    """The same thing over Drive, through the real listing query."""
+    monkeypatch.setattr(onboard.settings, "google_api_key", "k" * 30)
+    monkeypatch.setattr(
+        onboard.httpx,
+        "Client",
+        _DriveTree({"1AbC_defGHIjkl": [_sub("products", "PID"), _sub("references", "RID")]}),
+    )
+
+    refs, products, _ = onboard.split_kit(DRIVE_URL)
+
+    assert refs.endswith("/folders/RID")
+    assert products.endswith("/folders/PID")
+
+
+def test_a_drive_brand_folder_with_no_key_says_so(monkeypatch):
+    monkeypatch.setattr(onboard.settings, "google_api_key", "")
+
+    with pytest.raises(onboard.SourceError) as exc:
+        onboard.split_kit(DRIVE_URL)
+
+    assert "GOOGLE_API_KEY" in str(exc.value)
+
+
 def test_a_drive_folder_and_a_local_folder_import_the_same_way(tmp_path, monkeypatch):
     files = {
         "coconut_oil-500ml.jpg": _image(),
@@ -924,7 +1023,9 @@ def _folders_the_right_way_round(monkeypatch, refs_dir):
 def _run_args(tmp_path, dry_run):
     products = _folder(tmp_path / "p", {"coconut_oil-500ml.jpg": _image()})
     refs = _folder(tmp_path / "r", {"post1.jpg": _image(colour=(90, 120, 100))})
-    return argparse.Namespace(brand=BRAND, refs=refs, products=products, dry_run=dry_run)
+    return argparse.Namespace(
+        brand=BRAND, phone=None, kit=None, refs=refs, products=products, dry_run=dry_run
+    )
 
 
 async def test_a_brand_with_no_model_still_gets_its_photos_and_is_told_why_not_the_style(
@@ -1073,7 +1174,9 @@ async def test_a_re_run_decides_the_kit_from_the_whole_set_not_from_the_new_file
 
     refs = tmp_path / "r"
     _folder(refs, {f"old{i}.jpg": _image(colour=(200 - i * 10, 180, 160)) for i in range(3)})
-    args = argparse.Namespace(brand=BRAND, refs=str(refs), products=None, dry_run=False)
+    args = argparse.Namespace(
+        brand=BRAND, phone=None, kit=None, refs=str(refs), products=None, dry_run=False
+    )
     queued[:] = ["frame_card"] * 3
     _folders_the_right_way_round(monkeypatch, refs)
     assert await onboard.run(args) == 0

@@ -280,3 +280,88 @@ def test_a_style_anchor_is_written_once_per_reference(brand):
         )
         assert len(rows) == 1
         assert rows[0].meta["layout"] == "lower_third"
+
+
+# --------------------------------------------------------------------------- #
+# naming a brand by the number the client messages us from
+# --------------------------------------------------------------------------- #
+def _account_with_brands(names, phone):
+    from app.db.models import Account, Brand
+    from app.db.session import session_scope
+
+    with session_scope() as db:
+        acct = Account(wa_phone=phone, credits_balance=10)
+        db.add(acct)
+        db.flush()
+        made = []
+        for i, name in enumerate(names):
+            row = Brand(account_id=acct.id, name=name, is_default=(i == 0))
+            db.add(row)
+            db.flush()
+            made.append(row.id)
+        return made
+
+
+def test_the_number_the_client_messages_us_from_finds_their_brand(db_ready):
+    """Nobody on the team knows a brand by its uuid. They know the client by
+    their number, which IS the account: the webhook creates one keyed by it on
+    first contact, so the kit can be named the way the team thinks."""
+    from app.db.session import session_scope
+    from scripts import onboard_brand as onboard
+
+    digits = f"9199{uuid.uuid4().int % 10**8:08d}"
+    (made,) = _account_with_brands(["Anaya Foods"], digits)
+
+    with session_scope() as db:
+        found, why = onboard.brand_for_phone(db, digits)
+
+    assert found == made and why == ""
+
+
+def test_the_number_is_found_however_a_person_writes_it(db_ready):
+    """A person types +91 98765 43210 and Meta sends 919876543210. A kit
+    refused over a space is a kit loaded late."""
+    from app.db.session import session_scope
+    from scripts import onboard_brand as onboard
+
+    digits = f"9198{uuid.uuid4().int % 10**8:08d}"
+    (made,) = _account_with_brands(["Kadamba Sweets"], digits)
+    typed = f"+{digits[:2]} {digits[2:7]} {digits[7:]}"
+
+    with session_scope() as db:
+        found, why = onboard.brand_for_phone(db, typed)
+
+    assert found == made, why
+
+
+def test_a_number_that_has_never_messaged_us_says_why_not(db_ready):
+    """The kit can only be loaded after the client has said hello, because
+    there is no account before that. Say that, rather than 'not found'."""
+    from app.db.session import session_scope
+    from scripts import onboard_brand as onboard
+
+    with session_scope() as db:
+        found, why = onboard.brand_for_phone(db, "919000000000")
+
+    assert found is None
+    assert "message" in why.lower(), why
+
+
+def test_a_number_with_two_brands_and_no_default_asks_which(db_ready):
+    """Guessing here would seed the wrong brand with another brand's look,
+    and nothing downstream would notice. Name them and stop."""
+    from app.db.models import Brand
+    from app.db.session import session_scope
+    from scripts import onboard_brand as onboard
+
+    digits = f"9197{uuid.uuid4().int % 10**8:08d}"
+    made = _account_with_brands(["Anaya Foods", "Anaya Cafe"], digits)
+    with session_scope() as db:
+        db.get(Brand, made[0]).is_default = False
+
+    with session_scope() as db:
+        found, why = onboard.brand_for_phone(db, digits)
+
+    assert found is None
+    assert all(str(b) in why for b in made), "name both, so the operator can choose"
+    assert "--brand" in why

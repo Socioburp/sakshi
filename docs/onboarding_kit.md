@@ -69,36 +69,57 @@ anything a client rejected.
 
 ## The command
 
-From the repo, with the app's environment loaded:
+Keep Drive as one folder per brand, with two folders inside it:
 
 ```
-python scripts/onboard_brand.py --brand <brand-uuid> \
-    --refs  ./kits/anaya/references \
-    --products ./kits/anaya/products
+SocioBurp / Anaya Foods / references     <- 5-10 creatives our designers made
+SocioBurp / Anaya Foods / products       <- 8-15 of the client's raw photos
 ```
 
-Or straight from Drive, with no downloading:
+Then one line does the whole kit. Name the client by the number they message
+us from, and point at the brand folder:
 
 ```
-python scripts/onboard_brand.py --brand <brand-uuid> \
-    --refs  "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUv" \
-    --products "https://drive.google.com/drive/folders/1ZyXwVuTsRqPoNmLkJiHgF"
+python scripts/onboard_brand.py --phone "+91 98765 43210" \
+    --kit "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUv"
 ```
 
-Either side can be a local folder or a Drive link, and you can mix them. Add
-`--dry-run` to see exactly what would happen and write nothing.
+A local folder works the same way:
+
+```
+python scripts/onboard_brand.py --phone "+91 98765 43210" --kit ./kits/anaya
+```
+
+Add `--dry-run` to see exactly what would happen and write nothing. Run that
+first, every time.
+
+The number is matched on its digits, so write it however you like: `+91 98765
+43210`, `9198765 43210` and `919876543210` are the same client. If that number
+has more than one brand and none is the default, the command lists them and
+stops rather than guessing, and you re-run with `--brand <uuid>` from the list.
+
+**The client must have messaged the bot first.** Their number becomes an
+account on first contact, and the brand hangs off that account, so there is
+nothing to attach a kit to until they have said hello. In practice: they
+message, they finish the short setup, then we load the kit the same day.
+
+**If a kit is laid out some other way**, name the two sides yourself and skip
+`--kit` entirely:
+
+```
+python scripts/onboard_brand.py --phone "+91 98765 43210" \
+    --refs ./anywhere/refs --products ./anywhere/photos
+```
 
 **Before a Drive link will work:**
 
 - `GOOGLE_API_KEY` must be set in the environment (a plain Google API key with
-  the Drive API enabled — there is no sign-in and no service account).
-- The folder must be shared **Anyone with the link → Viewer**. Open it in
-  Drive → Share → General access → Anyone with the link. If it is not, the
-  command says so and stops without importing anything.
-- Point it at the folder the files are *in*. Sub-folders are not read.
-
-You need the brand's id. It is the `brands.id` column — the same uuid that
-appears in the admin view and in the R2 paths for that brand.
+  the Drive API enabled -- there is no sign-in and no service account).
+- The folder must be shared **Anyone with the link -> Viewer**. Share the top
+  folder once and every brand folder beneath it inherits it.
+- `--kit` reads the brand folder to find the two inside it, and each side is
+  then read for files. Nothing deeper is read, so keep the images directly in
+  `references` and `products`.
 
 ---
 
