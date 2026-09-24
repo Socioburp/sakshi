@@ -1806,7 +1806,16 @@ async def _final_check(
     w, h = brief.pixel_size()
     started = brief.template_for(slide)
     copy = _copy_for_gate(brief, slide, brand_snapshot)
-    looked_at = lane != "mock"
+    # The mock draws a gradient for tests and local development, so there is no
+    # model output to judge. That is the background gate's exemption, and this
+    # is keyed on the same thing IT is keyed on: the image provider this run is
+    # configured with. It used to be keyed on the LANE, and "recomposed",
+    # "brand_asset", "product_studio" and "reused" are not provider names --
+    # so in a wholly mocked run (CI, or a developer with IMAGEGEN_PROVIDER=mock
+    # and no ANTHROPIC_API_KEY) every revision and every free-lane slide was
+    # sent to an inspector that is not there, died on InspectionUnavailable,
+    # and no revision could be made at all.
+    looked_at = settings.imagegen_provider != "mock"
     spent = 0
     source: dict[str, Any] = {"image": image, "mime": mime, "size": compose.image_size(image)}
     # The subject box is used where the pipeline ALREADY has one, and it is

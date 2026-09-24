@@ -26,6 +26,11 @@ async def _noop(*a, **k):
     """Retry backoff, skipped: these tests pin the refusal, not the waiting."""
 
 
+# The real inspector, captured before any fixture fakes it, so one test can put
+# it back and prove what a wholly mocked run does with no inspector to call.
+_REAL_INSPECT = finalgate.inspect
+
+
 CANVAS = [1080, 1350]
 FULL = [0, 0, 1080, 1350]
 # split_card's measured window at ordinary copy length (probe, 4:5 post).
@@ -988,9 +993,37 @@ async def test_the_switch_turns_the_whole_check_off(world, monkeypatch):
 async def test_the_mock_provider_is_not_sent_to_the_inspector(world, monkeypatch):
     """Exactly as the background gate exempts it: the mock draws a gradient for
     local development and there is no model output to judge."""
+    monkeypatch.setattr(pipeline.settings, "imagegen_provider", "mock")
     world["provider"].name = "mock"
     res = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
     assert res["ok"] and world["inspected"] == []
+
+
+async def test_a_mocked_run_can_still_make_a_revision(world, monkeypatch):
+    """The whole stack mocked and the REAL inspector in place: CI, and every
+    developer with IMAGEGEN_PROVIDER=mock and no ANTHROPIC_API_KEY.
+
+    The exemption used to be keyed on the lane string, and a revision's lane is
+    "recomposed" -- never a provider name -- so it was never exempt: the slide
+    asked an inspector that is not configured, InspectionUnavailable came back,
+    nothing caught it, and every revision returned ok=False. The owner-photo,
+    product-studio and reused lanes died the same way, for the same reason."""
+    monkeypatch.setattr(pipeline.settings, "imagegen_provider", "mock")
+    monkeypatch.setattr(pipeline.settings, "anthropic_api_key", "")
+    monkeypatch.setattr(finalgate, "inspect", _REAL_INSPECT)
+    world["provider"].name = "mock"
+    assert not finalgate.available(), "the point of this test: no inspector to call"
+
+    first = await pipeline.generate(world["ctx"], CreativeBrief.model_validate(EXAMPLE))
+    assert first["ok"] and first["slides_ok"] == 1
+    res = await pipeline.recompose(
+        world["ctx"],
+        brief_id=uuid.UUID(first["brief_id"]),
+        changes={"cta": "Order today"},
+        owner_request="change the button",
+    )
+    assert res["ok"], res
+    assert world["inspected"] == [], "nobody was asked, because nobody is there"
 
 
 async def test_the_looks_at_a_carousel_happen_at_the_same_time(world, monkeypatch):

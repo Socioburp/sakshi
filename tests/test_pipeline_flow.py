@@ -162,6 +162,12 @@ async def build_world(monkeypatch) -> dict:
     monkeypatch.setattr(pipeline.r2, "public_url", lambda key: f"https://cdn.test/{key}")
     monkeypatch.setattr(pipeline.r2, "get", lambda key: w["blobs"][key][0])
 
+    # The mock exemption is keyed on the RUN's image provider, and conftest
+    # runs the whole suite with IMAGEGEN_PROVIDER=mock. This world generates
+    # pictures from a fake vendor that charges real money, so it says so: every
+    # lane here is inspected, exactly as in production.
+    monkeypatch.setattr(pipeline.settings, "imagegen_provider", w["provider"].name)
+
     # The final composite gate fails closed, exactly as the background gate
     # does, and the fake provider here is not the exempt "mock" -- so without
     # a fake every flow test would (rightly) refuse to deliver anything.
