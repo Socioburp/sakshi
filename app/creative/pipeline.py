@@ -1836,8 +1836,8 @@ async def _final_check(
 
     The order is deliberate and it is about money. First the deterministic
     measurements, which are free. Then up to `composite_free_variants`
-    re-composes of the SAME picture into other layouts, which cost about a
-    second of Chromium each and nothing at the vendor. Only when no
+    re-composes of the SAME picture into other layouts, which cost 3.2-5.6s of
+    Chromium each (measured) and nothing at the vendor. Only when no
     arrangement of the picture they already have is good enough may `buy` be
     called, and only the generated lane passes one: an owner's photograph, a
     studio built from it and a reused background are never replaced with a

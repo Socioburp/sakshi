@@ -143,10 +143,14 @@ class Settings(BaseSettings):
     # creative nobody looked at, which is the hole this closes.
     composite_gate_enabled: bool = True
     # How many times one slide may be re-composed into another layout to fix
-    # what the final check found. Each is ~1s of Chromium and NO vendor call,
-    # which is the point: the owner buys a second picture only when no
-    # arrangement of the one they have is good enough. Two is enough to reach
-    # a layout of the other kind from any starting layout.
+    # what the final check found. Each is a layout measurement and a full
+    # render -- 3.2-5.6s with a warm browser, measured, not the ~1s this
+    # comment used to claim -- and NO vendor call, which is the point: the
+    # owner buys a second picture only when no arrangement of the one they have
+    # is good enough. Two is enough to reach a layout of the other kind from
+    # any starting layout, and only a fault or type driven to its floor opens
+    # the ladder at all (compositeqa.SWEEP_REPAIRS), so a clean card pays none
+    # of this.
     composite_free_variants: int = 2
     # ...and how many corrected regenerations the picture may be worth after
     # that. Only the GENERATED lane ever spends this: an owner's photograph, a
@@ -168,6 +172,14 @@ class Settings(BaseSettings):
     # six-slide carousel adds six, $0.035 ($0.057 worst case). Latency is
     # ~2-5s per call, and slides are already built concurrently, so a carousel
     # pays that once rather than six times.
+    #
+    # The repair ladder costs time rather than money, and only on a slide the
+    # final check objected to: up to composite_free_variants renders that
+    # composed at 3.2-5.6s each, and up to five layouts may be attempted before
+    # two of them compose (a picture generated for one window does not fill
+    # another's), so a repaired slide adds ~10s and at worst ~20s. A slide
+    # whose only blemish is a saturated scrim is NOT repaired, which is what
+    # keeps this off the ordinary path. A carousel pays it concurrently too.
     inspector_input_micros_per_ktok: int = 3000
     inspector_output_micros_per_ktok: int = 15000
     # Seconds of silence after which the owner is told the job is still going.

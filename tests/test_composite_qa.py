@@ -290,10 +290,20 @@ def test_an_export_that_is_not_the_post_size_is_a_fault():
 # --------------------------------------------------------------------------- #
 # the repairs: worth another template, never a refusal on their own
 # --------------------------------------------------------------------------- #
-def test_a_gradient_standing_at_its_cap_asks_for_a_variant_but_ships():
+def test_a_gradient_standing_at_its_cap_is_reported_but_never_re_renders_the_slide():
+    """It ships, and on its own it does not even buy a second look at itself.
+    A scrim at its cap is on nearly every ordinary frame that sets words over a
+    photograph -- an ordinary centred product photo reports it on poster_stack
+    and on lower_third with no fault at all -- and a variant is a full render,
+    3.2-5.6s. Two of those on a deliverable card, for a gradient that is ugly
+    rather than wrong, is latency the owner pays for nothing."""
     a = compositeqa.assess(_report(boost=legibility.MAX_BOOST), template="centered_overlay")
     assert a.metrics.scrim_saturated and a.repairs == ["scrim_saturated"]
-    assert a.ok and a.worth_a_variant
+    assert a.ok and not a.worth_a_variant
+    # ...but it still costs the frame points, so a variant built for some other
+    # reason can beat it on that, and the inspector can still name it.
+    assert a.score < 100
+    assert compositeqa.order_for("centered_overlay", {"scrim_saturated"})[0] == "split_card"
 
 
 def test_a_plate_at_its_cap_counts_as_saturated_too():
@@ -713,12 +723,34 @@ def _ladder(available: dict[str, compositeqa.Variant]):
 
 
 async def test_a_clean_slide_is_never_re_composed():
-    """The ladder costs a second of Chromium per rung. A slide with nothing
-    wrong with it does not pay for one."""
+    """A rung is a full render, 3.2-5.6s. A slide with nothing wrong with it
+    does not pay for one."""
     render, asked = _ladder({})
     first = _variant("centered_overlay", 100)
     out = await compositeqa.best_free_variant(first, render)
     assert out is first and asked == []
+
+
+async def test_a_deliverable_slide_with_a_saturated_scrim_is_not_re_rendered():
+    """The ordinary frame, and the reason this matters: an ordinary owner
+    photograph on poster_stack or lower_third reports a scrim at its cap with
+    no fault at all. That used to open the ladder, so every such slide paid ~9s
+    of Chromium to be told the frame it already had was the best one."""
+    clean_but_grey = compositeqa.Assessment(repairs=["scrim_saturated"], score=92)
+    first = compositeqa.Variant("poster_stack", b"png", b"jpeg", {}, clean_but_grey)
+    render, asked = _ladder({"split_card": _variant("split_card", 95)})
+    out = await compositeqa.best_free_variant(first, render)
+    assert out is first and asked == [], "nothing was re-rendered"
+
+
+async def test_type_driven_to_its_floor_still_opens_the_ladder():
+    """The repair that IS worth a render: the owner can read small type off the
+    card, and another layout usually sets it bigger."""
+    shrunk = compositeqa.Assessment(repairs=["headline_at_floor"], score=78)
+    first = compositeqa.Variant("centered_overlay", b"png", b"jpeg", {}, shrunk)
+    render, asked = _ladder({"split_card": _variant("split_card", 95)})
+    out = await compositeqa.best_free_variant(first, render)
+    assert out.template == "split_card" and asked
 
 
 async def test_a_fault_a_layout_change_fixes_is_fixed_by_a_layout_change():

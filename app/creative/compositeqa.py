@@ -75,6 +75,18 @@ FAULTS = (
     "export_size_wrong",
 )
 REPAIRS = ("headline_at_floor", "type_shrunk", "scrim_saturated")
+# ...and which of them are worth re-rendering the slide for. A scrim standing
+# at its cap is not: it is on nearly every ordinary frame that sets words over
+# a photograph -- measured on an ordinary centred product photograph,
+# poster_stack and lower_third both report it with no fault at all -- and a
+# variant is a full render, 3.2-5.6s on this machine, not the second this
+# ladder was first described with. So a perfectly deliverable card was being
+# re-composed twice, ~9s, for a gradient that is ugly rather than wrong. It
+# still counts against the score, so a variant built for another reason can
+# still beat it on it, and the inspector can still send the ladder after it by
+# name (text_hard_to_read). Type driven to its floor is different: the owner
+# can read that off the card, and another layout usually fixes it.
+SWEEP_REPAIRS = frozenset({"headline_at_floor", "type_shrunk"})
 
 
 # --------------------------------------------------------------------------- #
@@ -179,8 +191,8 @@ class Assessment:
 
     @property
     def worth_a_variant(self) -> bool:
-        """Worth spending a second of Chromium on another template."""
-        return bool(self.faults or self.repairs)
+        """Worth spending another full render on another template."""
+        return bool(self.faults or (set(self.repairs) & SWEEP_REPAIRS))
 
     def as_dict(self) -> dict:
         return {
@@ -410,9 +422,10 @@ WORDS_OFF_PICTURE = ("split_card", "top_band", "frame_card")
 # Layouts that show the picture full-bleed: the window IS the canvas, so a
 # subject a panel was cutting is whole again.
 WORDS_ON_PICTURE = ("centered_overlay", "lower_third", "poster_stack")
-# How many other templates one slide may be re-composed into. Each is about a
-# second of Chromium and no vendor call at all; two is enough to get from any
-# layout to one of the other kind, and keeps a six-slide carousel honest.
+# How many other templates one slide may be re-composed into. Each is a layout
+# measurement and a full render -- 3.2-5.6s on this machine with a warm browser
+# -- and no vendor call at all; two is enough to get from any layout to one of
+# the other kind, and keeps a six-slide carousel honest.
 FREE_VARIANTS = 2
 
 
@@ -490,9 +503,9 @@ async def best_free_variant(
     one the inspector just rejected is not an option.
     """
     if codes is None:
-        codes = set(first.assessment.faults) | set(first.assessment.repairs)
-        if not codes:
+        if not first.assessment.worth_a_variant:
             return first
+        codes = set(first.assessment.faults) | set(first.assessment.repairs)
     best = None if must_change else first
     tried: list[str] = []
     # The limit counts variants that actually COMPOSED, not layouts attempted.
