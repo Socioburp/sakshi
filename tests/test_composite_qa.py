@@ -1468,3 +1468,26 @@ def test_a_measured_fault_corrects_the_prompt_too():
     assert finalgate.CORRECTIONS["text_hard_to_read"] in out
     for code in ("contrast_below_bar", "scrim_saturated", "text_over_subject"):
         assert code in finalgate.CORRECTIONS, code
+
+
+async def test_the_final_gate_writes_down_what_it_saw(monkeypatch, caplog):
+    """A client's creative was refused for "logo_problem" three runs in a row
+    and nobody could say why, because this gate logged the reason CODE and
+    threw away the sentence explaining it. The background gate has always kept
+    its notes; that is how we learned a clock's hour markers were being read as
+    lettering."""
+    import logging
+
+    from app.creative import bggate, finalgate
+
+    async def answered(image, *, prompt="", keys=(), scored=False):
+        return bggate.Verdict(
+            ["logo_problem"], "the wordmark sits on a pale band and cannot be read", score=61
+        )
+
+    monkeypatch.setattr(bggate, "inspect", answered)
+    with caplog.at_level(logging.INFO):
+        await finalgate.inspect(b"jpeg", headline="Hi", brand="Anaya", has_logo=False)
+
+    written = " ".join(r.getMessage() + str(getattr(r, "notes", "")) for r in caplog.records)
+    assert "cannot be read" in written, f"the note was dropped: {written[:200]}"

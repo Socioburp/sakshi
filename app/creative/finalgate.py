@@ -268,10 +268,19 @@ async def inspect(
         keys=KEYS,
         scored=True,
     )
+    # The notes are the whole point of asking a model rather than a ruler: they
+    # say WHAT it saw. The background gate has always logged them -- that line
+    # is how we learned a clock's hour markers were being read as lettering --
+    # and this one dropped them, so a client's creative was refused for
+    # "logo_problem" three times running with nobody able to say why.
+    # has_logo rides along because the same reason means two different things:
+    # a mark that is wrong, or a mark that is not there.
     log.info(
         "final_gate",
         reasons=verdict.reasons,
         score=verdict.score,
+        notes=verdict.notes,
+        has_logo=has_logo,
         cost_micros=verdict.cost_micros,
     )
     return verdict
