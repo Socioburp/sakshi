@@ -1470,15 +1470,19 @@ def test_a_measured_fault_corrects_the_prompt_too():
         assert code in finalgate.CORRECTIONS, code
 
 
-async def test_the_final_gate_writes_down_what_it_saw(monkeypatch, caplog):
+async def test_the_final_gate_writes_down_what_it_saw(monkeypatch):
     """A client's creative was refused for "logo_problem" three runs in a row
     and nobody could say why, because this gate logged the reason CODE and
     threw away the sentence explaining it. The background gate has always kept
     its notes; that is how we learned a clock's hour markers were being read as
     lettering."""
-    import logging
-
     from app.creative import bggate, finalgate
+
+    written: list[dict] = []
+
+    class _Log:
+        def info(self, event, **kw):
+            written.append({"event": event, **kw})
 
     async def answered(image, *, prompt="", keys=(), scored=False):
         return bggate.Verdict(
@@ -1486,8 +1490,46 @@ async def test_the_final_gate_writes_down_what_it_saw(monkeypatch, caplog):
         )
 
     monkeypatch.setattr(bggate, "inspect", answered)
-    with caplog.at_level(logging.INFO):
-        await finalgate.inspect(b"jpeg", headline="Hi", brand="Anaya", has_logo=False)
+    monkeypatch.setattr(finalgate, "log", _Log())
+    await finalgate.inspect(b"jpeg", headline="Hi", brand="Anaya", has_logo=True)
 
-    written = " ".join(r.getMessage() + str(getattr(r, "notes", "")) for r in caplog.records)
-    assert "cannot be read" in written, f"the note was dropped: {written[:200]}"
+    line = next(r for r in written if r["event"] == "final_gate")
+    assert line["notes"] == "the wordmark sits on a pale band and cannot be read"
+    assert line["has_logo"] is True, "the same reason means two things; say which"
+
+
+async def test_a_brand_with_no_logo_still_gets_their_post(monkeypatch):
+    """The owner's rule, in their own words: "if the logo is not there you
+    should create the image regardless."
+
+    One real client had every creative refused for logo_problem, run after
+    run, over a mark that does not exist. No logo they have not uploaded will
+    ever satisfy an inspector asking to see one, so that refusal was permanent
+    rather than corrective -- the brand could never receive anything."""
+    from app.creative import bggate, finalgate
+
+    async def objects(image, *, prompt="", keys=(), scored=False):
+        return bggate.Verdict(["logo_problem"], "no logo is visible", score=61)
+
+    monkeypatch.setattr(bggate, "inspect", objects)
+
+    absent = await finalgate.inspect(b"jpeg", brand="Anaya", has_logo=False)
+    present = await finalgate.inspect(b"jpeg", brand="Anaya", has_logo=True)
+
+    assert absent.reasons == [] and absent.ok, "a mark they do not have cannot refuse the card"
+    assert present.reasons == ["logo_problem"], "a mark they DO have is still judged"
+
+
+async def test_a_real_fault_still_refuses_a_brand_with_no_logo(monkeypatch):
+    """Dropping the logo complaint must not become a way past the gate. Every
+    other objection stands exactly as it did."""
+    from app.creative import bggate, finalgate
+
+    async def objects(image, *, prompt="", keys=(), scored=False):
+        return bggate.Verdict(["logo_problem", "text_cut_off"], "the headline is clipped", score=40)
+
+    monkeypatch.setattr(bggate, "inspect", objects)
+
+    verdict = await finalgate.inspect(b"jpeg", brand="Anaya", has_logo=False)
+
+    assert verdict.reasons == ["text_cut_off"] and not verdict.ok

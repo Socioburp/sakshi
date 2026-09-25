@@ -268,6 +268,23 @@ async def inspect(
         keys=KEYS,
         scored=True,
     )
+    # A brand with no logo still gets their post. The owner's rule, in their
+    # own words: "if the logo is not there you should create the image
+    # regardless." One real client had every creative refused for
+    # logo_problem, run after run, over a mark that does not exist -- and no
+    # logo they have not uploaded will ever satisfy an inspector asking to see
+    # one, so the refusal was permanent rather than corrective.
+    #
+    # This drops the complaint, it does not ignore the mark. The compositor
+    # guarantees the wordmark by construction, before any model is asked: it
+    # is sized from the canvas (compose.logo_box), held above its own contrast
+    # bar (legibility.bar_for("logo")) and refused outright if it would be
+    # clipped. Those guarantees are measured on the rendered frame and do not
+    # depend on anyone's opinion. What is dropped here is a second opinion
+    # about a thing we already prove.
+    if not has_logo and "logo_problem" in verdict.reasons:
+        verdict.reasons = [r for r in verdict.reasons if r != "logo_problem"]
+        log.info("final_gate_logo_absent", notes=verdict.notes, score=verdict.score)
     # The notes are the whole point of asking a model rather than a ruler: they
     # say WHAT it saw. The background gate has always logged them -- that line
     # is how we learned a clock's hour markers were being read as lettering --
