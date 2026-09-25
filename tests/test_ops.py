@@ -127,3 +127,20 @@ def test_the_gradient_stand_in_is_fine_off_production(monkeypatch):
     body = _ready(monkeypatch, env="dev", imagegen_provider="mock")
 
     assert body["ok"] is True
+
+
+def test_the_service_says_which_commit_it_is_running(monkeypatch):
+    """Without this there is no way to tell a fixed service from an unfixed one
+    from outside, and "is the deploy live yet" gets answered by guessing from
+    behaviour. Render sets RENDER_GIT_COMMIT on every deploy."""
+    import importlib
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "40f1e94abcdef0123456")
+    from app import main
+
+    importlib.reload(main)
+    try:
+        assert main.COMMIT == "40f1e94abcde"
+    finally:
+        monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+        importlib.reload(main)

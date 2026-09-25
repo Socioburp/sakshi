@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -41,10 +42,17 @@ app.include_router(ig_webhook_router)
 app.include_router(billing_router)
 
 
+# The commit this process is actually running. Render sets RENDER_GIT_COMMIT on
+# every deploy. Without it there is no way to tell a fixed service from an
+# unfixed one from the outside: a whole afternoon went into asking "is the
+# deploy live yet" and answering it by guessing from behaviour.
+COMMIT = os.getenv("RENDER_GIT_COMMIT", "")[:12] or "unknown"
+
+
 @app.get("/health")
 async def health() -> dict:
     """Liveness only. Render pings this; it must not depend on Postgres."""
-    return {"ok": True, "service": "sakshi", "env": settings.env}
+    return {"ok": True, "service": "sakshi", "env": settings.env, "commit": COMMIT}
 
 
 def _probe() -> dict[str, str]:
