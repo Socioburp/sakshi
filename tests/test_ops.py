@@ -144,3 +144,24 @@ def test_the_service_says_which_commit_it_is_running(monkeypatch):
     finally:
         monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
         importlib.reload(main)
+
+
+def test_the_in_flight_guard_gives_up_before_the_refund_reaper_does():
+    """A deploy restarted the worker mid-generation, the row stayed
+    "generating", and every request that brand made for the next 45 minutes was
+    refused in 8 milliseconds by a job that no longer existed. The guard that
+    exists to stop a SECOND job had stopped the FIRST one too.
+
+    The guard's clock is how long a job could still honestly be working. The
+    reaper's is deliberately far longer, and borrowing it here was the bug."""
+    from app.creative import pipeline
+
+    for slides in (1, 6):
+        window = pipeline.in_flight_window(slides)
+        quoted = pipeline.working_window(slides)[1]
+
+        assert window.total_seconds() > quoted, "a job still working must not be declared dead"
+        assert window < pipeline.STUCK_AFTER, (
+            f"{slides} slide(s): the guard holds for {window}, which is not shorter than the "
+            f"refund reaper's {pipeline.STUCK_AFTER}"
+        )

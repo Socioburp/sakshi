@@ -192,6 +192,11 @@ class Settings(BaseSettings):
     inspector_output_micros_per_ktok: int = 15000
     # Seconds of silence after which the owner is told the job is still going.
     # A metric to watch and a message to send -- never a limit on the output.
+    # A worker that has just started owns no creative, so anything still
+    # "generating" is a corpse from the last deploy: fail it and give the
+    # credit back. Turn OFF if you ever raise the worker's numInstances, or a
+    # second worker's live job gets failed out from under it.
+    worker_reaps_on_start: bool = True
     slow_notice_s: int = 60
     # How a carousel reaches the owner. "ordered": slides are held until the set
     # is done and sent 1..N, so the chat reads in order and the set can be

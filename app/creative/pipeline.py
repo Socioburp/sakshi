@@ -372,6 +372,17 @@ def claim_gate(brief: CreativeBrief, brand: Any) -> dict[str, Any] | None:
     }
 
 
+# Past this a job cannot still be working, whatever its row says: the honest
+# ceiling the chat quoted the owner, plus a margin for the compositor, the
+# upload and a slow reply from WhatsApp.
+IN_FLIGHT_MARGIN_S = 120
+
+
+def in_flight_window(slides: int) -> timedelta:
+    """How long a job of this size could still legitimately be running."""
+    return timedelta(seconds=working_window(slides)[1] + IN_FLIGHT_MARGIN_S)
+
+
 def in_flight_gate(db: Any, brand_id: uuid.UUID, slides: int) -> dict | None:
     """One creative at a time, per brand. Returns the tool result to hand
     back, or None when nothing of theirs is being made.
@@ -384,10 +395,18 @@ def in_flight_gate(db: Any, brand_id: uuid.UUID, slides: int) -> dict | None:
     one slow job read as a bot roaming in circles. The queue's dedupe_key only
     ever covered webhook retries of the same inbound message.
 
-    Rows older than STUCK_AFTER belong to the reaper, not to this guard: a job
-    whose worker died must never wedge the brand out of making another.
+    A row is only in flight while a job could still honestly be working on it.
+    That window is the time the chat QUOTED the owner plus a margin -- not
+    STUCK_AFTER, which is the refund reaper's clock and is deliberately far
+    longer than any real job.
+
+    Using the reaper's 45 minutes here was a live outage. A deploy restarted
+    the worker mid-generation, the row stayed "generating" for ever, and every
+    request that brand made for the next three quarters of an hour was refused
+    in 8 milliseconds by a ghost -- no picture was even attempted. The guard
+    that exists to stop a SECOND job starting had stopped the FIRST one too.
     """
-    row = repo.in_flight_creative(db, brand_id, datetime.now(UTC) - STUCK_AFTER)
+    row = repo.in_flight_creative(db, brand_id, datetime.now(UTC) - in_flight_window(slides))
     if row is None:
         return None
     low, high = working_minutes(slides)
@@ -1539,6 +1558,42 @@ def reap_stuck_creatives(now: datetime | None = None) -> int:
                 )
     if failed:
         log.warning("creatives_reaped", failed=failed)
+    return failed
+
+
+def reap_orphaned_creatives() -> int:
+    """Fail every creative still "in flight" when a worker starts up.
+
+    A process that has just started owns none of them. Render restarts this
+    service on every deploy, and a SIGKILL in the middle of a generation left a
+    row saying "generating" for ever: the owner kept their debit, and -- once
+    one-creative-at-a-time landed -- every request that brand made was refused
+    in 8 milliseconds by a job that no longer existed. A deploy quietly took a
+    client off the air.
+
+    ASSUMES ONE WORKER INSTANCE, which is what render.yaml runs. Raise
+    numInstances and this must be turned off (WORKER_REAPS_ON_START=false),
+    because a second worker's live job would be failed out from under it.
+    """
+    failed = 0
+    with session_scope() as db:
+        rows = db.scalars(
+            select(Creative).where(Creative.status.in_(("pending", "generating", "composing")))
+        ).all()
+        for c in rows:
+            c.status, c.error = "failed", "worker restarted mid-generation"
+            failed += 1
+            if c.billed:
+                brief = db.get(Brief, c.brief_id)
+                credits.refund(
+                    db,
+                    account_id=brief.account_id,
+                    amount=credits.cost_of("generate_creative"),
+                    reason="worker_restart",
+                    idempotency_key=f"refund:orphan:{c.id}",
+                )
+    if failed:
+        log.warning("creatives_orphaned", failed=failed)
     return failed
 
 

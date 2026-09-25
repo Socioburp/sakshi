@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import or_, update
 
+from app.config import settings
 from app.db.models import Job
 from app.db.session import session_scope
 from app.logging import get_logger
@@ -165,6 +166,12 @@ async def run_once() -> bool:
     return True
 
 
+def _reap_orphans() -> int:
+    from app.creative.pipeline import reap_orphaned_creatives
+
+    return reap_orphaned_creatives()
+
+
 def _reap_creatives() -> int:
     """Creatives stuck mid-generation after a crash: fail them, refund what was billed."""
     from app.creative.pipeline import reap_stuck_creatives
@@ -212,6 +219,13 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _stop.set)
     log.info("worker_started", handlers=sorted(HANDLERS))
+    if settings.worker_reaps_on_start:
+        # Before taking a single job: a deploy killed whatever was generating,
+        # and until that row is closed the brand cannot start anything new.
+        try:
+            await asyncio.to_thread(_reap_orphans)
+        except Exception:  # noqa: BLE001 - never let this stop the worker starting
+            log.exception("orphan_reap_failed")
     last_promote = last_reap = last_sweep = 0.0
     while not _stop.is_set():
         last_promote, last_reap, last_sweep = await housekeeping(
